@@ -1,0 +1,7 @@
+{
+  "name": "AeroDrop AI",
+  "description": "安全、跨设备的 P2P 文件传输工具，通过简单的口令或链接实现即时文件分享。",
+  "requestFramePermissions": [
+    "clipboard-read"
+  ]
+}
