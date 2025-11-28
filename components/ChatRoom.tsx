@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { ChatMessage, P2PMessage } from '../types';
 import { Send, Paperclip, Copy, LogOut, Users, Loader2, MessageCircle } from 'lucide-react';
@@ -16,6 +16,35 @@ const AVATAR_COLORS = [
   'bg-fuchsia-500', 'bg-pink-500', 'bg-rose-500'
 ];
 
+const SESSION_KEY = 'aerodrop_chat_session';
+
+// Custom component to render dice dots without border
+const DiceAvatar: React.FC<{ value: number }> = ({ value }) => {
+  const dots = [];
+  // Coordinates on a 100x100 grid
+  const tl = { cx: 25, cy: 25 }, tr = { cx: 75, cy: 25 };
+  const cl = { cx: 25, cy: 50 }, cc = { cx: 50, cy: 50 }, cr = { cx: 75, cy: 50 };
+  const bl = { cx: 25, cy: 75 }, br = { cx: 75, cy: 75 };
+
+  switch (value) {
+    case 1: dots.push(cc); break;
+    case 2: dots.push(tl, br); break;
+    case 3: dots.push(tl, cc, br); break;
+    case 4: dots.push(tl, tr, bl, br); break;
+    case 5: dots.push(tl, tr, cc, bl, br); break;
+    case 6: dots.push(tl, tr, cl, cr, bl, br); break;
+    default: dots.push(cc);
+  }
+
+  return (
+    <svg viewBox="0 0 100 100" className="w-full h-full p-1.5" fill="currentColor">
+      {dots.map((d, i) => (
+        <circle key={i} cx={d.cx} cy={d.cy} r="10" />
+      ))}
+    </svg>
+  );
+};
+
 export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const [mode, setMode] = useState<'menu' | 'hosting' | 'joining' | 'chatting'>('menu');
   const [roomCode, setRoomCode] = useState('');
@@ -31,29 +60,65 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const connectionsRef = useRef<DataConnection[]>([]); // For Host: list of guests. For Guest: list containing host.
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      leaveRoom();
-    };
-  }, []);
+  const hostRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Restore session on mount
+  useEffect(() => {
+    const restoreSession = () => {
+      try {
+        const saved = localStorage.getItem(SESSION_KEY);
+        if (saved) {
+          const { code, host } = JSON.parse(saved);
+          if (code) {
+             console.log("Restoring chat session:", code, host ? "HOST" : "GUEST");
+             if (host) {
+                 startHosting(code, true);
+             } else {
+                 joinChat(code);
+             }
+          }
+        }
+      } catch (e) {
+        console.error("Failed to restore session", e);
+        localStorage.removeItem(SESSION_KEY);
+      }
+    };
+    
+    restoreSession();
+    
+    return () => {
+      if (hostRetryTimeoutRef.current) clearTimeout(hostRetryTimeoutRef.current);
+      // We do NOT call leaveRoom() here to persist across refreshes
+      // Cleanup is handled by the manual Leave button or actual unload if needed
+      if (peerRef.current) {
+          peerRef.current.destroy();
+      }
+    };
+  }, []);
+
   const generateMessageId = () => Math.random().toString(36).substring(2, 9);
 
-  const getColorForUserId = (userId: string) => {
-      if (userId === 'system') return 'bg-slate-400';
+  const getUserAvatar = (userId: string) => {
+      if (userId === 'system') return { color: 'bg-slate-400', diceValue: 1 };
+      
       let hash = 0;
       for (let i = 0; i < userId.length; i++) {
           hash = userId.charCodeAt(i) + ((hash << 5) - hash);
       }
-      const index = Math.abs(hash) % AVATAR_COLORS.length;
-      return AVATAR_COLORS[index];
+      
+      const colorIndex = Math.abs(hash) % AVATAR_COLORS.length;
+      // Use a slightly different hash calc for dice to decorrelate from color
+      const diceValue = (Math.abs(Math.floor(hash / 3)) % 6) + 1;
+
+      return {
+          color: AVATAR_COLORS[colorIndex],
+          diceValue: diceValue
+      };
   };
 
   const addSystemMessage = (text: string) => {
@@ -68,12 +133,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   };
 
   const leaveRoom = () => {
+    // Explicitly remove session
+    localStorage.removeItem(SESSION_KEY);
+
     connectionsRef.current.forEach(conn => conn.close());
     connectionsRef.current = [];
     if (peerRef.current) {
       peerRef.current.destroy();
       peerRef.current = null;
     }
+    if (hostRetryTimeoutRef.current) clearTimeout(hostRetryTimeoutRef.current);
+    
     setMessages([]);
     setMode('menu');
     setRoomCode('');
@@ -84,11 +154,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
   // --- Hosting Logic ---
   const handleCreateRoom = () => {
-    setIsConnecting(true);
     // Generate 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
+    startHosting(code);
+  };
+
+  const startHosting = (code: string, isRestoring = false) => {
+    setIsConnecting(true);
     setRoomCode(code);
     setIsHost(true);
+
+    if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(`aerodrop-chat-${code}`, {
       config: {
@@ -100,10 +176,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
 
     peer.on('open', (id) => {
-      console.log('Chat Room Created:', id);
+      console.log('Chat Room Ready:', id);
       setMode('chatting');
       setIsConnecting(false);
-      addSystemMessage(`房间已创建，口令: ${code}`);
+      
+      // Save session
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ code, host: true }));
+      
+      if (!isRestoring) {
+          addSystemMessage(`房间已创建，口令: ${code}`);
+      } else {
+          addSystemMessage('已恢复聊天室会话');
+      }
     });
 
     peer.on('connection', (conn) => {
@@ -112,8 +196,23 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
     peer.on('error', (err) => {
       console.error(err);
-      onNotification('创建房间失败，口令可能冲突', 'error');
-      setIsConnecting(false);
+      if (err.type === 'unavailable-id') {
+          if (isRestoring) {
+              console.log("ID taken (likely previous session), retrying...");
+              // If restoring, the ID might still be held by the server from the previous page load.
+              // Retry until we get it back.
+              hostRetryTimeoutRef.current = setTimeout(() => {
+                  startHosting(code, true);
+              }, 1500);
+              return;
+          }
+          onNotification('创建房间失败，口令冲突，请重试', 'error');
+          setIsConnecting(false);
+          setMode('menu');
+      } else {
+          onNotification(`连接服务错误: ${err.type}`, 'error');
+          setIsConnecting(false);
+      }
     });
 
     peerRef.current = peer;
@@ -122,9 +221,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   // --- Joining Logic ---
   const handleJoinRoom = () => {
     if (inputCode.length !== 6) return;
+    joinChat(inputCode);
+  };
+
+  const joinChat = (code: string) => {
     setIsConnecting(true);
     setIsHost(false);
-    setRoomCode(inputCode);
+    setRoomCode(code);
+
+    if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer({
        config: {
@@ -136,7 +241,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
 
     peer.on('open', () => {
-      const conn = peer.connect(`aerodrop-chat-${inputCode}`);
+      const conn = peer.connect(`aerodrop-chat-${code}`);
       setupConnection(conn);
     });
 
@@ -145,6 +250,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       onNotification('连接房间失败，请检查口令', 'error');
       setIsConnecting(false);
       setMode('menu');
+      localStorage.removeItem(SESSION_KEY); // Invalid session
     });
 
     peerRef.current = peer;
@@ -156,14 +262,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       connectionsRef.current.push(conn);
       setOnlineCount(prev => prev + 1);
       
+      // Save session if we are guest (Host saves on open)
       if (!isHost) {
         setMode('chatting');
         setIsConnecting(false);
+        localStorage.setItem(SESSION_KEY, JSON.stringify({ code: roomCode, host: false }));
         addSystemMessage('已加入聊天室');
-      } else {
-        // Host notifies others about new user (simplified: just updates count via broadcast logic if we had full state sync)
-        // For now, just a local system message for host
-        // addSystemMessage('新用户加入');
       }
     });
 
@@ -194,9 +298,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     conn.on('close', () => {
       connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
       setOnlineCount(prev => Math.max(1, prev - 1));
-      if (!isHost && connectionsRef.current.length === 0) {
-          onNotification('房主已离开，房间关闭', 'info');
-          leaveRoom();
+      
+      if (!isHost) {
+          // If we are guest and host disconnects
+          // Check if we manually left (session removed) or host dropped
+          if (localStorage.getItem(SESSION_KEY)) {
+              // Host dropped, keep UI but show disconnected
+               addSystemMessage('房主已断开连接，等待重连...');
+               // Optional: Auto-rejoin logic could go here
+               // For now, allow user to stay and see history, or leave
+          }
       }
     });
   };
@@ -375,8 +486,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                   );
               }
 
-              const avatarColor = getColorForUserId(msg.senderId);
-              const senderInitial = msg.senderId.slice(0, 2).toUpperCase();
+              const { color: avatarColor, diceValue } = getUserAvatar(msg.senderId);
               const nickname = msg.senderId.slice(-4); // Use last 4 chars as nickname
 
               return (
@@ -385,8 +495,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                       {!isMe && (
                         <div className="w-8 flex-shrink-0 flex flex-col items-center mr-2 self-end">
                              {!isConsecutive ? (
-                                <div className={`w-8 h-8 rounded-full ${avatarColor} flex items-center justify-center text-white text-[10px] font-bold shadow-sm`}>
-                                    {senderInitial}
+                                <div className={`w-8 h-8 rounded-full ${avatarColor} flex items-center justify-center text-white shadow-sm overflow-hidden`}>
+                                    <DiceAvatar value={diceValue} />
                                 </div>
                              ) : <div className="w-8" />} {/* Spacer */}
                         </div>
