@@ -1,3 +1,4 @@
+
 export enum TransferState {
   IDLE = 'IDLE',
   CONFIGURING = 'CONFIGURING',
@@ -29,7 +30,7 @@ export interface ChunkPayload {
 }
 
 export interface P2PMessage {
-  type: 'METADATA' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER';
+  type: 'METADATA' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE';
   payload?: any;
 }
 
@@ -49,4 +50,21 @@ export interface User {
   id: string;
   email: string;
   name?: string;
+}
+
+// Chat Interfaces
+export interface ChatMessage {
+  id: string;
+  senderId: string; // 'me' or peerId
+  senderName?: string;
+  type: 'text' | 'image' | 'file';
+  content?: string; // Text content
+  fileData?: {
+    name: string;
+    size: number;
+    mimeType: string;
+    data: string; // Base64
+  };
+  timestamp: number;
+  isSystem?: boolean;
 }

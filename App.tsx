@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
-import { Share, DownloadCloud, Zap, Bell } from 'lucide-react';
+import { ChatRoom } from './components/ChatRoom';
+import { Share, DownloadCloud, Zap, Bell, MessageCircle } from 'lucide-react';
 import { AppNotification } from './types';
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'send' | 'receive'>('send');
+  const [mode, setMode] = useState<'send' | 'receive' | 'chat'>('send');
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [initialCode, setInitialCode] = useState<string>('');
 
@@ -29,12 +30,20 @@ const App: React.FC = () => {
     }, 4000);
   };
 
+  const getNavBackgroundStyle = () => {
+      switch(mode) {
+          case 'send': return 'translate-x-0';
+          case 'receive': return 'translate-x-[100%]';
+          case 'chat': return 'translate-x-[200%]';
+      }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-[100dvh] bg-slate-50 flex flex-col">
       {/* Toast Notifications */}
-      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+      <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 z-50 flex flex-col gap-2 pointer-events-none">
         {notifications.map(n => (
-          <div key={n.id} className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border animate-slide-in ${
+          <div key={n.id} className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border animate-pop-in ${
             n.type === 'success' ? 'bg-white border-green-200 text-slate-800' : 
             n.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' : 
             'bg-white border-slate-200 text-slate-800'
@@ -46,63 +55,75 @@ const App: React.FC = () => {
       </div>
 
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
           <div className="flex items-center gap-2 cursor-pointer" onClick={() => setMode('send')}>
-            <div className="bg-brand-600 p-2 rounded-lg text-white">
-              <Zap size={20} fill="currentColor" />
+            <div className="bg-brand-600 p-1.5 md:p-2 rounded-lg text-white">
+              <Zap size={18} fill="currentColor" className="md:w-5 md:h-5" />
             </div>
-            <h1 className="text-xl font-bold text-slate-900 tracking-tight">AeroDrop</h1>
+            <h1 className="text-lg md:text-xl font-bold text-slate-900 tracking-tight">AeroDrop</h1>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col items-center justify-start pt-8 pb-12 px-4">
+      <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
         
-        {/* Toggle Switch */}
-        <div className="bg-white p-1.5 rounded-2xl border border-slate-200 shadow-sm mb-8 flex relative">
-          <button
-            onClick={() => setMode('send')}
-            className={`flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-bold transition-all duration-200 ${
-              mode === 'send' 
-                ? 'bg-brand-600 text-white shadow-md' 
-                : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            <Share size={18} />
-            发送文件
-          </button>
-          <button
-            onClick={() => setMode('receive')}
-            className={`flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-bold transition-all duration-200 ${
-              mode === 'receive' 
-                ? 'bg-brand-600 text-white shadow-md' 
-                : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            <DownloadCloud size={18} />
-            接收文件
-          </button>
+        {/* Navigation Tabs - Sliding Animation */}
+        <div className="w-full max-w-xl mb-6 relative z-10">
+            <div className="bg-white p-1 rounded-xl border border-slate-200 shadow-sm grid grid-cols-3 relative">
+              {/* Sliding Background */}
+              <div 
+                  className={`absolute top-1 left-1 bottom-1 w-[calc((100%-0.5rem)/3)] bg-brand-600 rounded-lg shadow-md transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
+              ></div>
+
+              <button
+                onClick={() => setMode('send')}
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                  mode === 'send' ? 'text-white' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                <Share size={16} />
+                发送
+              </button>
+              <button
+                onClick={() => setMode('receive')}
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                  mode === 'receive' ? 'text-white' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                <DownloadCloud size={16} />
+                接收
+              </button>
+              <button
+                onClick={() => setMode('chat')}
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                  mode === 'chat' ? 'text-white' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                <MessageCircle size={16} />
+                聊天
+              </button>
+            </div>
         </div>
 
-        {/* Component View */}
-        <div className="w-full animate-fade-in-up">
-          {/* 
-            关键修改：使用 CSS 类 (hidden/block) 控制显示，而不是条件渲染 ({mode === ... && ...})。
-            这样即使切换到 Receive 界面，Sender 组件仍然挂载在 DOM 中，PeerJS 连接保持活跃。
-          */}
-          <div className={mode === 'send' ? 'block' : 'hidden'}>
+        {/* Component View with 3D Flip Effect */}
+        <div className="w-full flex-1 flex flex-col perspective-[2000px]">
+          {/* We use hidden/block instead of conditional rendering to keep PeerJS connections alive (Send mode) */}
+          <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
             <Sender onNotification={addNotification} />
           </div>
-          <div className={mode === 'receive' ? 'block' : 'hidden'}>
+          <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
             <Receiver initialCode={initialCode} onNotification={addNotification} />
+          </div>
+          <div className={`${mode === 'chat' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+            <ChatRoom onNotification={addNotification} />
           </div>
         </div>
         
-        <div className="mt-12 text-center max-w-md mx-auto space-y-2">
-          <p className="text-xs text-slate-400">
-            Powered by WebRTC. 文件直接在设备间点对点传输，不经过云端存储。
+        <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
+          <p className="text-[10px] md:text-xs text-slate-400">
+            Powered by WebRTC. 数据直接在设备间点对点传输，不经过云端存储。 @Tianzora
           </p>
         </div>
       </main>

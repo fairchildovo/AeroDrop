@@ -467,7 +467,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       )}
 
       {state === TransferState.WAITING_FOR_PEER && (
-         <div className="flex flex-col items-center py-10">
+         <div className="flex flex-col items-center py-10 animate-pop-in">
            <Loader2 size={40} className="animate-spin text-brand-500 mb-4" />
            <p className="text-slate-600 font-medium">正在连接发送方...</p>
            {retryCountRef.current > 0 && (
@@ -483,7 +483,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       )}
 
       {(state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && metadata && (
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-6">
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 animate-slide-up">
            <div className="flex items-start gap-4 mb-6">
               <div className="w-12 h-12 bg-white rounded-lg shadow-sm border border-slate-100 flex items-center justify-center text-slate-500 shrink-0">
                  {metadata.preview && metadata.type.startsWith('image/') ? (
@@ -530,11 +530,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                   <span>下载中</span>
                   <span>{progress}%</span>
                </div>
-               <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden shadow-inner">
+               <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden shadow-inner relative">
                  <div 
-                   className="bg-brand-500 h-full rounded-full transition-all duration-300" 
+                   className="bg-brand-500 h-full rounded-full transition-all duration-300 relative overflow-hidden" 
                    style={{ width: `${progress}%` }}
-                 ></div>
+                 >
+                     {/* Shimmer effect overlay */}
+                     <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer" style={{ backgroundSize: '200% 100%' }}></div>
+                 </div>
                </div>
                
                <div className="flex justify-between items-center text-xs text-slate-500 pt-1">
@@ -553,7 +556,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       )}
 
       {state === TransferState.COMPLETED && (
-        <div className="text-center py-8">
+        <div className="text-center py-8 animate-pop-in">
           <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
             <HardDriveDownload size={36} />
           </div>
@@ -572,7 +575,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       )}
 
       {state === TransferState.ERROR && (
-        <div className="text-center py-8">
+        <div className="text-center py-8 animate-pop-in">
            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
              <AlertCircle size={32} />
            </div>

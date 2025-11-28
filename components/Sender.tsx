@@ -283,7 +283,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       if (e.dataTransfer && e.dataTransfer.files.length > 0) {
         const files = Array.from(e.dataTransfer.files);
         if (files.length > 1) {
-            zipMultipleFiles(files);
+            zipMultipleFiles(Array.from(files));
         } else {
             setFolderContent([]); // Clear folder content for single file drop
             processFile(files[0]);
@@ -665,7 +665,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   if (isCompressing) {
       return (
-          <div className="max-w-xl mx-auto p-12 bg-white rounded-2xl shadow-xl border border-slate-100 flex flex-col items-center justify-center text-center">
+          <div className="w-full max-w-xl mx-auto p-8 md:p-12 bg-white rounded-2xl shadow-xl border border-slate-100 flex flex-col items-center justify-center text-center">
               <Loader2 size={48} className="animate-spin text-brand-500 mb-6" />
               <h3 className="text-xl font-bold text-slate-800">正在打包文件...</h3>
               <p className="text-slate-500 mt-2">如果是大文件，这可能需要一点时间</p>
@@ -674,7 +674,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   }
 
   return (
-    <div className="max-w-xl mx-auto p-6 bg-white rounded-2xl shadow-xl border border-slate-100">
+    <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white rounded-2xl shadow-xl border border-slate-100">
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-slate-800">发送文件</h2>
         <p className="text-slate-500">点对点加密传输</p>
@@ -685,7 +685,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           onDragOver={handleLocalDragEnter}
           onDragEnter={handleLocalDragEnter}
           onDragLeave={handleLocalDragLeave}
-          className={`relative border-2 border-dashed rounded-xl p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 group ${
+          className={`relative border-2 border-dashed rounded-xl p-8 md:p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 group ${
             isDragOver 
               ? 'border-brand-500 bg-brand-50 scale-[1.02] shadow-xl' 
               : 'border-slate-300 hover:border-brand-400 hover:bg-slate-50'
@@ -710,10 +710,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           />
           
           <div className={`w-16 h-16 bg-brand-50 text-brand-600 rounded-full flex items-center justify-center mb-4 transition-transform duration-300 ${isDragOver ? 'scale-110 rotate-12' : 'group-hover:scale-110'}`}>
-            <Upload size={32} className={isDragOver ? 'animate-bounce' : ''} />
+            <Upload size={32} className={isDragOver ? 'animate-float text-brand-600' : 'text-brand-500'} />
           </div>
           <p className={`text-lg font-medium transition-colors ${isDragOver ? 'text-brand-700' : 'text-slate-700'}`}>
-            {isDragOver ? '松开以添加文件' : '点击或拖拽文件到这里'}
+            {isDragOver ? '松开以添加文件' : '点击上传或拖拽文件'}
           </p>
           <p className="text-sm text-slate-400 mt-2 mb-4">支持任意格式，可多选</p>
 
@@ -732,7 +732,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
       {state === TransferState.CONFIGURING && file && (
          <div className="space-y-6">
-            <div className="bg-slate-50 p-4 rounded-xl flex items-center gap-4 border border-slate-100 animate-slide-in">
+            <div className="bg-slate-50 p-4 rounded-xl flex items-center gap-4 border border-slate-100 animate-slide-up">
                <div className="w-12 h-12 bg-white rounded-lg border border-slate-200 flex items-center justify-center shadow-sm shrink-0">
                    {getFileIcon(file.name, file.type)}
                </div>
@@ -766,7 +766,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                              setEditedName(metadata?.name || ''); 
                              setIsEditingName(true); 
                          }}
-                         className="text-slate-400 hover:text-brand-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                         className="text-slate-400 hover:text-brand-600 md:opacity-0 md:group-hover:opacity-100 transition-opacity"
                          title="重命名"
                       >
                          <Pencil size={14} />
@@ -783,7 +783,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             
             {/* Folder Content List */}
             {folderContent.length > 0 && (
-                <div className="border border-slate-200 rounded-lg overflow-hidden transition-all">
+                <div className="border border-slate-200 rounded-lg overflow-hidden transition-all animate-slide-up">
                     <button 
                         onClick={() => setShowFileList(!showFileList)}
                         className="w-full px-4 py-2 bg-slate-50 flex items-center justify-between text-sm font-medium text-slate-700 hover:bg-slate-100 transition-colors"
@@ -841,14 +841,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 </div>
 
                 {errorMsg && (
-                    <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 p-2 rounded">
+                    <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 p-2 rounded animate-pop-in">
                         <AlertCircle size={14} /> {errorMsg}
                     </div>
                 )}
 
                 <button 
                   onClick={startSharing}
-                  className="w-full bg-brand-600 text-white font-bold py-3 rounded-lg hover:bg-brand-700 transition-all shadow-lg shadow-brand-200 active:scale-[0.98]"
+                  className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-lg hover:bg-brand-700 transition-all shadow-lg shadow-brand-200 active:scale-[0.98]"
                 >
                   创建分享链接
                 </button>
@@ -857,7 +857,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       )}
 
       {state === TransferState.GENERATING_CODE && (
-          <div className="py-12 flex flex-col items-center justify-center text-center">
+          <div className="py-12 flex flex-col items-center justify-center text-center animate-pop-in">
               <Loader2 size={48} className="animate-spin text-brand-500 mb-4" />
               <h3 className="text-lg font-bold text-slate-800">正在注册网络节点...</h3>
               <p className="text-slate-500 text-sm mt-2">请稍候，这通常需要几秒钟</p>
@@ -865,11 +865,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       )}
 
       {(state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && (
-        <div className="text-center space-y-6">
+        <div className="text-center space-y-6 animate-pop-in">
            <div className="relative inline-block">
               <div 
                 onClick={handleCopyCode}
-                className={`text-6xl font-mono font-bold tracking-widest px-8 py-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 select-none flex items-center justify-center gap-4 group active:scale-95 ${
+                className={`text-5xl md:text-6xl font-mono font-bold tracking-widest px-6 md:px-8 py-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 select-none flex items-center justify-center gap-4 group active:scale-95 ${
                   copied 
                   ? 'bg-green-100 border-green-300 text-green-700 scale-105' 
                   : 'bg-brand-50 border-brand-100 text-brand-600 hover:bg-brand-100'
@@ -878,7 +878,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   {transferCode.split('').map((char, i) => (
                       <span key={i}>{char}</span>
                   ))}
-                  <div className={`absolute -right-8 top-1/2 -translate-y-1/2 transition-all duration-300 ${copied ? 'opacity-0 scale-50' : 'opacity-0 group-hover:opacity-100'}`}>
+                  <div className={`absolute -right-8 top-1/2 -translate-y-1/2 transition-all duration-300 hidden md:block ${copied ? 'opacity-0 scale-50' : 'opacity-0 group-hover:opacity-100'}`}>
                       <Copy size={20} className="text-brand-400" />
                   </div>
               </div>
@@ -910,12 +910,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
            <p className="text-slate-500">对方在“接收文件”处输入此口令</p>
 
-           <div className="flex items-center justify-center gap-6 text-sm text-slate-600 bg-slate-50 py-3 rounded-lg">
+           <div className="flex flex-col md:flex-row items-center justify-center gap-4 md:gap-6 text-sm text-slate-600 bg-slate-50 py-3 rounded-lg">
                <div className="flex items-center gap-2">
                    <Clock size={16} className="text-brand-500" />
                    <span>有效期: {remainingTime}</span>
                </div>
-               <div className="w-px h-4 bg-slate-300"></div>
+               <div className="hidden md:block w-px h-4 bg-slate-300"></div>
                <div>
                    状态: <span className="font-bold text-brand-600">
                        {connectionStatus || (
@@ -936,7 +936,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
            <button 
              onClick={stopSharing}
-             className="w-full bg-red-50 text-red-600 font-bold py-3 rounded-lg hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2 active:scale-[0.98]"
+             className="w-full bg-red-50 text-red-600 font-bold py-3.5 rounded-lg hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2 active:scale-[0.98]"
            >
              <X size={18} /> 停止分享
            </button>
@@ -944,7 +944,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       )}
 
       {state === TransferState.COMPLETED && (
-          <div className="text-center py-8">
+          <div className="text-center py-8 animate-pop-in">
               <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-bounce">
                 <Check size={40} />
               </div>
@@ -961,7 +961,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       )}
 
       {state === TransferState.ERROR && (
-          <div className="text-center py-8">
+          <div className="text-center py-8 animate-pop-in">
               <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
                 <AlertCircle size={32} />
               </div>
