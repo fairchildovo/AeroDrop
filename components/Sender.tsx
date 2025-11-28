@@ -658,26 +658,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       if (type.startsWith('audio/')) return <FileAudio size={32} className="text-yellow-500" />;
       if (type.startsWith('text/') || ['js','ts','tsx','json','html','css'].includes(ext || '')) return <FileCode size={32} className="text-blue-500" />;
       if (['zip','rar','7z','tar','gz'].includes(ext || '')) return <FileArchive size={32} className="text-orange-500" />;
-      if (['exe','msi','bat','sh','bin'].includes(ext || '')) return <Package size={32} className="text-slate-600" />;
+      if (['exe','msi','bat','sh','bin'].includes(ext || '')) return <Package size={32} className="text-slate-600 dark:text-slate-400" />;
       
       return <FileIcon size={32} className="text-slate-400" />;
   };
 
   if (isCompressing) {
       return (
-          <div className="w-full max-w-xl mx-auto p-8 md:p-12 bg-white rounded-2xl shadow-xl border border-slate-100 flex flex-col items-center justify-center text-center">
+          <div className="w-full max-w-xl mx-auto p-8 md:p-12 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 flex flex-col items-center justify-center text-center transition-colors">
               <Loader2 size={48} className="animate-spin text-brand-500 mb-6" />
-              <h3 className="text-xl font-bold text-slate-800">正在打包文件...</h3>
-              <p className="text-slate-500 mt-2">如果是大文件，这可能需要一点时间</p>
+              <h3 className="text-xl font-bold text-slate-800 dark:text-white">正在打包文件...</h3>
+              <p className="text-slate-500 dark:text-slate-400 mt-2">如果是大文件，这可能需要一点时间</p>
           </div>
       );
   }
 
   return (
-    <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white rounded-2xl shadow-xl border border-slate-100">
+    <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
       <div className="text-center mb-6">
-        <h2 className="text-2xl font-bold text-slate-800">发送文件</h2>
-        <p className="text-slate-500">点对点加密传输</p>
+        <h2 className="text-2xl font-bold text-slate-800 dark:text-white">发送文件</h2>
+        <p className="text-slate-500 dark:text-slate-400">点对点加密传输</p>
       </div>
 
       {state === TransferState.IDLE && (
@@ -687,8 +687,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           onDragLeave={handleLocalDragLeave}
           className={`relative border-2 border-dashed rounded-xl p-8 md:p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 group ${
             isDragOver 
-              ? 'border-brand-500 bg-brand-50 scale-[1.02] shadow-xl' 
-              : 'border-slate-300 hover:border-brand-400 hover:bg-slate-50'
+              ? 'border-brand-500 bg-brand-50 dark:bg-slate-700 scale-[1.02] shadow-xl' 
+              : 'border-slate-300 dark:border-slate-600 hover:border-brand-400 hover:bg-slate-50 dark:hover:bg-slate-800/50'
           }`}
         >
           <input 
@@ -709,17 +709,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
              onChange={handleFolderSelect}
           />
           
-          <div className={`w-16 h-16 bg-brand-50 text-brand-600 rounded-full flex items-center justify-center mb-4 transition-transform duration-300 ${isDragOver ? 'scale-110 rotate-12' : 'group-hover:scale-110'}`}>
-            <Upload size={32} className={isDragOver ? 'animate-float text-brand-600' : 'text-brand-500'} />
+          <div className={`w-16 h-16 bg-brand-50 dark:bg-slate-700 text-brand-600 dark:text-brand-400 rounded-full flex items-center justify-center mb-4 transition-transform duration-300 ${isDragOver ? 'scale-110 rotate-12' : 'group-hover:scale-110'}`}>
+            <Upload size={32} className={isDragOver ? 'animate-float text-brand-600 dark:text-brand-400' : 'text-brand-500 dark:text-brand-400'} />
           </div>
-          <p className={`text-lg font-medium transition-colors ${isDragOver ? 'text-brand-700' : 'text-slate-700'}`}>
+          <p className={`text-lg font-medium transition-colors ${isDragOver ? 'text-brand-700 dark:text-brand-300' : 'text-slate-700 dark:text-slate-200'}`}>
             {isDragOver ? '松开以添加文件' : '点击上传或拖拽文件'}
           </p>
           <p className="text-sm text-slate-400 mt-2 mb-4">支持任意格式，可多选</p>
 
           <label 
              htmlFor="folder-upload" 
-             className="z-10 bg-white border border-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-medium hover:bg-slate-50 hover:text-brand-600 hover:border-brand-200 transition-colors flex items-center gap-2 cursor-pointer shadow-sm active:scale-95"
+             className="z-10 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 px-4 py-2 rounded-full text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-brand-600 dark:hover:text-brand-400 hover:border-brand-200 transition-colors flex items-center gap-2 cursor-pointer shadow-sm active:scale-95"
              onClick={(e) => e.stopPropagation()} // Prevent triggering parent click
           >
               <Folder size={14} /> 选择文件夹
@@ -732,8 +732,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
       {state === TransferState.CONFIGURING && file && (
          <div className="space-y-6">
-            <div className="bg-slate-50 p-4 rounded-xl flex items-center gap-4 border border-slate-100 animate-slide-up">
-               <div className="w-12 h-12 bg-white rounded-lg border border-slate-200 flex items-center justify-center shadow-sm shrink-0">
+            <div className="bg-slate-50 dark:bg-slate-900 p-4 rounded-xl flex items-center gap-4 border border-slate-100 dark:border-slate-800 animate-slide-up">
+               <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center shadow-sm shrink-0">
                    {getFileIcon(file.name, file.type)}
                </div>
                
@@ -744,7 +744,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                          type="text" 
                          value={editedName}
                          onChange={(e) => setEditedName(e.target.value)}
-                         className="flex-1 p-1 px-2 text-sm border border-brand-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500"
+                         className="flex-1 p-1 px-2 text-sm border border-brand-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100"
                          autoFocus
                          onKeyDown={(e) => {
                              if(e.key === 'Enter') handleSaveName();
@@ -760,7 +760,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     </div>
                   ) : (
                     <div className="flex items-center gap-2 group">
-                      <h4 className="font-bold text-slate-800 truncate" title={metadata?.name}>{metadata?.name}</h4>
+                      <h4 className="font-bold text-slate-800 dark:text-white truncate" title={metadata?.name}>{metadata?.name}</h4>
                       <button 
                          onClick={() => { 
                              setEditedName(metadata?.name || ''); 
@@ -773,7 +773,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                       </button>
                     </div>
                   )}
-                  <p className="text-xs text-slate-500">{formatFileSize(file.size)}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">{formatFileSize(file.size)}</p>
                </div>
                
                <button onClick={() => setState(TransferState.IDLE)} className="text-slate-400 hover:text-red-500 transition-colors">
@@ -783,19 +783,19 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             
             {/* Folder Content List */}
             {folderContent.length > 0 && (
-                <div className="border border-slate-200 rounded-lg overflow-hidden transition-all animate-slide-up">
+                <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden transition-all animate-slide-up">
                     <button 
                         onClick={() => setShowFileList(!showFileList)}
-                        className="w-full px-4 py-2 bg-slate-50 flex items-center justify-between text-sm font-medium text-slate-700 hover:bg-slate-100 transition-colors"
+                        className="w-full px-4 py-2 bg-slate-50 dark:bg-slate-900 flex items-center justify-between text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     >
                         <span>包含 {folderContent.length} 个文件</span>
                         {showFileList ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
                     </button>
                     {showFileList && (
-                        <div className="max-h-48 overflow-y-auto bg-white border-t border-slate-100 p-1">
+                        <div className="max-h-48 overflow-y-auto bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700 p-1">
                             {folderContent.map((f, i) => (
-                                <div key={i} className="flex justify-between items-center text-xs py-1.5 px-3 hover:bg-slate-50 rounded group">
-                                    <span className="truncate flex-1 mr-4 text-slate-600 group-hover:text-slate-900" title={f.name}>
+                                <div key={i} className="flex justify-between items-center text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-slate-700 rounded group">
+                                    <span className="truncate flex-1 mr-4 text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white" title={f.name}>
                                         {f.name}
                                     </span>
                                     <span className="text-slate-400 whitespace-nowrap font-mono">{formatFileSize(f.size)}</span>
@@ -808,17 +808,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
             <div className="space-y-4">
                 <div>
-                   <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                   <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-2">
                       <Settings size={16} /> 设置分享选项
                    </label>
                    
                    <div className="grid grid-cols-2 gap-4 mb-4">
                       <div>
-                         <label className="text-xs text-slate-500 mb-1 block">有效期</label>
+                         <label className="text-xs text-slate-500 dark:text-slate-400 mb-1 block">有效期</label>
                          <select 
                             value={expiryOption}
                             onChange={(e) => setExpiryOption(e.target.value)}
-                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-sm focus:border-brand-500 outline-none transition-shadow"
+                            className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:border-brand-500 outline-none transition-shadow text-slate-800 dark:text-slate-100"
                          >
                             <option value="10m">10 分钟</option>
                             <option value="1h">1 小时</option>
@@ -827,28 +827,28 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                          </select>
                       </div>
                       <div>
-                         <label className="text-xs text-slate-500 mb-1 block">自定义口令 (可选)</label>
+                         <label className="text-xs text-slate-500 dark:text-slate-400 mb-1 block">自定义口令 (可选)</label>
                          <input 
                             type="text"
                             inputMode="numeric"
                             placeholder="随机生成"
                             value={customCodeInput}
                             onChange={(e) => handleCustomCodeChange(e.target.value)}
-                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-sm focus:border-brand-500 outline-none font-mono transition-shadow"
+                            className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:border-brand-500 outline-none font-mono transition-shadow text-slate-800 dark:text-slate-100"
                          />
                       </div>
                    </div>
                 </div>
 
                 {errorMsg && (
-                    <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 p-2 rounded animate-pop-in">
+                    <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 dark:bg-red-900/20 p-2 rounded animate-pop-in">
                         <AlertCircle size={14} /> {errorMsg}
                     </div>
                 )}
 
                 <button 
                   onClick={startSharing}
-                  className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-lg hover:bg-brand-700 transition-all shadow-lg shadow-brand-200 active:scale-[0.98]"
+                  className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-lg hover:bg-brand-700 transition-all shadow-lg shadow-brand-200 dark:shadow-none active:scale-[0.98]"
                 >
                   创建分享链接
                 </button>
@@ -859,8 +859,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       {state === TransferState.GENERATING_CODE && (
           <div className="py-12 flex flex-col items-center justify-center text-center animate-pop-in">
               <Loader2 size={48} className="animate-spin text-brand-500 mb-4" />
-              <h3 className="text-lg font-bold text-slate-800">正在注册网络节点...</h3>
-              <p className="text-slate-500 text-sm mt-2">请稍候，这通常需要几秒钟</p>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-white">正在注册网络节点...</h3>
+              <p className="text-slate-500 dark:text-slate-400 text-sm mt-2">请稍候，这通常需要几秒钟</p>
           </div>
       )}
 
@@ -871,8 +871,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 onClick={handleCopyCode}
                 className={`text-5xl md:text-6xl font-mono font-bold tracking-widest px-6 md:px-8 py-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 select-none flex items-center justify-center gap-4 group active:scale-95 ${
                   copied 
-                  ? 'bg-green-100 border-green-300 text-green-700 scale-105' 
-                  : 'bg-brand-50 border-brand-100 text-brand-600 hover:bg-brand-100'
+                  ? 'bg-green-100 border-green-300 text-green-700 dark:bg-green-900/30 dark:border-green-800 dark:text-green-400 scale-105' 
+                  : 'bg-brand-50 border-brand-100 text-brand-600 hover:bg-brand-100 dark:bg-slate-900 dark:border-slate-700 dark:text-brand-400 dark:hover:bg-slate-800'
                 }`}
               >
                   {transferCode.split('').map((char, i) => (
@@ -883,24 +883,24 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   </div>
               </div>
               {copied && (
-                  <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 flex items-center gap-1 text-green-600 text-sm font-medium animate-fade-in-up">
+                  <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 flex items-center gap-1 text-green-600 dark:text-green-400 text-sm font-medium animate-fade-in-up">
                       <Check size={14} /> 已复制
                   </div>
               )}
            </div>
 
            {/* Share Link Section */}
-           <div className={`max-w-xs mx-auto bg-slate-50 p-3 rounded-lg border transition-colors flex items-center gap-2 ${linkCopied ? 'border-green-200 bg-green-50' : 'border-slate-200'}`}>
+           <div className={`max-w-xs mx-auto bg-slate-50 dark:bg-slate-900 p-3 rounded-lg border transition-colors flex items-center gap-2 ${linkCopied ? 'border-green-200 bg-green-50 dark:bg-green-900/20 dark:border-green-800' : 'border-slate-200 dark:border-slate-700'}`}>
               <div className="flex-1 min-w-0">
-                  <div className="text-xs text-slate-400 text-left mb-1">分享链接</div>
-                  <div className="text-sm font-mono text-slate-600 truncate text-left select-all">{shareLink}</div>
+                  <div className="text-xs text-slate-400 dark:text-slate-500 text-left mb-1">分享链接</div>
+                  <div className="text-sm font-mono text-slate-600 dark:text-slate-300 truncate text-left select-all">{shareLink}</div>
               </div>
               <button 
                 onClick={handleCopyLink}
                 className={`p-2 rounded-md transition-all border shadow-sm active:scale-90 ${
                     linkCopied 
-                    ? 'bg-green-100 text-green-600 border-green-200' 
-                    : 'bg-white text-brand-600 border-transparent hover:border-slate-200'
+                    ? 'bg-green-100 text-green-600 border-green-200 dark:bg-green-900/40 dark:text-green-400 dark:border-green-800' 
+                    : 'bg-white text-brand-600 border-transparent hover:border-slate-200 dark:bg-slate-800 dark:text-brand-400 dark:hover:border-slate-600'
                 }`}
                 title="复制链接"
               >
@@ -908,16 +908,16 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               </button>
            </div>
 
-           <p className="text-slate-500">对方在“接收文件”处输入此口令</p>
+           <p className="text-slate-500 dark:text-slate-400">对方在“接收文件”处输入此口令</p>
 
-           <div className="flex flex-col md:flex-row items-center justify-center gap-4 md:gap-6 text-sm text-slate-600 bg-slate-50 py-3 rounded-lg">
+           <div className="flex flex-col md:flex-row items-center justify-center gap-4 md:gap-6 text-sm text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900 py-3 rounded-lg">
                <div className="flex items-center gap-2">
                    <Clock size={16} className="text-brand-500" />
                    <span>有效期: {remainingTime}</span>
                </div>
-               <div className="hidden md:block w-px h-4 bg-slate-300"></div>
+               <div className="hidden md:block w-px h-4 bg-slate-300 dark:bg-slate-700"></div>
                <div>
-                   状态: <span className="font-bold text-brand-600">
+                   状态: <span className="font-bold text-brand-600 dark:text-brand-400">
                        {connectionStatus || (
                           state === TransferState.WAITING_FOR_PEER ? '等待连接...' : 
                           state === TransferState.PEER_CONNECTED ? '已连接' : 
@@ -930,13 +930,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
            {state === TransferState.TRANSFERRING && (
                <div className="flex flex-col items-center gap-2">
                    <Loader2 size={24} className="animate-spin text-brand-500" />
-                   <p className="text-slate-600 font-medium">正在发送文件...</p>
+                   <p className="text-slate-600 dark:text-slate-300 font-medium">正在发送文件...</p>
                </div>
            )}
 
            <button 
              onClick={stopSharing}
-             className="w-full bg-red-50 text-red-600 font-bold py-3.5 rounded-lg hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2 active:scale-[0.98]"
+             className="w-full bg-red-50 text-red-600 font-bold py-3.5 rounded-lg hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2 active:scale-[0.98] dark:bg-red-900/20 dark:text-red-400 dark:border-red-900/30 dark:hover:bg-red-900/40"
            >
              <X size={18} /> 停止分享
            </button>
@@ -945,15 +945,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
       {state === TransferState.COMPLETED && (
           <div className="text-center py-8 animate-pop-in">
-              <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-bounce">
+              <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 animate-bounce dark:bg-green-900/30 dark:text-green-400">
                 <Check size={40} />
               </div>
-              <h3 className="text-2xl font-bold text-slate-800">发送完成</h3>
-              <p className="text-slate-500 mt-2">文件已成功传输给对方。</p>
+              <h3 className="text-2xl font-bold text-slate-800 dark:text-white">发送完成</h3>
+              <p className="text-slate-500 dark:text-slate-400 mt-2">文件已成功传输给对方。</p>
               
               <button 
                 onClick={stopSharing}
-                className="mt-8 px-6 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 transition-colors"
+                className="mt-8 px-6 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 transition-colors dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600"
               >
                 发送新文件
               </button>
@@ -962,14 +962,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
       {state === TransferState.ERROR && (
           <div className="text-center py-8 animate-pop-in">
-              <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+              <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 dark:bg-red-900/30 dark:text-red-400">
                 <AlertCircle size={32} />
               </div>
-              <h3 className="text-lg font-bold text-slate-800">发生错误</h3>
-              <p className="text-slate-500 mt-2 mb-6">{errorMsg}</p>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-white">发生错误</h3>
+              <p className="text-slate-500 dark:text-slate-400 mt-2 mb-6">{errorMsg}</p>
               <button 
                 onClick={stopSharing}
-                className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 font-medium transition-colors"
+                className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 font-medium transition-colors dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600"
               >
                 返回
               </button>

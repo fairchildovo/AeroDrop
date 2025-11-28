@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, ChunkPayload } from '../types';
 import { formatFileSize } from '../services/fileUtils';
-import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileType, FileCode, FileImage, FileAudio, FileVideo, FileArchive, Package, File as FileIcon, ClipboardPaste, X } from 'lucide-react';
+import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileType, FileCode, FileImage, FileAudio, FileVideo, FileArchive, Package, File as FileIcon, ClipboardPaste, X, FolderOpen } from 'lucide-react';
 
 interface ReceiverProps {
   initialCode?: string;
@@ -386,16 +386,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (type.startsWith('audio/')) return <FileAudio size={24} className="text-yellow-500" />;
       if (type.startsWith('text/') || ['js','ts','tsx','json','html','css'].includes(ext || '')) return <FileCode size={24} className="text-blue-500" />;
       if (['zip','rar','7z','tar','gz'].includes(ext || '')) return <FileArchive size={24} className="text-orange-500" />;
-      if (['exe','msi','bat','sh','bin'].includes(ext || '')) return <Package size={24} className="text-slate-600" />;
+      if (['exe','msi','bat','sh','bin'].includes(ext || '')) return <Package size={24} className="text-slate-600 dark:text-slate-400" />;
       
       return <FileIcon size={24} className="text-slate-400" />;
   };
 
   return (
-    <div className="max-w-xl mx-auto p-6 bg-white rounded-2xl shadow-xl border border-slate-100">
+    <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
       <div className="text-center mb-6">
-        <h2 className="text-2xl font-bold text-slate-800">接收文件</h2>
-        <p className="text-slate-500">输入 4 位口令</p>
+        <h2 className="text-2xl font-bold text-slate-800 dark:text-white">接收文件</h2>
+        <p className="text-slate-500 dark:text-slate-400">输入 4 位口令</p>
       </div>
 
       {state === TransferState.IDLE && (
@@ -405,10 +405,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                {[0, 1, 2, 3].map((i) => (
                  <div 
                    key={i} 
-                   className={`w-14 h-16 border-2 rounded-xl flex items-center justify-center text-3xl font-bold font-mono transition-all duration-200 bg-white ${
+                   className={`w-14 h-16 border-2 rounded-xl flex items-center justify-center text-3xl font-bold font-mono transition-all duration-200 ${
                       code[i] 
-                        ? 'border-brand-500 text-brand-600 shadow-sm' 
-                        : 'border-slate-200 text-slate-300'
+                        ? 'border-brand-500 text-brand-600 dark:text-brand-400 shadow-sm bg-white dark:bg-slate-700' 
+                        : 'border-slate-200 dark:border-slate-600 text-slate-300 dark:text-slate-600 bg-white dark:bg-slate-700'
                    }`}
                  >
                    {code[i] || ''}
@@ -437,7 +437,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                <button
                  key={num}
                  onClick={() => handleDigitClick(num.toString())}
-                 className="h-16 rounded-xl bg-slate-50 text-slate-700 text-2xl font-semibold hover:bg-slate-100 active:bg-slate-200 transition-colors shadow-sm border border-slate-100"
+                 className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 active:bg-slate-200 dark:active:bg-slate-500 transition-colors shadow-sm border border-slate-100 dark:border-slate-600"
                >
                  {num}
                </button>
@@ -445,20 +445,20 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
              <button
                onClick={handlePaste}
                title="粘贴"
-               className="h-16 rounded-xl bg-blue-50 text-brand-600 flex items-center justify-center hover:bg-blue-100 transition-colors shadow-sm border border-blue-100"
+               className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"
              >
                 <ClipboardPaste size={20} />
              </button>
              <button
                onClick={() => handleDigitClick('0')}
-               className="h-16 rounded-xl bg-slate-50 text-slate-700 text-2xl font-semibold hover:bg-slate-100 active:bg-slate-200 transition-colors shadow-sm border border-slate-100"
+               className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 active:bg-slate-200 dark:active:bg-slate-500 transition-colors shadow-sm border border-slate-100 dark:border-slate-600"
              >
                0
              </button>
              <button
                onClick={handleBackspace}
                onContextMenu={(e) => { e.preventDefault(); handleClear(); }}
-               className="h-16 rounded-xl bg-slate-50 text-slate-600 flex items-center justify-center hover:bg-slate-100 transition-colors shadow-sm border border-slate-100"
+               className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600"
              >
                <Delete size={24} />
              </button>
@@ -469,13 +469,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       {state === TransferState.WAITING_FOR_PEER && (
          <div className="flex flex-col items-center py-10 animate-pop-in">
            <Loader2 size={40} className="animate-spin text-brand-500 mb-4" />
-           <p className="text-slate-600 font-medium">正在连接发送方...</p>
+           <p className="text-slate-600 dark:text-slate-300 font-medium">正在连接发送方...</p>
            {retryCountRef.current > 0 && (
              <p className="text-xs text-slate-400 mt-2">尝试连接中 ({retryCountRef.current}/3)...</p>
            )}
            <button 
              onClick={handleCancelConnecting}
-             className="mt-8 px-6 py-2 bg-white border border-slate-200 text-slate-600 rounded-full text-sm hover:bg-slate-50 hover:text-red-500 transition-colors shadow-sm active:scale-95"
+             className="mt-8 px-6 py-2 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 rounded-full text-sm hover:bg-slate-50 dark:hover:bg-slate-600 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm active:scale-95"
            >
              取消
            </button>
@@ -483,9 +483,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       )}
 
       {(state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && metadata && (
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 animate-slide-up">
+        <div className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 animate-slide-up">
            <div className="flex items-start gap-4 mb-6">
-              <div className="w-12 h-12 bg-white rounded-lg shadow-sm border border-slate-100 flex items-center justify-center text-slate-500 shrink-0">
+              <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
                  {metadata.preview && metadata.type.startsWith('image/') ? (
                       <img src={metadata.preview} alt="Preview" className="w-full h-full object-cover rounded-lg" />
                   ) : (
@@ -493,21 +493,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                   )}
               </div>
               <div className="flex-1">
-                 <h4 className="font-bold text-slate-800 text-lg leading-tight mb-1">{metadata.name}</h4>
-                 <p className="text-slate-500 text-sm">{formatFileSize(metadata.size)} • {metadata.type || '未知类型'}</p>
+                 <h4 className="font-bold text-slate-800 dark:text-white text-lg leading-tight mb-1">{metadata.name}</h4>
+                 <p className="text-slate-500 dark:text-slate-400 text-sm">{formatFileSize(metadata.size)} • {metadata.type || '未知类型'}</p>
                </div>
            </div>
 
            {metadata.preview && (
-             <div className="mb-4 bg-white p-3 rounded-lg border border-slate-200">
-               <div className="flex items-center gap-2 text-slate-700 font-bold text-sm mb-2">
+             <div className="mb-4 bg-white dark:bg-slate-800 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
+               <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-bold text-sm mb-2">
                    <Eye size={16} />
                    <span>内容预览</span>
                </div>
                {metadata.type.startsWith('image/') ? (
-                 <img src={metadata.preview} alt="Preview" className="max-h-48 rounded mx-auto border border-slate-100" />
+                 <img src={metadata.preview} alt="Preview" className="max-h-48 rounded mx-auto border border-slate-100 dark:border-slate-700" />
                ) : (
-                 <p className="text-xs text-slate-600 font-mono bg-slate-50 p-2 rounded border border-slate-100 max-h-32 overflow-y-auto whitespace-pre-wrap">
+                 <p className="text-xs text-slate-600 dark:text-slate-300 font-mono bg-slate-50 dark:bg-slate-900 p-2 rounded border border-slate-100 dark:border-slate-700 max-h-32 overflow-y-auto whitespace-pre-wrap">
                    {metadata.preview}
                  </p>
                )}
@@ -517,7 +517,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
            {state === TransferState.PEER_CONNECTED && (
              <button
                onClick={acceptTransfer}
-               className="w-full bg-slate-900 text-white font-bold py-3 rounded-lg hover:bg-slate-800 transition-all flex items-center justify-center gap-2"
+               className="w-full bg-slate-900 dark:bg-brand-600 text-white font-bold py-3 rounded-lg hover:bg-slate-800 dark:hover:bg-brand-700 transition-all flex items-center justify-center gap-2"
              >
                <Download size={18} />
                确认并下载
@@ -526,11 +526,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
            {state === TransferState.TRANSFERRING && (
              <div className="space-y-3">
-               <div className="flex justify-between text-xs font-semibold text-slate-500 uppercase tracking-wide">
+               <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
                   <span>下载中</span>
                   <span>{progress}%</span>
                </div>
-               <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden shadow-inner relative">
+               <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-3 overflow-hidden shadow-inner relative">
                  <div 
                    className="bg-brand-500 h-full rounded-full transition-all duration-300 relative overflow-hidden" 
                    style={{ width: `${progress}%` }}
@@ -540,13 +540,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                  </div>
                </div>
                
-               <div className="flex justify-between items-center text-xs text-slate-500 pt-1">
+               <div className="flex justify-between items-center text-xs text-slate-500 dark:text-slate-400 pt-1">
                   <div className="flex flex-col">
-                    <span className="font-medium text-slate-700">{downloadSpeed}</span>
+                    <span className="font-medium text-slate-700 dark:text-slate-300">{downloadSpeed}</span>
                     <span>下载速度</span>
                   </div>
                   <div className="flex flex-col items-end">
-                    <span className="font-medium text-slate-700">{eta}</span>
+                    <span className="font-medium text-slate-700 dark:text-slate-300">{eta}</span>
                     <span>预计剩余</span>
                   </div>
                </div>
@@ -557,16 +557,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
       {state === TransferState.COMPLETED && (
         <div className="text-center py-8 animate-pop-in">
-          <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6">
+          <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 dark:bg-green-900/30 dark:text-green-400">
             <HardDriveDownload size={36} />
           </div>
-          <h3 className="text-2xl font-bold text-slate-800">下载完成</h3>
-          <p className="text-slate-500 mt-2">文件已保存到您的设备。</p>
+          <h3 className="text-2xl font-bold text-slate-800 dark:text-white">下载完成</h3>
+          <p className="text-slate-500 dark:text-slate-400 mt-2">文件已保存到您的设备。</p>
           
           <div className="flex flex-col gap-3 mt-8">
             <button 
                 onClick={reset}
-                className="px-6 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 transition-colors"
+                className="px-6 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 transition-colors dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600"
             >
                 接收下一个文件
             </button>
@@ -576,21 +576,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
       {state === TransferState.ERROR && (
         <div className="text-center py-8 animate-pop-in">
-           <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+           <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 dark:bg-red-900/30 dark:text-red-400">
              <AlertCircle size={32} />
            </div>
-           <h3 className="text-lg font-bold text-slate-800">传输失败</h3>
-           <p className="text-slate-500 mt-2 px-4 mb-6">{errorMsg}</p>
+           <h3 className="text-lg font-bold text-slate-800 dark:text-white">传输失败</h3>
+           <p className="text-slate-500 dark:text-slate-400 mt-2 px-4 mb-6">{errorMsg}</p>
            <div className="flex gap-4 justify-center">
                <button 
                  onClick={reset}
-                 className="px-6 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 font-medium shadow-sm"
+                 className="px-6 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 font-medium shadow-sm dark:bg-slate-700 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-600"
                >
                  取消
                </button>
                <button 
                  onClick={handleRetry}
-                 className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 font-medium"
+                 className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 font-medium dark:bg-slate-600 dark:text-white dark:hover:bg-slate-500"
                >
                  重试
                </button>
