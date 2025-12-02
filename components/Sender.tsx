@@ -337,7 +337,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     try {
         // Capture file list for preview
         const contentList = Array.from(files)
-            .map(f => ({ name: decodeURIComponent(f.webkitRelativePath || f.name), size: f.size }))
+            .map((f: any) => ({ name: decodeURIComponent(f.webkitRelativePath || f.name), size: f.size }))
             .sort((a, b) => a.name.localeCompare(b.name));
         setFolderContent(contentList);
 
@@ -345,8 +345,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         
         // Detect root folder name safely with decoding
         let rootFolderName = 'folder_archive';
+        // @ts-ignore
         if (files[0].webkitRelativePath) {
             // webkitRelativePath is "Root/Sub/File.txt"
+            // @ts-ignore
             const rawPath = files[0].webkitRelativePath;
             const parts = rawPath.split('/');
             if (parts.length > 0) {
@@ -355,7 +357,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         }
 
         // Add all files to zip
-        Array.from(files).forEach(file => {
+        Array.from(files).forEach((file: any) => {
             // Use webkitRelativePath if available to maintain structure
             let path = file.webkitRelativePath || file.name;
             path = decodeURIComponent(path);
