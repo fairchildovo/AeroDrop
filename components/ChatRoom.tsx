@@ -20,6 +20,7 @@ const AVATAR_COLORS = [
 
 const SESSION_KEY = 'aerodrop_chat_session';
 const CHUNK_SIZE = 16 * 1024; // 16KB safe limit for DataChannel strings
+const MAX_HOST_RETRIES = 10; // Max attempts to reclaim host ID
 
 // Custom component to render dice dots without border
 const DiceAvatar: React.FC<{ value: number }> = ({ value }) => {
@@ -67,6 +68,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hostRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hostRetryCountRef = useRef<number>(0);
   
   // Critical Fix: Use ref to track host status to avoid stale closures in event listeners
   const isHostRef = useRef(false);
@@ -114,7 +116,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     };
   }, []);
 
-  const generateMessageId = () => Math.random().toString(36).substring(2, 9);
+  // Updated ID generation to be robust against collisions
+  const generateMessageId = () => Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
 
   const getUserAvatar = (userId: string) => {
       if (userId === 'system') return { color: 'bg-slate-400', diceValue: 1 };
@@ -156,6 +159,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       peerRef.current = null;
     }
     if (hostRetryTimeoutRef.current) clearTimeout(hostRetryTimeoutRef.current);
+    hostRetryCountRef.current = 0;
     
     setMessages([]);
     setMode('menu');
@@ -180,6 +184,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setRoomCode(code);
     setIsHost(true);
     isHostRef.current = true; // Update ref synchronously
+    
+    // If not restoring (brand new room), reset retry count
+    if (!isRestoring) hostRetryCountRef.current = 0;
 
     if (peerRef.current) peerRef.current.destroy();
 
@@ -194,6 +201,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       console.log('Chat Room Ready:', id);
       setMode('chatting');
       setIsConnecting(false);
+      hostRetryCountRef.current = 0; // Reset retries on success
       
       // Save session
       localStorage.setItem(SESSION_KEY, JSON.stringify({ code, host: true }));
@@ -213,12 +221,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       console.error(err);
       if (err.type === 'unavailable-id') {
           if (isRestoring) {
-              console.log("ID taken (likely previous session), retrying...");
-              // If restoring, the ID might still be held by the server from the previous page load.
-              // Retry until we get it back.
-              hostRetryTimeoutRef.current = setTimeout(() => {
-                  startHosting(code, true);
-              }, 1500);
+              if (hostRetryCountRef.current < MAX_HOST_RETRIES) {
+                  hostRetryCountRef.current++;
+                  console.log(`ID taken, retrying (${hostRetryCountRef.current}/${MAX_HOST_RETRIES})...`);
+                  // If restoring, the ID might still be held by the server from the previous page load.
+                  // Retry until we get it back.
+                  hostRetryTimeoutRef.current = setTimeout(() => {
+                      startHosting(code, true);
+                  }, 2000);
+              } else {
+                  onNotification('无法恢复房间（ID被占用），请重新创建', 'error');
+                  leaveRoom();
+              }
               return;
           }
           onNotification('创建房间失败，口令冲突，请重试', 'error');
@@ -385,9 +399,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   };
 
   const processReceivedChatMessage = (chatMsg: ChatMessage, fromConn: DataConnection) => {
-      // Add to local state
+      // Add to local state with robust deduplication
       setMessages(prev => {
-          if (prev.some(m => m.id === chatMsg.id)) return prev; // Dedup
+          if (prev.some(m => m.id === chatMsg.id)) return prev; 
           return [...prev, chatMsg];
       });
 
@@ -463,8 +477,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               }
           });
           
-          // Small yield to prevent blocking UI
+          // Throttling strategy:
+          // Yield every 5 chunks to prevent UI freeze
+          // Add a small real delay every 20 chunks to prevent WebRTC buffer overflow on large files
           if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
+          if (i % 20 === 0) await new Promise(r => setTimeout(r, 5));
       }
   };
 
