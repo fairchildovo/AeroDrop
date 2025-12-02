@@ -405,27 +405,47 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       }
     });
 
-    conn.on('close', () => {
-      connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
-      setOnlineCount(prev => Math.max(1, prev - 1));
-      
-      // Critical Fix: Use ref to check if host, preventing stale closure bug
-      if (!isHostRef.current) {
-          // If we are guest and host disconnects
-          // Check if we manually left (session removed) or host dropped
-          if (localStorage.getItem(SESSION_KEY)) {
-               // Host dropped, assume temporary disconnect or refresh
-               addSystemMessage('连接中断，尝试重连...');
-               // Auto retry logic
-               setTimeout(() => {
-                   if (localStorage.getItem(SESSION_KEY)) {
-                       joinChat(roomCode);
-                   }
-               }, 2000);
-          }
+   conn.on('close', () => {
+  // 从连接列表中移除
+  connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+  setOnlineCount(prev => Math.max(1, prev - 1));
+
+  if (isHostRef.current) {
+    // Host 广播系统消息给其他成员
+    const sysMsg: ChatMessage = {
+      id: generateMessageId(),
+      senderId: 'system',
+      type: 'text',
+      content: `成员 (${conn.peer}) 已离开房间`,
+      timestamp: Date.now(),
+      isSystem: true
+    };
+
+    // 广播给剩余成员
+    connectionsRef.current.forEach(c => {
+      if (c.open) {
+        try {
+          c.send({ type: 'CHAT_MESSAGE', payload: sysMsg });
+        } catch (e) {
+          console.error("广播离开消息失败", e);
+        }
       }
-      // For Host, guest leaving is normal, do nothing.
     });
+
+    // Host 自己也显示
+    setMessages(prev => [...prev, sysMsg]);
+  } else {
+    // Guest 离开 Host 的情况（Host关闭了房间）
+    if (localStorage.getItem(SESSION_KEY)) {
+      addSystemMessage('连接中断，尝试重连...');
+      setTimeout(() => {
+        if (localStorage.getItem(SESSION_KEY)) {
+          joinChat(roomCode);
+        }
+      }, 2000);
+    }
+  }
+});
   };
 
   const processReceivedChatMessage = (chatMsg: ChatMessage, fromConn: DataConnection) => {
