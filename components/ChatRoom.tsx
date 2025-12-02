@@ -18,7 +18,8 @@ const ICE_CONFIG = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.framasoft.org:3478' }
+    { urls: 'stun:stun.framasoft.org:3478' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
   ],
   secure: true // Ensure WebRTC uses secure protocols (required for Cloudflare/HTTPS)
 };
