@@ -4,15 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="theme-color" content="#3b82f6" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="description" content="AeroDrop AI - Secure P2P File Transfer & Chat" />
+    <meta name="description" content="AeroDrop - Secure P2P File Transfer & Chat" />
     
-    <title>AeroDrop AI</title>
+    <title>AeroDrop</title>
     
-    <!-- PWA Manifest Placeholder -->
-    <link rel="manifest" id="pwa-manifest" />
-    <link rel="apple-touch-icon" href="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/26a1.png" />
+    <link rel="icon" href="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/26a1.png" />
 
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -102,114 +98,22 @@
           background: #64748b;
         }
       }
-      /* PWA Display Fixes */
-      @media all and (display-mode: standalone) {
-        body {
-          -webkit-user-select: none;
-          user-select: none;
-        }
-      }
     </style>
   <script type="importmap">
 {
   "imports": {
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
     "react/": "https://aistudiocdn.com/react@^19.2.0/",
     "react": "https://aistudiocdn.com/react@^19.2.0",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "peerjs": "https://aistudiocdn.com/peerjs@^1.5.5",
-    "jszip": "https://aistudiocdn.com/jszip@3.10.1"
+    "jszip": "https://aistudiocdn.com/jszip@3.10.1",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0"
   }
 }
 </script>
 </head>
   <body class="bg-slate-50 text-slate-900 font-sans antialiased selection:bg-brand-500 selection:text-white dark:bg-slate-950 dark:text-slate-100 overscroll-none">
     <div id="root"></div>
-
-    <!-- PWA Bootstrapper -->
-    <script>
-      (function() {
-        // Function to create a Data URI from a script tag's content
-        function createDataUriFromScript(filename, mimeType) {
-          const script = document.querySelector(`script[data-filename="${filename}"]`);
-          if (!script) {
-            console.warn(`Script block for ${filename} not found.`);
-            return null;
-          }
-          const content = script.textContent.trim();
-          // Use Data URI for better compatibility in single-file PWA setups than Blob URL for Manifests
-          return `data:${mimeType};base64,${btoa(content)}`;
-        }
-
-        // 1. Initialize Manifest
-        // Using Data URI for Manifest prevents some security blocks related to Blob URIs
-        try {
-            const manifestUri = createDataUriFromScript('manifest.json', 'application/json');
-            if (manifestUri) {
-              const link = document.getElementById('pwa-manifest');
-              if (link) {
-                link.href = manifestUri;
-                console.log('PWA Manifest injected via Data URI');
-              }
-            }
-        } catch (e) {
-            console.error("Failed to inject manifest", e);
-        }
-
-        // 2. Service Worker Registration - DISABLED
-        // Service Workers cannot be registered from 'blob:' or 'data:' URLs in most browsers 
-        // due to same-origin security policies. For a strictly single-file app, a true Service Worker
-        // is not possible without a separate sw.js file served from the same origin.
-        // We skip registration to avoid the "unsupported protocol" error.
-        console.log("Service Worker registration skipped for single-file deployment compatibility.");
-      })();
-    </script>
-
-    <!-- 嵌入 Manifest 文件 -->
-    <script type="text/file" data-filename="manifest.json">
-    {
-      "name": "AeroDrop AI",
-      "short_name": "AeroDrop",
-      "start_url": "./index.html",
-      "display": "standalone",
-      "background_color": "#f8fafc",
-      "theme_color": "#3b82f6",
-      "orientation": "portrait",
-      "icons": [
-        {
-          "src": "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/26a1.png",
-          "sizes": "72x72",
-          "type": "image/png",
-          "purpose": "any maskable"
-        },
-        {
-          "src": "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/26a1.png",
-          "sizes": "192x192",
-          "type": "image/png"
-        },
-        {
-          "src": "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/26a1.png",
-          "sizes": "512x512",
-          "type": "image/png"
-        }
-      ]
-    }
-    </script>
-
-    <!-- 嵌入 Service Worker 文件 (Placeholder for potential future use) -->
-    <script type="text/file" data-filename="sw.js">
-    const CACHE_NAME = 'aerodrop-v1';
-    self.addEventListener('install', (event) => {
-      self.skipWaiting();
-    });
-    self.addEventListener('activate', (event) => {
-      event.waitUntil(self.clients.claim());
-    });
-    self.addEventListener('fetch', (event) => {
-      // Passthrough
-    });
-    </script>
   </body>
-   <script type="module" src="/index.tsx"></script>
 </html>

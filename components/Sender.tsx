@@ -9,6 +9,19 @@ interface SenderProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
 
+// Robust ICE Server Configuration for Cross-Network Connectivity
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.framasoft.org:3478' }
+  ]
+};
+
 export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [file, setFile] = useState<File | null>(null);
@@ -320,6 +333,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     if (!files || files.length === 0) return;
 
     if (files.length > 1) {
+        // Cast files to any for mapping if needed, though File[] doesn't need explicit casting here
+        // The issue with webkitRelativePath usually happens with custom types
         zipMultipleFiles(Array.from(files));
     } else {
         setFolderContent([]); // Clear folder content for single file select
@@ -345,11 +360,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         
         // Detect root folder name safely with decoding
         let rootFolderName = 'folder_archive';
-        // @ts-ignore
-        if (files[0].webkitRelativePath) {
+        const firstFile = files[0] as any;
+        if (firstFile.webkitRelativePath) {
             // webkitRelativePath is "Root/Sub/File.txt"
-            // @ts-ignore
-            const rawPath = files[0].webkitRelativePath;
+            const rawPath = firstFile.webkitRelativePath;
             const parts = rawPath.split('/');
             if (parts.length > 0) {
                 rootFolderName = decodeURIComponent(parts[0]);
@@ -425,14 +439,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     const peer = new Peer({
       debug: 1,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
+      config: ICE_CONFIG // Use robust ICE servers
     });
 
     peer.on('open', (id) => {
@@ -450,14 +457,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       peer.destroy();
       const customPeer = new Peer(customId, {
         debug: 1,
-        config: {
-           iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' },
-              { urls: 'stun:stun2.l.google.com:19302' },
-              { urls: 'stun:global.stun.twilio.com:3478' }
-           ]
-        }
+        config: ICE_CONFIG // Use robust ICE servers
       });
       
       setupPeerListeners(customPeer, finalCode);
@@ -715,7 +715,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             <Upload size={32} className={isDragOver ? 'animate-float text-brand-600 dark:text-brand-400' : 'text-brand-500 dark:text-brand-400'} />
           </div>
           <p className={`text-lg font-medium transition-colors ${isDragOver ? 'text-brand-700 dark:text-brand-300' : 'text-slate-700 dark:text-slate-200'}`}>
-            {isDragOver ? '松开以添加文件' : '点击上传或拖拽文件'}
+            <span className="hidden md:inline">{isDragOver ? '松开以添加文件' : '点击上传或拖拽文件'}</span>
+            <span className="md:hidden">点击上传文件</span>
           </p>
           <p className="text-sm text-slate-400 mt-2 mb-4">支持任意格式，可多选</p>
 
@@ -862,7 +863,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           <div className="py-12 flex flex-col items-center justify-center text-center animate-pop-in">
               <Loader2 size={48} className="animate-spin text-brand-500 mb-4" />
               <h3 className="text-lg font-bold text-slate-800 dark:text-white">正在注册网络节点...</h3>
-              <p className="text-slate-500 dark:text-slate-400 text-sm mt-2">请稍候，这通常需要几秒钟</p>
+              <p className="text-slate-500 dark:text-slate-400 text-sm mt-2">使用增强 STUN 配置连接中...</p>
           </div>
       )}
 
@@ -871,7 +872,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
            <div className="relative inline-block">
               <div 
                 onClick={handleCopyCode}
-                className={`text-5xl md:text-6xl font-mono font-bold tracking-widest px-6 md:px-8 py-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 select-none flex items-center justify-center gap-4 group active:scale-95 ${
+                className={`text-4xl md:text-6xl font-mono font-bold tracking-widest px-6 md:px-8 py-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 select-none flex items-center justify-center gap-4 group active:scale-95 ${
                   copied 
                   ? 'bg-green-100 border-green-300 text-green-700 dark:bg-green-900/30 dark:border-green-800 dark:text-green-400 scale-105' 
                   : 'bg-brand-50 border-brand-100 text-brand-600 hover:bg-brand-100 dark:bg-slate-900 dark:border-slate-700 dark:text-brand-400 dark:hover:bg-slate-800'

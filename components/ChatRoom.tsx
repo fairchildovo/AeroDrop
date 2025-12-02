@@ -8,6 +8,19 @@ interface ChatRoomProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
 
+// Robust ICE Server Configuration for Cross-Network Connectivity
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.framasoft.org:3478' }
+  ]
+};
+
 // Predefined colors for avatars
 const AVATAR_COLORS = [
   'bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-green-500', 
@@ -167,12 +180,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(`aerodrop-chat-${code}`, {
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
+      config: ICE_CONFIG // Use robust ICE servers
     });
 
     peer.on('open', (id) => {
@@ -232,12 +240,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer({
-       config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
+       config: ICE_CONFIG // Use robust ICE servers
     });
 
     peer.on('open', () => {

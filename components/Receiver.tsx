@@ -9,6 +9,19 @@ interface ReceiverProps {
   onNotification?: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
 
+// Robust ICE Server Configuration for Cross-Network Connectivity
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.framasoft.org:3478' }
+  ]
+};
+
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification }) => {
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [code, setCode] = useState<string>('');
@@ -205,14 +218,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
     const peer = new Peer({ 
       debug: 1,
-      config: {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
+      config: ICE_CONFIG // Use robust ICE servers
     });
 
     peer.on('open', () => {
