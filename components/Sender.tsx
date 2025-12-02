@@ -4,26 +4,12 @@ import Peer, { DataConnection } from 'peerjs';
 import JSZip from 'jszip';
 import { TransferState, FileMetadata, P2PMessage, ChunkPayload } from '../types';
 import { formatFileSize, generatePreview } from '../services/fileUtils';
+import { getIceConfig } from '../services/stunService'; // Import the new service
 import { Upload, AlertCircle, Settings, Clock, X, Copy, Check, KeyRound, Loader2, FileType, FileCode, FileImage, FileAudio, FileVideo, FileArchive, Package, File as FileIcon, Link as LinkIcon, Folder, Pencil, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface SenderProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
-
-// Robust ICE Server Configuration for Cross-Network Connectivity
-const ICE_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.framasoft.org:3478' },
-    { urls: 'stun:stun.cloudflare.com:3478' }
-  ],
-  secure: true
-};
 
 export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
@@ -419,7 +405,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       setIsEditingName(false);
   };
 
-  const startSharing = () => {
+  const startSharing = async () => {
     if (!file || !metadata) return;
 
     setState(TransferState.GENERATING_CODE);
@@ -438,9 +424,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     };
     setMetadata(finalMetadata);
 
+    // Get Dynamic STUN config
+    const iceConfig = await getIceConfig();
+
     const peer = new Peer({
       debug: 1,
-      config: ICE_CONFIG // Use robust ICE servers
+      config: iceConfig // Use dynamic ICE servers
     });
 
     peer.on('open', (id) => {
@@ -458,14 +447,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       peer.destroy();
       const customPeer = new Peer(customId, {
         debug: 1,
-        config: ICE_CONFIG // Use robust ICE servers
+        config: iceConfig // Use dynamic ICE servers
       });
       
       setupPeerListeners(customPeer, finalCode);
     });
     
     peer.on('error', (err) => {
-        // Fallback for initial connection error
         console.error("Initial Peer Error", err);
         setErrorMsg('网络初始化失败，请重试');
         setState(TransferState.ERROR);

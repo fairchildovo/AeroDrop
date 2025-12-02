@@ -3,27 +3,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, ChunkPayload } from '../types';
 import { formatFileSize } from '../services/fileUtils';
+import { getIceConfig } from '../services/stunService'; // Import the new service
 import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileType, FileCode, FileImage, FileAudio, FileVideo, FileArchive, Package, File as FileIcon, ClipboardPaste, X, FolderOpen } from 'lucide-react';
 
 interface ReceiverProps {
   initialCode?: string;
   onNotification?: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
-
-// Robust ICE Server Configuration for Cross-Network Connectivity
-const ICE_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.framasoft.org:3478' },
-    { urls: 'stun:stun.cloudflare.com:3478' }
-  ],
-  secure: true
-};
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification }) => {
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
@@ -200,7 +186,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     setState(TransferState.IDLE);
   };
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     if (!code || code.length !== 4) return;
     
     setState(TransferState.WAITING_FOR_PEER);
@@ -219,9 +205,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
     if (peerRef.current) peerRef.current.destroy();
 
+    // Get Dynamic STUN config
+    const iceConfig = await getIceConfig();
+
     const peer = new Peer({ 
       debug: 1,
-      config: ICE_CONFIG // Use robust ICE servers
+      config: iceConfig // Use dynamic ICE servers
     });
 
     peer.on('open', () => {
@@ -237,9 +226,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (err.type === 'peer-unavailable') {
         if (retryCountRef.current < 3) {
           retryCountRef.current++;
-          setTimeout(() => {
+          setTimeout(async () => {
              if (peerRef.current && !peerRef.current.destroyed) {
                 const destId = `aerodrop-${code}`;
+                // Reconnect attempts also use the same peer (which already has config)
                 const conn = peerRef.current.connect(destId, { reliable: true });
                 setupConnListeners(conn);
              }

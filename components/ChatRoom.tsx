@@ -4,25 +4,11 @@ import Peer, { DataConnection } from 'peerjs';
 import { ChatMessage, P2PMessage } from '../types';
 import { Send, Paperclip, Copy, LogOut, Users, Loader2, MessageCircle } from 'lucide-react';
 import { formatFileSize, fileToBase64 } from '../services/fileUtils';
+import { getIceConfig } from '../services/stunService'; // Import the new service
 
 interface ChatRoomProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
-
-// Robust ICE Server Configuration for Cross-Network Connectivity
-const ICE_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.framasoft.org:3478' },
-    { urls: 'stun:stun.cloudflare.com:3478' }
-  ],
-  secure: true // Ensure WebRTC uses secure protocols (required for Cloudflare/HTTPS)
-};
 
 // Predefined colors for avatars
 const AVATAR_COLORS = [
@@ -176,15 +162,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     startHosting(code);
   };
 
-  const startHosting = (code: string, isRestoring = false) => {
+  const startHosting = async (code: string, isRestoring = false) => {
     setIsConnecting(true);
     setRoomCode(code);
     setIsHost(true);
 
     if (peerRef.current) peerRef.current.destroy();
 
+    const iceConfig = await getIceConfig();
+
     const peer = new Peer(`aerodrop-chat-${code}`, {
-      config: ICE_CONFIG,
+      config: iceConfig,
       debug: 1
     });
 
@@ -237,15 +225,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     joinChat(inputCode);
   };
 
-  const joinChat = (code: string) => {
+  const joinChat = async (code: string) => {
     setIsConnecting(true);
     setIsHost(false);
     setRoomCode(code);
 
     if (peerRef.current) peerRef.current.destroy();
 
+    const iceConfig = await getIceConfig();
+
     const peer = new Peer({
-       config: ICE_CONFIG
+       config: iceConfig
     });
 
     peer.on('open', () => {
