@@ -57,6 +57,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const [onlineCount, setOnlineCount] = useState(1);
   const [isHost, setIsHost] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  
+  // Track receiving progress: messageId -> percentage
+  const [receivingFiles, setReceivingFiles] = useState<Record<string, number>>({});
 
   // Refs
   const peerRef = useRef<Peer | null>(null);
@@ -71,7 +74,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, receivingFiles]); // Scroll when messages or progress updates
 
   // Restore session on mount
   useEffect(() => {
@@ -158,6 +161,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setOnlineCount(1);
     setIsConnecting(false);
     incomingChunks.current = {};
+    setReceivingFiles({});
   };
 
   // --- Hosting Logic ---
@@ -294,6 +298,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           if (!buffer.parts[index]) {
               buffer.parts[index] = chunkData;
               buffer.count++;
+              
+              // Update progress for large files
+              // Only update if percentage changed to avoid spamming state updates
+              const pct = Math.floor((buffer.count / buffer.total) * 100);
+              setReceivingFiles(prev => {
+                  if (prev[messageId] === pct) return prev;
+                  return { ...prev, [messageId]: pct };
+              });
           }
 
           // If complete, reassemble
@@ -304,12 +316,24 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                   
                   // Cleanup buffer
                   delete incomingChunks.current[messageId];
+                  
+                  // Clear progress
+                  setReceivingFiles(prev => {
+                      const next = { ...prev };
+                      delete next[messageId];
+                      return next;
+                  });
 
                   // Process full message
                   processReceivedChatMessage(chatMsg, conn);
 
               } catch (e) {
                   console.error("Failed to parse chunked message", e);
+                  setReceivingFiles(prev => {
+                      const next = { ...prev };
+                      delete next[messageId];
+                      return next;
+                  });
               }
           }
           
@@ -432,9 +456,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Limit file size for chat to 5MB (increased slightly due to chunking support)
-    if (file.size > 5 * 1024 * 1024) {
-      onNotification('聊天室文件限制为 5MB，请使用“发送文件”功能传输大文件', 'error');
+    // Limit file size for chat to 50MB (Adjusted request)
+    if (file.size > 50 * 1024 * 1024) {
+      onNotification('聊天室文件限制为 50MB，超大文件请使用“发送文件”功能', 'error');
       return;
     }
 
@@ -564,9 +588,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               const isMe = msg.senderId === myId;
               const isSys = msg.isSystem;
 
-              // Check if previous message was from the same sender
+              // Check if previous message was from the same sender (for nickname placement)
               const prevMsg = messages[index - 1];
               const isConsecutive = prevMsg && prevMsg.senderId === msg.senderId;
+              
+              // Check if next message is from the same sender (for avatar placement on the bottom)
+              const nextMsg = messages[index + 1];
+              const isLastInGroup = !nextMsg || nextMsg.senderId !== msg.senderId;
 
               if (isSys) {
                   return (
@@ -581,10 +609,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
               return (
                   <div key={msg.id} className={`flex w-full mb-1 animate-fade-in-up ${isMe ? 'justify-end' : 'justify-start'}`}>
-                      {/* Avatar for others */}
+                      {/* Avatar for others - Show on LAST message of group */}
                       {!isMe && (
                         <div className="w-8 flex-shrink-0 flex flex-col items-center mr-2 self-end">
-                             {!isConsecutive ? (
+                             {isLastInGroup ? (
                                 <div className={`w-8 h-8 rounded-full ${avatarColor} flex items-center justify-center text-white shadow-sm overflow-hidden`}>
                                     <DiceAvatar value={diceValue} />
                                 </div>
@@ -655,6 +683,24 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           })}
           <div ref={messagesEndRef} />
       </div>
+
+      {/* Progress Bar for Receiving Files */}
+      {Object.keys(receivingFiles).length > 0 && (
+          <div className="bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 px-4 py-2 animate-slide-up">
+              <div className="flex items-center gap-2 mb-1">
+                  <Loader2 size={12} className="animate-spin text-brand-500" />
+                  <p className="text-xs text-slate-500 dark:text-slate-400">正在接收大文件消息...</p>
+              </div>
+              {Object.entries(receivingFiles).map(([id, pct]) => (
+                  <div key={id} className="flex items-center gap-2 text-xs mb-1">
+                      <div className="flex-1 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                          <div className="h-full bg-brand-500 transition-all duration-300" style={{ width: `${pct}%` }}></div>
+                      </div>
+                      <span className="text-slate-600 dark:text-slate-300 w-8 text-right font-mono">{pct}%</span>
+                  </div>
+              ))}
+          </div>
+      )}
 
       {/* Input Area */}
       <div className="bg-white dark:bg-slate-900 p-3 border-t border-slate-200 dark:border-slate-700 flex items-end gap-2 shrink-0 transition-colors">
