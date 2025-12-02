@@ -67,6 +67,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hostRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // Critical Fix: Use ref to track host status to avoid stale closures in event listeners
+  const isHostRef = useRef(false);
 
   // Chunk Reassembly Buffer: { [msgId]: string[] }
   const incomingChunks = useRef<Record<string, { parts: string[], count: number, total: number }>>({});
@@ -158,6 +161,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setMode('menu');
     setRoomCode('');
     setIsHost(false);
+    isHostRef.current = false;
     setOnlineCount(1);
     setIsConnecting(false);
     incomingChunks.current = {};
@@ -175,6 +179,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setIsConnecting(true);
     setRoomCode(code);
     setIsHost(true);
+    isHostRef.current = true; // Update ref synchronously
 
     if (peerRef.current) peerRef.current.destroy();
 
@@ -242,6 +247,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const joinChat = async (code: string) => {
     setIsConnecting(true);
     setIsHost(false);
+    isHostRef.current = false; // Update ref synchronously
     setRoomCode(code);
 
     if (peerRef.current) peerRef.current.destroy();
@@ -275,7 +281,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       setOnlineCount(prev => prev + 1);
       
       // Save session if we are guest (Host saves on open)
-      if (!isHost) {
+      // Check ref instead of state to be safe
+      if (!isHostRef.current) {
         setMode('chatting');
         setIsConnecting(false);
         localStorage.setItem(SESSION_KEY, JSON.stringify({ code: roomCode, host: false }));
@@ -344,7 +351,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           
           // If I am Host, I need to relay this chunk to others immediately to reduce latency/memory
           // (Instead of reassembling and re-chunking)
-          if (isHost) {
+          if (isHostRef.current) {
               relayChunk(chunk, conn);
           }
 
@@ -358,7 +365,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
       setOnlineCount(prev => Math.max(1, prev - 1));
       
-      if (!isHost) {
+      // Critical Fix: Use ref to check if host, preventing stale closure bug
+      if (!isHostRef.current) {
           // If we are guest and host disconnects
           // Check if we manually left (session removed) or host dropped
           if (localStorage.getItem(SESSION_KEY)) {
@@ -384,7 +392,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       });
 
       // If Host, relay to others (Note: Chunks are relayed individually, this is for standard msgs)
-      if (isHost) {
+      if (isHostRef.current) {
           connectionsRef.current.forEach(c => {
              // Don't send back to sender
              if (c.peer !== fromConn.peer) {
