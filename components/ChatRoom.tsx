@@ -214,8 +214,38 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
 
     peer.on('connection', (conn) => {
-      setupConnection(conn);
+  // 给新连接绑定各种事件
+  setupConnection(conn);
+
+  // 当新连接打开时，Host 广播系统消息给其他成员
+  conn.on('open', () => {
+    if (!isHostRef.current) return;
+
+    const sysMsg: ChatMessage = {
+      id: generateMessageId(),
+      senderId: 'system',
+      type: 'text',
+      content: `新成员加入房间 (${conn.peer})`,
+      timestamp: Date.now(),
+      isSystem: true
+    };
+
+    // 广播给其他已连接成员（不包括刚加入的 conn）
+    connectionsRef.current.forEach(c => {
+      if (c.peer !== conn.peer && c.open) {
+        try {
+          c.send({ type: 'CHAT_MESSAGE', payload: sysMsg });
+        } catch (e) {
+          console.error("广播新成员失败", e);
+        }
+      }
     });
+
+    // Host 界面也显示
+    setMessages(prev => [...prev, sysMsg]);
+  });
+});
+
 
     peer.on('error', (err) => {
       console.error(err);
