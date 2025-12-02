@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, ChunkPayload } from '../types';
@@ -19,7 +20,8 @@ const ICE_CONFIG = {
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
     { urls: 'stun:stun.framasoft.org:3478' }
-  ]
+  ],
+  secure: true
 };
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification }) => {

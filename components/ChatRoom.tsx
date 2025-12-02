@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { ChatMessage, P2PMessage } from '../types';
@@ -18,7 +19,8 @@ const ICE_CONFIG = {
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
     { urls: 'stun:stun.framasoft.org:3478' }
-  ]
+  ],
+  secure: true // Ensure WebRTC uses secure protocols (required for Cloudflare/HTTPS)
 };
 
 // Predefined colors for avatars
@@ -102,12 +104,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       }
     };
     
-    restoreSession();
+    // Small delay to ensure network is ready on reload
+    setTimeout(restoreSession, 500);
     
     return () => {
       if (hostRetryTimeoutRef.current) clearTimeout(hostRetryTimeoutRef.current);
       // We do NOT call leaveRoom() here to persist across refreshes
-      // Cleanup is handled by the manual Leave button or actual unload if needed
+      // However, we must destroy the peer to prevent ID conflicts on reload
       if (peerRef.current) {
           peerRef.current.destroy();
       }
@@ -180,7 +183,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(`aerodrop-chat-${code}`, {
-      config: ICE_CONFIG // Use robust ICE servers
+      config: ICE_CONFIG,
+      debug: 1
     });
 
     peer.on('open', (id) => {
@@ -240,11 +244,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer({
-       config: ICE_CONFIG // Use robust ICE servers
+       config: ICE_CONFIG
     });
 
     peer.on('open', () => {
-      const conn = peer.connect(`aerodrop-chat-${code}`);
+      const conn = peer.connect(`aerodrop-chat-${code}`, { reliable: true });
       setupConnection(conn);
     });
 
@@ -306,10 +310,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           // If we are guest and host disconnects
           // Check if we manually left (session removed) or host dropped
           if (localStorage.getItem(SESSION_KEY)) {
-              // Host dropped, keep UI but show disconnected
-               addSystemMessage('房主已断开连接，等待重连...');
-               // Optional: Auto-rejoin logic could go here
-               // For now, allow user to stay and see history, or leave
+               // Host dropped, assume temporary disconnect or refresh
+               addSystemMessage('连接中断，尝试重连...');
+               // Auto retry logic
+               setTimeout(() => {
+                   if (localStorage.getItem(SESSION_KEY)) {
+                       joinChat(roomCode);
+                   }
+               }, 2000);
           }
       }
     });

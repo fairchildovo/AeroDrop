@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import JSZip from 'jszip';
@@ -19,7 +20,8 @@ const ICE_CONFIG = {
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
     { urls: 'stun:stun.framasoft.org:3478' }
-  ]
+  ],
+  secure: true
 };
 
 export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
@@ -333,8 +335,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     if (!files || files.length === 0) return;
 
     if (files.length > 1) {
-        // Cast files to any for mapping if needed, though File[] doesn't need explicit casting here
-        // The issue with webkitRelativePath usually happens with custom types
         zipMultipleFiles(Array.from(files));
     } else {
         setFolderContent([]); // Clear folder content for single file select
