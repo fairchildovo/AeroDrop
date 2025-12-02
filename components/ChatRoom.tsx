@@ -219,8 +219,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           onNotification('创建房间失败，口令冲突，请重试', 'error');
           setIsConnecting(false);
           setMode('menu');
+      } else if (err.type === 'peer-unavailable' || err.type === 'disconnected') {
+          // As Host, if a peer disconnects, it's not a fatal error for the room.
+          // We just ignore it here, the 'close' event on the connection will handle cleanup.
+          console.log("Peer disconnected (Host view):", err.type);
       } else {
           onNotification(`连接服务错误: ${err.type}`, 'error');
+          // Only stop connecting if we haven't started yet
           setIsConnecting(false);
       }
     });
@@ -367,6 +372,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                }, 2000);
           }
       }
+      // For Host, guest leaving is normal, do nothing.
     });
   };
 
@@ -378,14 +384,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       });
 
       // If Host, relay to others (Note: Chunks are relayed individually, this is for standard msgs)
-      // If the message was received via chunks, we don't relay it here if we already relayed chunks.
-      // However, to keep it simple: Host only relays CHUNKS for chunked messages.
-      // Standard 'CHAT_MESSAGE' packets are relayed here.
       if (isHost) {
           connectionsRef.current.forEach(c => {
              // Don't send back to sender
              if (c.peer !== fromConn.peer) {
-                 c.send({ type: 'CHAT_MESSAGE', payload: chatMsg });
+                 if (c.open) { // Ensure connection is open
+                     try {
+                         c.send({ type: 'CHAT_MESSAGE', payload: chatMsg });
+                     } catch (e) {
+                         console.error("Relay failed to", c.peer, e);
+                     }
+                 }
              }
           });
       }
@@ -394,7 +403,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const relayChunk = (chunk: ChatChunkPayload, fromConn: DataConnection) => {
       connectionsRef.current.forEach(c => {
           if (c.peer !== fromConn.peer) {
-              c.send({ type: 'CHAT_MESSAGE_CHUNK', payload: chunk });
+              if (c.open) { // Ensure connection is open
+                  try {
+                      c.send({ type: 'CHAT_MESSAGE_CHUNK', payload: chunk });
+                  } catch (e) {
+                      console.error("Relay chunk failed to", c.peer, e);
+                  }
+              }
           }
       });
   };
@@ -410,7 +425,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     if (totalChunks === 1) {
         // Small message, send directly
         connectionsRef.current.forEach(conn => {
-            conn.send({ type: 'CHAT_MESSAGE', payload: msg });
+            if (conn.open) {
+                try {
+                    conn.send({ type: 'CHAT_MESSAGE', payload: msg });
+                } catch(e) { console.error("Send failed", e); }
+            }
         });
     } else {
         // Chunk it
@@ -429,7 +448,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           };
 
           connectionsRef.current.forEach(conn => {
-              conn.send({ type: 'CHAT_MESSAGE_CHUNK', payload });
+              if (conn.open) {
+                  try {
+                      conn.send({ type: 'CHAT_MESSAGE_CHUNK', payload });
+                  } catch(e) { console.error("Send chunk failed", e); }
+              }
           });
           
           // Small yield to prevent blocking UI
