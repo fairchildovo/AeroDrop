@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-import { ChatMessage, P2PMessage } from '../types';
+import { ChatMessage, P2PMessage, ChatChunkPayload } from '../types';
 import { Send, Paperclip, Copy, LogOut, Users, Loader2, MessageCircle } from 'lucide-react';
 import { formatFileSize, fileToBase64 } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService'; // Import the new service
@@ -19,6 +19,7 @@ const AVATAR_COLORS = [
 ];
 
 const SESSION_KEY = 'aerodrop_chat_session';
+const CHUNK_SIZE = 16 * 1024; // 16KB safe limit for DataChannel strings
 
 // Custom component to render dice dots without border
 const DiceAvatar: React.FC<{ value: number }> = ({ value }) => {
@@ -63,6 +64,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hostRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Chunk Reassembly Buffer: { [msgId]: string[] }
+  const incomingChunks = useRef<Record<string, { parts: string[], count: number, total: number }>>({});
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -153,6 +157,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setIsHost(false);
     setOnlineCount(1);
     setIsConnecting(false);
+    incomingChunks.current = {};
   };
 
   // --- Hosting Logic ---
@@ -272,24 +277,51 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     conn.on('data', (data: any) => {
       const msg = data as P2PMessage;
       
-      if (msg.type === 'CHAT_MESSAGE') {
-        const chatMsg = msg.payload as ChatMessage;
-        
-        // Add to local state
-        setMessages(prev => {
-            if (prev.some(m => m.id === chatMsg.id)) return prev; // Dedup
-            return [...prev, chatMsg];
-        });
+      if (msg.type === 'CHAT_MESSAGE_CHUNK') {
+          const chunk = msg.payload as ChatChunkPayload;
+          const { messageId, index, total, data: chunkData } = chunk;
 
-        // If Host, relay to others
-        if (isHost) {
-          connectionsRef.current.forEach(c => {
-             // Don't send back to sender
-             if (c.peer !== conn.peer) {
-                 c.send({ type: 'CHAT_MESSAGE', payload: chatMsg });
-             }
-          });
-        }
+          // Initialize buffer if needed
+          if (!incomingChunks.current[messageId]) {
+              incomingChunks.current[messageId] = {
+                  parts: new Array(total),
+                  count: 0,
+                  total: total
+              };
+          }
+
+          const buffer = incomingChunks.current[messageId];
+          if (!buffer.parts[index]) {
+              buffer.parts[index] = chunkData;
+              buffer.count++;
+          }
+
+          // If complete, reassemble
+          if (buffer.count === buffer.total) {
+              try {
+                  const fullJson = buffer.parts.join('');
+                  const chatMsg = JSON.parse(fullJson) as ChatMessage;
+                  
+                  // Cleanup buffer
+                  delete incomingChunks.current[messageId];
+
+                  // Process full message
+                  processReceivedChatMessage(chatMsg, conn);
+
+              } catch (e) {
+                  console.error("Failed to parse chunked message", e);
+              }
+          }
+          
+          // If I am Host, I need to relay this chunk to others immediately to reduce latency/memory
+          // (Instead of reassembling and re-chunking)
+          if (isHost) {
+              relayChunk(chunk, conn);
+          }
+
+      } else if (msg.type === 'CHAT_MESSAGE') {
+          // Legacy support or small messages
+          processReceivedChatMessage(msg.payload as ChatMessage, conn);
       }
     });
 
@@ -314,15 +346,71 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
   };
 
-  // --- Sending Messages ---
+  const processReceivedChatMessage = (chatMsg: ChatMessage, fromConn: DataConnection) => {
+      // Add to local state
+      setMessages(prev => {
+          if (prev.some(m => m.id === chatMsg.id)) return prev; // Dedup
+          return [...prev, chatMsg];
+      });
+
+      // If Host, relay to others (Note: Chunks are relayed individually, this is for standard msgs)
+      // If the message was received via chunks, we don't relay it here if we already relayed chunks.
+      // However, to keep it simple: Host only relays CHUNKS for chunked messages.
+      // Standard 'CHAT_MESSAGE' packets are relayed here.
+      if (isHost) {
+          connectionsRef.current.forEach(c => {
+             // Don't send back to sender
+             if (c.peer !== fromConn.peer) {
+                 c.send({ type: 'CHAT_MESSAGE', payload: chatMsg });
+             }
+          });
+      }
+  };
+
+  const relayChunk = (chunk: ChatChunkPayload, fromConn: DataConnection) => {
+      connectionsRef.current.forEach(c => {
+          if (c.peer !== fromConn.peer) {
+              c.send({ type: 'CHAT_MESSAGE_CHUNK', payload: chunk });
+          }
+      });
+  };
+
+  // --- Sending Messages (Chunked) ---
   const broadcastMessage = (msg: ChatMessage) => {
     // Add to self
     setMessages(prev => [...prev, msg]);
 
-    // Send to all connections
-    connectionsRef.current.forEach(conn => {
-      conn.send({ type: 'CHAT_MESSAGE', payload: msg });
-    });
+    const json = JSON.stringify(msg);
+    const totalChunks = Math.ceil(json.length / CHUNK_SIZE);
+
+    if (totalChunks === 1) {
+        // Small message, send directly
+        connectionsRef.current.forEach(conn => {
+            conn.send({ type: 'CHAT_MESSAGE', payload: msg });
+        });
+    } else {
+        // Chunk it
+        sendMessageInChunks(msg.id, json, totalChunks);
+    }
+  };
+
+  const sendMessageInChunks = async (msgId: string, fullString: string, total: number) => {
+      for (let i = 0; i < total; i++) {
+          const chunkData = fullString.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+          const payload: ChatChunkPayload = {
+              messageId: msgId,
+              index: i,
+              total: total,
+              data: chunkData
+          };
+
+          connectionsRef.current.forEach(conn => {
+              conn.send({ type: 'CHAT_MESSAGE_CHUNK', payload });
+          });
+          
+          // Small yield to prevent blocking UI
+          if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
+      }
   };
 
   const handleSendMessage = () => {
@@ -344,9 +432,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Limit file size for chat to 2MB to prevent freezing
-    if (file.size > 2 * 1024 * 1024) {
-      onNotification('聊天室文件限制为 2MB，请使用“发送文件”功能传输大文件', 'error');
+    // Limit file size for chat to 5MB (increased slightly due to chunking support)
+    if (file.size > 5 * 1024 * 1024) {
+      onNotification('聊天室文件限制为 5MB，请使用“发送文件”功能传输大文件', 'error');
       return;
     }
 

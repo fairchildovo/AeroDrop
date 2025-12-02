@@ -29,8 +29,15 @@ export interface ChunkPayload {
   total: number;
 }
 
+export interface ChatChunkPayload {
+  messageId: string;
+  index: number;
+  total: number;
+  data: string; // Substring of the stringified JSON
+}
+
 export interface P2PMessage {
-  type: 'METADATA' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE';
+  type: 'METADATA' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE' | 'CHAT_MESSAGE_CHUNK';
   payload?: any;
 }
 
