@@ -1,4 +1,3 @@
-
 import { fileToBase64, readFileAsText } from "./fileUtils";
 
 // AI features have been disabled for the P2P version of AeroDrop.

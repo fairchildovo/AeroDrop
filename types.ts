@@ -1,4 +1,3 @@
-
 export enum TransferState {
   IDLE = 'IDLE',
   CONFIGURING = 'CONFIGURING',
@@ -14,12 +13,17 @@ export interface TransferConstraints {
   expiresAt?: number; // Timestamp
 }
 
-export interface FileMetadata {
+export interface FileInfo {
   name: string;
   size: number;
   type: string;
   lastModified: number;
   preview?: string; // Base64 thumbnail or text snippet
+}
+
+export interface FileMetadata {
+  files: FileInfo[];
+  totalSize: number;
   constraints?: TransferConstraints;
 }
 
@@ -27,6 +31,23 @@ export interface ChunkPayload {
   data: ArrayBuffer;
   index: number;
   total: number;
+  fileIndex: number;
+}
+
+export interface FileStartPayload {
+  fileIndex: number;
+  fileName: string;
+  fileSize: number;
+  fileType: string;
+}
+
+export interface FileCompletePayload {
+  fileIndex: number;
+}
+
+export interface ResumePayload {
+  fileIndex: number;
+  chunkIndex: number;
 }
 
 export interface ChatChunkPayload {
@@ -37,7 +58,7 @@ export interface ChatChunkPayload {
 }
 
 export interface P2PMessage {
-  type: 'METADATA' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE' | 'CHAT_MESSAGE_CHUNK';
+  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE' | 'CHAT_MESSAGE_CHUNK';
   payload?: any;
 }
 

@@ -1,16 +1,14 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { ChatMessage, P2PMessage, ChatChunkPayload } from '../types';
 import { Send, Paperclip, Copy, LogOut, Users, Loader2, MessageCircle } from 'lucide-react';
 import { formatFileSize, fileToBase64 } from '../services/fileUtils';
-import { getIceConfig } from '../services/stunService'; // Import the new service
+import { getIceConfig } from '../services/stunService'; 
 
 interface ChatRoomProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
 }
 
-// Predefined colors for avatars
 const AVATAR_COLORS = [
   'bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-green-500', 
   'bg-emerald-500', 'bg-teal-500', 'bg-cyan-500', 'bg-sky-500', 
@@ -19,13 +17,11 @@ const AVATAR_COLORS = [
 ];
 
 const SESSION_KEY = 'aerodrop_chat_session';
-const CHUNK_SIZE = 16 * 1024; // 16KB safe limit for DataChannel strings
-const MAX_HOST_RETRIES = 10; // Max attempts to reclaim host ID
+const CHUNK_SIZE = 16 * 1024; 
+const MAX_HOST_RETRIES = 10; 
 
-// Custom component to render dice dots without border
 const DiceAvatar: React.FC<{ value: number }> = ({ value }) => {
   const dots = [];
-  // Coordinates on a 100x100 grid
   const tl = { cx: 25, cy: 25 }, tr = { cx: 75, cy: 25 };
   const cl = { cx: 25, cy: 50 }, cc = { cx: 50, cy: 50 }, cr = { cx: 75, cy: 50 };
   const bl = { cx: 25, cy: 75 }, br = { cx: 75, cy: 75 };
@@ -59,29 +55,24 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const [isHost, setIsHost] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   
-  // Track receiving progress: messageId -> percentage
   const [receivingFiles, setReceivingFiles] = useState<Record<string, number>>({});
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
 
-  // Refs
   const peerRef = useRef<Peer | null>(null);
-  const connectionsRef = useRef<DataConnection[]>([]); // For Host: list of guests. For Guest: list containing host.
+  const connectionsRef = useRef<DataConnection[]>([]); 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hostRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hostRetryCountRef = useRef<number>(0);
   
-  // Critical Fix: Use ref to track host status to avoid stale closures in event listeners
   const isHostRef = useRef(false);
 
-  // Chunk Reassembly Buffer: { [msgId]: string[] }
   const incomingChunks = useRef<Record<string, { parts: string[], count: number, total: number }>>({});
 
-  // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, receivingFiles]); // Scroll when messages or progress updates
+  }, [messages, receivingFiles]);
 
-  // Restore session on mount
   useEffect(() => {
     const restoreSession = () => {
       try {
@@ -103,20 +94,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       }
     };
     
-    // Small delay to ensure network is ready on reload
     setTimeout(restoreSession, 500);
     
     return () => {
       if (hostRetryTimeoutRef.current) clearTimeout(hostRetryTimeoutRef.current);
-      // We do NOT call leaveRoom() here to persist across refreshes
-      // However, we must destroy the peer to prevent ID conflicts on reload
       if (peerRef.current) {
           peerRef.current.destroy();
       }
     };
   }, []);
 
-  // Updated ID generation to be robust against collisions
   const generateMessageId = () => Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
 
   const getUserAvatar = (userId: string) => {
@@ -128,7 +115,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       }
       
       const colorIndex = Math.abs(hash) % AVATAR_COLORS.length;
-      // Use a slightly different hash calc for dice to decorrelate from color
       const diceValue = (Math.abs(Math.floor(hash / 3)) % 6) + 1;
 
       return {
@@ -149,7 +135,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   };
 
   const leaveRoom = () => {
-    // Explicitly remove session
     localStorage.removeItem(SESSION_KEY);
 
     connectionsRef.current.forEach(conn => conn.close());
@@ -172,9 +157,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setReceivingFiles({});
   };
 
-  // --- Hosting Logic ---
   const handleCreateRoom = () => {
-    // Generate 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     startHosting(code);
   };
@@ -183,9 +166,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setIsConnecting(true);
     setRoomCode(code);
     setIsHost(true);
-    isHostRef.current = true; // Update ref synchronously
+    isHostRef.current = true;
     
-    // If not restoring (brand new room), reset retry count
     if (!isRestoring) hostRetryCountRef.current = 0;
 
     if (peerRef.current) peerRef.current.destroy();
@@ -201,9 +183,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       console.log('Chat Room Ready:', id);
       setMode('chatting');
       setIsConnecting(false);
-      hostRetryCountRef.current = 0; // Reset retries on success
+      hostRetryCountRef.current = 0; 
       
-      // Save session
       localStorage.setItem(SESSION_KEY, JSON.stringify({ code, host: true }));
       
       if (!isRestoring) {
@@ -214,38 +195,33 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
 
     peer.on('connection', (conn) => {
-  // 给新连接绑定各种事件
-  setupConnection(conn);
+      setupConnection(conn);
 
-  // 当新连接打开时，Host 广播系统消息给其他成员
-  conn.on('open', () => {
-    if (!isHostRef.current) return;
+      conn.on('open', () => {
+        if (!isHostRef.current) return;
 
-    const sysMsg: ChatMessage = {
-      id: generateMessageId(),
-      senderId: 'system',
-      type: 'text',
-      content: `新成员加入房间 (${conn.peer})`,
-      timestamp: Date.now(),
-      isSystem: true
-    };
+        const sysMsg: ChatMessage = {
+          id: generateMessageId(),
+          senderId: 'system',
+          type: 'text',
+          content: `新成员加入房间 (${conn.peer})`,
+          timestamp: Date.now(),
+          isSystem: true
+        };
 
-    // 广播给其他已连接成员（不包括刚加入的 conn）
-    connectionsRef.current.forEach(c => {
-      if (c.peer !== conn.peer && c.open) {
-        try {
-          c.send({ type: 'CHAT_MESSAGE', payload: sysMsg });
-        } catch (e) {
-          console.error("广播新成员失败", e);
-        }
-      }
+        connectionsRef.current.forEach(c => {
+          if (c.peer !== conn.peer && c.open) {
+            try {
+              c.send({ type: 'CHAT_MESSAGE', payload: sysMsg });
+            } catch (e) {
+              console.error("广播新成员失败", e);
+            }
+          }
+        });
+
+        setMessages(prev => [...prev, sysMsg]);
+      });
     });
-
-    // Host 界面也显示
-    setMessages(prev => [...prev, sysMsg]);
-  });
-});
-
 
     peer.on('error', (err) => {
       console.error(err);
@@ -254,8 +230,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               if (hostRetryCountRef.current < MAX_HOST_RETRIES) {
                   hostRetryCountRef.current++;
                   console.log(`ID taken, retrying (${hostRetryCountRef.current}/${MAX_HOST_RETRIES})...`);
-                  // If restoring, the ID might still be held by the server from the previous page load.
-                  // Retry until we get it back.
                   hostRetryTimeoutRef.current = setTimeout(() => {
                       startHosting(code, true);
                   }, 2000);
@@ -269,12 +243,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           setIsConnecting(false);
           setMode('menu');
       } else if (err.type === 'peer-unavailable' || err.type === 'disconnected') {
-          // As Host, if a peer disconnects, it's not a fatal error for the room.
-          // We just ignore it here, the 'close' event on the connection will handle cleanup.
           console.log("Peer disconnected (Host view):", err.type);
       } else {
           onNotification(`连接服务错误: ${err.type}`, 'error');
-          // Only stop connecting if we haven't started yet
           setIsConnecting(false);
       }
     });
@@ -282,7 +253,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     peerRef.current = peer;
   };
 
-  // --- Joining Logic ---
   const handleJoinRoom = () => {
     if (inputCode.length !== 6) return;
     joinChat(inputCode);
@@ -291,7 +261,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const joinChat = async (code: string) => {
     setIsConnecting(true);
     setIsHost(false);
-    isHostRef.current = false; // Update ref synchronously
+    isHostRef.current = false;
     setRoomCode(code);
 
     if (peerRef.current) peerRef.current.destroy();
@@ -312,20 +282,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       onNotification('连接房间失败，请检查口令', 'error');
       setIsConnecting(false);
       setMode('menu');
-      localStorage.removeItem(SESSION_KEY); // Invalid session
+      localStorage.removeItem(SESSION_KEY);
     });
 
     peerRef.current = peer;
   };
 
-  // --- Connection Setup ---
   const setupConnection = (conn: DataConnection) => {
     conn.on('open', () => {
       connectionsRef.current.push(conn);
       setOnlineCount(prev => prev + 1);
       
-      // Save session if we are guest (Host saves on open)
-      // Check ref instead of state to be safe
       if (!isHostRef.current) {
         setMode('chatting');
         setIsConnecting(false);
@@ -341,7 +308,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           const chunk = msg.payload as ChatChunkPayload;
           const { messageId, index, total, data: chunkData } = chunk;
 
-          // Initialize buffer if needed
           if (!incomingChunks.current[messageId]) {
               incomingChunks.current[messageId] = {
                   parts: new Array(total),
@@ -355,8 +321,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               buffer.parts[index] = chunkData;
               buffer.count++;
               
-              // Update progress for large files
-              // Only update if percentage changed to avoid spamming state updates
               const pct = Math.floor((buffer.count / buffer.total) * 100);
               setReceivingFiles(prev => {
                   if (prev[messageId] === pct) return prev;
@@ -364,23 +328,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               });
           }
 
-          // If complete, reassemble
           if (buffer.count === buffer.total) {
               try {
                   const fullJson = buffer.parts.join('');
                   const chatMsg = JSON.parse(fullJson) as ChatMessage;
                   
-                  // Cleanup buffer
                   delete incomingChunks.current[messageId];
                   
-                  // Clear progress
                   setReceivingFiles(prev => {
                       const next = { ...prev };
                       delete next[messageId];
                       return next;
                   });
 
-                  // Process full message
                   processReceivedChatMessage(chatMsg, conn);
 
               } catch (e) {
@@ -393,74 +353,63 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               }
           }
           
-          // If I am Host, I need to relay this chunk to others immediately to reduce latency/memory
-          // (Instead of reassembling and re-chunking)
           if (isHostRef.current) {
               relayChunk(chunk, conn);
           }
 
       } else if (msg.type === 'CHAT_MESSAGE') {
-          // Legacy support or small messages
           processReceivedChatMessage(msg.payload as ChatMessage, conn);
       }
     });
 
    conn.on('close', () => {
-  // 从连接列表中移除
-  connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
-  setOnlineCount(prev => Math.max(1, prev - 1));
+      connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+      setOnlineCount(prev => Math.max(1, prev - 1));
 
-  if (isHostRef.current) {
-    // Host 广播系统消息给其他成员
-    const sysMsg: ChatMessage = {
-      id: generateMessageId(),
-      senderId: 'system',
-      type: 'text',
-      content: `成员 (${conn.peer}) 已离开房间`,
-      timestamp: Date.now(),
-      isSystem: true
-    };
+      if (isHostRef.current) {
+        const sysMsg: ChatMessage = {
+          id: generateMessageId(),
+          senderId: 'system',
+          type: 'text',
+          content: `成员 (${conn.peer}) 已离开房间`,
+          timestamp: Date.now(),
+          isSystem: true
+        };
 
-    // 广播给剩余成员
-    connectionsRef.current.forEach(c => {
-      if (c.open) {
-        try {
-          c.send({ type: 'CHAT_MESSAGE', payload: sysMsg });
-        } catch (e) {
-          console.error("广播离开消息失败", e);
+        connectionsRef.current.forEach(c => {
+          if (c.open) {
+            try {
+              c.send({ type: 'CHAT_MESSAGE', payload: sysMsg });
+            } catch (e) {
+              console.error("广播离开消息失败", e);
+            }
+          }
+        });
+
+        setMessages(prev => [...prev, sysMsg]);
+      } else {
+        if (localStorage.getItem(SESSION_KEY)) {
+          addSystemMessage('连接中断，尝试重连...');
+          setTimeout(() => {
+            if (localStorage.getItem(SESSION_KEY)) {
+              joinChat(roomCode);
+            }
+          }, 2000);
         }
       }
     });
-
-    // Host 自己也显示
-    setMessages(prev => [...prev, sysMsg]);
-  } else {
-    // Guest 离开 Host 的情况（Host关闭了房间）
-    if (localStorage.getItem(SESSION_KEY)) {
-      addSystemMessage('连接中断，尝试重连...');
-      setTimeout(() => {
-        if (localStorage.getItem(SESSION_KEY)) {
-          joinChat(roomCode);
-        }
-      }, 2000);
-    }
-  }
-});
   };
 
   const processReceivedChatMessage = (chatMsg: ChatMessage, fromConn: DataConnection) => {
-      // Add to local state with robust deduplication
       setMessages(prev => {
           if (prev.some(m => m.id === chatMsg.id)) return prev; 
           return [...prev, chatMsg];
       });
 
-      // If Host, relay to others (Note: Chunks are relayed individually, this is for standard msgs)
       if (isHostRef.current) {
           connectionsRef.current.forEach(c => {
-             // Don't send back to sender
              if (c.peer !== fromConn.peer) {
-                 if (c.open) { // Ensure connection is open
+                 if (c.open) { 
                      try {
                          c.send({ type: 'CHAT_MESSAGE', payload: chatMsg });
                      } catch (e) {
@@ -475,7 +424,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const relayChunk = (chunk: ChatChunkPayload, fromConn: DataConnection) => {
       connectionsRef.current.forEach(c => {
           if (c.peer !== fromConn.peer) {
-              if (c.open) { // Ensure connection is open
+              if (c.open) { 
                   try {
                       c.send({ type: 'CHAT_MESSAGE_CHUNK', payload: chunk });
                   } catch (e) {
@@ -486,16 +435,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       });
   };
 
-  // --- Sending Messages (Chunked) ---
   const broadcastMessage = (msg: ChatMessage) => {
-    // Add to self
     setMessages(prev => [...prev, msg]);
 
     const json = JSON.stringify(msg);
     const totalChunks = Math.ceil(json.length / CHUNK_SIZE);
 
     if (totalChunks === 1) {
-        // Small message, send directly
         connectionsRef.current.forEach(conn => {
             if (conn.open) {
                 try {
@@ -504,7 +450,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
             }
         });
     } else {
-        // Chunk it
         sendMessageInChunks(msg.id, json, totalChunks);
     }
   };
@@ -527,9 +472,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               }
           });
           
-          // Throttling strategy:
-          // Yield every 5 chunks to prevent UI freeze
-          // Add a small real delay every 20 chunks to prevent WebRTC buffer overflow on large files
           if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
           if (i % 20 === 0) await new Promise(r => setTimeout(r, 5));
       }
@@ -554,10 +496,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Limit file size for chat to 50MB (Adjusted request)
     if (file.size > 50 * 1024 * 1024) {
       onNotification('聊天室文件限制为 50MB，超大文件请使用“发送文件”功能', 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
+    }
+
+    if (file.size > 1 * 1024 * 1024) {
+        setIsProcessingFile(true);
+        // Small delay to allow UI to render spinner before heavy operation
+        await new Promise(r => setTimeout(r, 50));
     }
 
     try {
@@ -579,11 +527,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
       broadcastMessage(msg);
     } catch (err) {
+      console.error(err);
       onNotification('文件处理失败', 'error');
+    } finally {
+        setIsProcessingFile(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
     }
-    
-    // Reset input
-    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleCopyText = (text?: string) => {
@@ -600,8 +549,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       link.click();
       document.body.removeChild(link);
   };
-
-  // --- Render ---
 
   if (mode === 'menu') {
     return (
@@ -657,7 +604,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
   return (
     <div className="w-full max-w-xl mx-auto bg-white dark:bg-slate-800 md:rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 overflow-hidden flex flex-col h-[calc(100dvh-180px)] md:h-[600px] animate-slide-up transition-colors">
-      {/* Header */}
       <div className="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 p-4 flex items-center justify-between sticky top-0 z-10 shrink-0">
          <div className="flex items-center gap-3">
              <div className="w-10 h-10 bg-brand-100 dark:bg-slate-700 text-brand-600 dark:text-brand-400 rounded-full flex items-center justify-center">
@@ -679,18 +625,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
          </button>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 bg-[#f2f2f7] dark:bg-slate-950 transition-colors"> {/* iMessage-ish background */}
+      <div className="flex-1 overflow-y-auto p-4 bg-[#f2f2f7] dark:bg-slate-950 transition-colors"> 
           {messages.map((msg, index) => {
               const myId = peerRef.current?.id || 'me';
               const isMe = msg.senderId === myId;
               const isSys = msg.isSystem;
 
-              // Check if previous message was from the same sender (for nickname placement)
               const prevMsg = messages[index - 1];
               const isConsecutive = prevMsg && prevMsg.senderId === msg.senderId;
               
-              // Check if next message is from the same sender (for avatar placement on the bottom)
               const nextMsg = messages[index + 1];
               const isLastInGroup = !nextMsg || nextMsg.senderId !== msg.senderId;
 
@@ -703,23 +646,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               }
 
               const { color: avatarColor, diceValue } = getUserAvatar(msg.senderId);
-              const nickname = msg.senderId.slice(-4); // Use last 4 chars as nickname
+              const nickname = msg.senderId.slice(-4); 
 
               return (
                   <div key={msg.id} className={`flex w-full mb-1 animate-fade-in-up ${isMe ? 'justify-end' : 'justify-start'}`}>
-                      {/* Avatar for others - Show on LAST message of group */}
                       {!isMe && (
                         <div className="w-8 flex-shrink-0 flex flex-col items-center mr-2 self-end">
                              {isLastInGroup ? (
                                 <div className={`w-8 h-8 rounded-full ${avatarColor} flex items-center justify-center text-white shadow-sm overflow-hidden`}>
                                     <DiceAvatar value={diceValue} />
                                 </div>
-                             ) : <div className="w-8" />} {/* Spacer */}
+                             ) : <div className="w-8" />}
                         </div>
                       )}
 
                       <div className={`max-w-[85%] md:max-w-[70%] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                          {/* Nickname for others, only on first msg of group */}
                           {!isMe && !isConsecutive && (
                               <span className="text-[10px] text-slate-400 ml-1 mb-0.5">#{nickname}</span>
                           )}
@@ -731,7 +672,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                                  : 'bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 rounded-bl-sm border border-slate-100 dark:border-slate-600'
                              }`}
                           >
-                              {/* Content */}
                               {msg.type === 'text' && (
                                   <p 
                                     className="whitespace-pre-wrap break-words cursor-pointer active:opacity-80 leading-snug"
@@ -768,7 +708,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                                   </div>
                               )}
 
-                              {/* Timestamp - Positioned at side */}
                               <span className={`text-[10px] text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap absolute bottom-1 ${
                                 isMe ? 'right-full mr-2' : 'left-full ml-2'
                               }`}>
@@ -782,7 +721,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           <div ref={messagesEndRef} />
       </div>
 
-      {/* Progress Bar for Receiving Files */}
       {Object.keys(receivingFiles).length > 0 && (
           <div className="bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 px-4 py-2 animate-slide-up">
               <div className="flex items-center gap-2 mb-1">
@@ -800,7 +738,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           </div>
       )}
 
-      {/* Input Area */}
       <div className="bg-white dark:bg-slate-900 p-3 border-t border-slate-200 dark:border-slate-700 flex items-end gap-2 shrink-0 transition-colors">
          <input 
             type="file" 
@@ -810,11 +747,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
          />
          <div className="flex gap-1 pb-1">
             <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="p-2 text-slate-400 hover:text-brand-500 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-full transition-colors"
+                onClick={() => !isProcessingFile && fileInputRef.current?.click()}
+                disabled={isProcessingFile}
+                className={`p-2 rounded-full transition-colors ${
+                    isProcessingFile 
+                    ? 'text-brand-500 bg-brand-50 dark:bg-slate-800 cursor-not-allowed' 
+                    : 'text-slate-400 hover:text-brand-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
                 title="发送文件/图片"
             >
-                <Paperclip size={24} />
+                {isProcessingFile ? <Loader2 size={24} className="animate-spin" /> : <Paperclip size={24} />}
             </button>
          </div>
 
