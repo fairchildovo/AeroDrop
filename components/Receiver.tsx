@@ -58,7 +58,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   // Accumulate small chunks in memory and write them in bulk (e.g., 50MB) to disk.
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
-  const BUFFER_FLUSH_THRESHOLD = 50 * 1024 * 1024; // 50MB
+  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024; // 16MB
 
   // 速度计算 Refs
   const lastSpeedUpdateRef = useRef<number>(0);
@@ -177,6 +177,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   // === BUFFER FLUSH LOGIC ===
   const flushWriteBuffer = async () => {
+      if (!isStreamingRef.current) return;
+
       if (writeBufferSizeRef.current === 0) return;
 
       const chunksToFlush = writeBufferRef.current;
@@ -568,6 +570,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   };
 
   const reset = () => {
+    isStreamingRef.current = false;
+    
     // Send cancel message if active transfer
     if (state === TransferState.TRANSFERRING && connRef.current && connRef.current.open) {
         try {

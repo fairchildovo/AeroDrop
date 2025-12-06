@@ -396,8 +396,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     // Chunk size: 256KB for better performance (Up from 64KB)
     const CHUNK_SIZE = 256 * 1024; 
     
-    // High Water Mark: 50MB for aggressive buffering
-    const HIGH_WATER_MARK = 50 * 1024 * 1024;
+    // High Water Mark: 16MB (Optimized for main thread responsiveness)
+    const HIGH_WATER_MARK = 16 * 1024 * 1024;
     // Low Water Mark: 10MB
     const LOW_WATER_MARK = 10 * 1024 * 1024;
     
