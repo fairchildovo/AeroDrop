@@ -58,8 +58,23 @@ export interface ChatChunkPayload {
   data: string; // Substring of the stringified JSON
 }
 
+export interface ChatFileStartPayload {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  senderId: string;
+}
+
+export interface ChatFileChunkPayload {
+  messageId: string;
+  data: ArrayBuffer; // Raw binary data
+  index: number;
+  total: number;
+}
+
 export interface P2PMessage {
-  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE' | 'CHAT_MESSAGE_CHUNK' | 'TRANSFER_CANCELLED';
+  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'CHAT_MESSAGE' | 'CHAT_JOIN' | 'CHAT_LEAVE' | 'CHAT_MESSAGE_CHUNK' | 'TRANSFER_CANCELLED' | 'CHAT_FILE_START' | 'CHAT_FILE_CHUNK';
   payload?: any;
 }
 
@@ -92,7 +107,8 @@ export interface ChatMessage {
     name: string;
     size: number;
     mimeType: string;
-    data: string; // Base64
+    data?: string; // Base64 (legacy/images)
+    blob?: Blob;   // For large files
   };
   timestamp: number;
   isSystem?: boolean;

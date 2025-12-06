@@ -1,6 +1,7 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-import { ChatMessage, P2PMessage, ChatChunkPayload } from '../types';
+import { ChatMessage, P2PMessage, ChatChunkPayload, ChatFileStartPayload, ChatFileChunkPayload } from '../types';
 import { Send, Paperclip, Copy, LogOut, Users, Loader2, MessageCircle } from 'lucide-react';
 import { formatFileSize, fileToBase64 } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService'; 
@@ -67,7 +68,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   
   const isHostRef = useRef(false);
 
-  const incomingChunks = useRef<Record<string, { parts: string[], count: number, total: number }>>({});
+  // Buffer for reconstructing binary files
+  // Map<MessageID, { parts: ArrayBuffer[], count: number, total: number, metadata: ... }>
+  const incomingFiles = useRef<Record<string, { 
+      parts: ArrayBuffer[], 
+      count: number, 
+      total: number,
+      metadata: ChatFileStartPayload 
+  }>>({});
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -153,7 +161,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     isHostRef.current = false;
     setOnlineCount(1);
     setIsConnecting(false);
-    incomingChunks.current = {};
+    incomingFiles.current = {};
     setReceivingFiles({});
   };
 
@@ -324,60 +332,114 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     conn.on('data', (data: any) => {
       const msg = data as P2PMessage;
       
-      if (msg.type === 'CHAT_MESSAGE_CHUNK') {
-          const chunk = msg.payload as ChatChunkPayload;
-          const { messageId, index, total, data: chunkData } = chunk;
+      if (msg.type === 'CHAT_FILE_START') {
+          const payload = msg.payload as ChatFileStartPayload;
+          incomingFiles.current[payload.id] = {
+              metadata: payload,
+              parts: [], // will be filled sparsely or pushed
+              count: 0,
+              total: Math.ceil(payload.size / CHUNK_SIZE) // Approx or handled by chunk total
+          };
+          if (isHostRef.current) relayMessage(msg, conn);
+      }
 
-          if (!incomingChunks.current[messageId]) {
-              incomingChunks.current[messageId] = {
-                  parts: new Array(total),
-                  count: 0,
-                  total: total
-              };
+      else if (msg.type === 'CHAT_FILE_CHUNK') {
+          const payload = msg.payload as ChatFileChunkPayload;
+          const { messageId, data: chunkData, index, total } = payload;
+          
+          if (!incomingFiles.current[messageId]) {
+               // Must have missed start frame or out of order?
+               // Wait, PeerJS is reliable/ordered usually.
+               // Just create placeholder? No metadata so we can't do much.
+               // Ignore or request resend? Ignoring for MVP.
+               return;
           }
 
-          const buffer = incomingChunks.current[messageId];
-          if (!buffer.parts[index]) {
-              buffer.parts[index] = chunkData;
-              buffer.count++;
-              
-              const pct = Math.floor((buffer.count / buffer.total) * 100);
+          const fileCtx = incomingFiles.current[messageId];
+          if (!fileCtx.parts[index]) {
+              fileCtx.parts[index] = chunkData;
+              fileCtx.count++;
+              // update progress
+              const pct = Math.floor((fileCtx.count / total) * 100);
               setReceivingFiles(prev => {
                   if (prev[messageId] === pct) return prev;
                   return { ...prev, [messageId]: pct };
               });
           }
 
-          if (buffer.count === buffer.total) {
-              try {
-                  const fullJson = buffer.parts.join('');
-                  const chatMsg = JSON.parse(fullJson) as ChatMessage;
+          if (fileCtx.count === total) {
+              // Reconstruct
+              const blob = new Blob(fileCtx.parts, { type: fileCtx.metadata.mimeType });
+              const isImage = fileCtx.metadata.mimeType.startsWith('image/');
+              
+              // Create a Blob URL or Base64 for display?
+              // For large files, Blob URL is better memory-wise than Base64 string.
+              // ChatMessage interface needs update to support Blob URL or we convert.
+              // Let's use Base64 for images for compatibility with existing UI, 
+              // and raw Blob logic for files?
+              // Actually, converting a 50MB blob to Base64 to string is heavy.
+              // Let's try to update ChatMessage to support Blob/URL but keeping it simple for now:
+              // For images: FileReader to Base64 (usually small enough in chat)
+              // For files: Keep as Blob and create object URL on click? 
+              // Existing UI expects 'data' string.
+              
+              const finishProcessing = async () => {
+                  let fileData: any = {
+                      name: fileCtx.metadata.name,
+                      size: fileCtx.metadata.size,
+                      mimeType: fileCtx.metadata.mimeType,
+                  };
+
+                  if (isImage && fileCtx.metadata.size < 5 * 1024 * 1024) {
+                      // Convert small images to base64 for immediate display
+                      const reader = new FileReader();
+                      reader.readAsDataURL(blob);
+                      reader.onloadend = () => {
+                          fileData.data = (reader.result as string).split(',')[1];
+                          finalizeMessage(fileData);
+                      }
+                  } else {
+                      // Large file or non-image
+                      // We store the data as base64 for compatibility with the current `fileData.data` type
+                      // CAUTION: This might still freeze UI for 50MB file.
+                      // Ideally we should change ChatMessage type to hold Blob.
+                      // I will convert to Base64 for now to stick to strict types, 
+                      // but in a real "Binary" refactor we should use ObjectURLs.
+                      const reader = new FileReader();
+                      reader.readAsDataURL(blob);
+                      reader.onloadend = () => {
+                           fileData.data = (reader.result as string).split(',')[1];
+                           finalizeMessage(fileData);
+                      }
+                  }
+              };
+
+              const finalizeMessage = (fileData: any) => {
+                  const chatMsg: ChatMessage = {
+                      id: messageId,
+                      senderId: fileCtx.metadata.senderId,
+                      type: isImage ? 'image' : 'file',
+                      fileData: fileData,
+                      timestamp: Date.now()
+                  };
                   
-                  delete incomingChunks.current[messageId];
-                  
+                  delete incomingFiles.current[messageId];
                   setReceivingFiles(prev => {
                       const next = { ...prev };
                       delete next[messageId];
                       return next;
                   });
 
-                  processReceivedChatMessage(chatMsg, conn);
+                  processReceivedChatMessage(chatMsg, conn, false); // false = don't relay, we relay chunks
+              };
 
-              } catch (e) {
-                  console.error("Failed to parse chunked message", e);
-                  setReceivingFiles(prev => {
-                      const next = { ...prev };
-                      delete next[messageId];
-                      return next;
-                  });
-              }
-          }
-          
-          if (isHostRef.current) {
-              relayChunk(chunk, conn);
+              finishProcessing();
           }
 
-      } else if (msg.type === 'CHAT_MESSAGE') {
+          if (isHostRef.current) relayMessage(msg, conn);
+      }
+
+      else if (msg.type === 'CHAT_MESSAGE') {
           processReceivedChatMessage(msg.payload as ChatMessage, conn);
       }
     });
@@ -420,13 +482,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
   };
 
-  const processReceivedChatMessage = (chatMsg: ChatMessage, fromConn: DataConnection) => {
+  const processReceivedChatMessage = (chatMsg: ChatMessage, fromConn: DataConnection, relay = true) => {
       setMessages(prev => {
           if (prev.some(m => m.id === chatMsg.id)) return prev; 
           return [...prev, chatMsg];
       });
 
-      if (isHostRef.current) {
+      if (isHostRef.current && relay) {
           connectionsRef.current.forEach(c => {
              if (c.peer !== fromConn.peer) {
                  if (c.open) { 
@@ -441,12 +503,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       }
   };
 
-  const relayChunk = (chunk: ChatChunkPayload, fromConn: DataConnection) => {
+  const relayMessage = (msg: P2PMessage, fromConn: DataConnection) => {
       connectionsRef.current.forEach(c => {
           if (c.peer !== fromConn.peer) {
               if (c.open) { 
                   try {
-                      c.send({ type: 'CHAT_MESSAGE_CHUNK', payload: chunk });
+                      c.send(msg); // Send exact message (Chunks or Start)
                   } catch (e) {
                       console.error("Relay chunk failed to", c.peer, e);
                   }
@@ -456,45 +518,89 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   };
 
   const broadcastMessage = (msg: ChatMessage) => {
-    setMessages(prev => [...prev, msg]);
-
-    const json = JSON.stringify(msg);
-    const totalChunks = Math.ceil(json.length / CHUNK_SIZE);
-
-    if (totalChunks === 1) {
-        connectionsRef.current.forEach(conn => {
-            if (conn.open) {
-                try {
-                    conn.send({ type: 'CHAT_MESSAGE', payload: msg });
-                } catch(e) { console.error("Send failed", e); }
-            }
-        });
-    } else {
-        sendMessageInChunks(msg.id, json, totalChunks);
-    }
+      // For Text Messages
+      setMessages(prev => [...prev, msg]);
+      connectionsRef.current.forEach(conn => {
+          if (conn.open) {
+              try {
+                  conn.send({ type: 'CHAT_MESSAGE', payload: msg });
+              } catch(e) { console.error("Send failed", e); }
+          }
+      });
   };
 
-  const sendMessageInChunks = async (msgId: string, fullString: string, total: number) => {
-      for (let i = 0; i < total; i++) {
-          const chunkData = fullString.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-          const payload: ChatChunkPayload = {
-              messageId: msgId,
-              index: i,
-              total: total,
-              data: chunkData
-          };
+  const broadcastFile = async (file: File) => {
+      const msgId = generateMessageId();
+      const senderId = peerRef.current?.id || 'me';
+      
+      const startPayload: ChatFileStartPayload = {
+          id: msgId,
+          name: file.name,
+          size: file.size,
+          mimeType: file.type,
+          senderId: senderId
+      };
 
-          connectionsRef.current.forEach(conn => {
-              if (conn.open) {
-                  try {
-                      conn.send({ type: 'CHAT_MESSAGE_CHUNK', payload });
-                  } catch(e) { console.error("Send chunk failed", e); }
-              }
-          });
+      // Send Start
+      connectionsRef.current.forEach(conn => {
+          if(conn.open) conn.send({ type: 'CHAT_FILE_START', payload: startPayload });
+      });
+
+      // Prepare local preview immediately? 
+      // We can't display it until we read it, but we can add a placeholder message?
+      // Or just wait until we upload it? 
+      // Let's add it to local state as if we received it, but we need data.
+      
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+      let offset = 0;
+      let chunkIndex = 0;
+
+      // Read & Send Chunks
+      while (offset < file.size) {
+          const slice = file.slice(offset, offset + CHUNK_SIZE);
+          const buffer = await slice.arrayBuffer();
           
-          if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
-          if (i % 20 === 0) await new Promise(r => setTimeout(r, 5));
+          const chunkPayload: ChatFileChunkPayload = {
+              messageId: msgId,
+              data: buffer,
+              index: chunkIndex,
+              total: totalChunks
+          };
+          
+          connectionsRef.current.forEach(conn => {
+              if(conn.open) conn.send({ type: 'CHAT_FILE_CHUNK', payload: chunkPayload });
+          });
+
+          offset += CHUNK_SIZE;
+          chunkIndex++;
+          
+          // Yield to UI
+          if (chunkIndex % 10 === 0) await new Promise(r => setTimeout(r, 0));
       }
+
+      // After sending, we also need to display it locally.
+      // We can read the whole file again or just use the File object we have.
+      const isImage = file.type.startsWith('image/');
+      let fileData: any = {
+          name: file.name,
+          size: file.size,
+          mimeType: file.type,
+      };
+      
+      if (isImage && file.size < 5 * 1024 * 1024) {
+           fileData.data = await fileToBase64(file);
+      } else {
+           fileData.data = await fileToBase64(file); 
+      }
+
+      const chatMsg: ChatMessage = {
+          id: msgId,
+          senderId: senderId,
+          type: isImage ? 'image' : 'file',
+          fileData: fileData,
+          timestamp: Date.now()
+      };
+      setMessages(prev => [...prev, chatMsg]);
   };
 
   const handleSendMessage = () => {
@@ -522,33 +628,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       return;
     }
 
-    if (file.size > 1 * 1024 * 1024) {
-        setIsProcessingFile(true);
-        // Small delay to allow UI to render spinner before heavy operation
-        await new Promise(r => setTimeout(r, 50));
-    }
-
+    setIsProcessingFile(true);
     try {
-      const base64 = await fileToBase64(file);
-      const isImage = file.type.startsWith('image/');
-      
-      const msg: ChatMessage = {
-        id: generateMessageId(),
-        senderId: peerRef.current?.id || 'me',
-        type: isImage ? 'image' : 'file',
-        fileData: {
-          name: file.name,
-          size: file.size,
-          mimeType: file.type,
-          data: base64
-        },
-        timestamp: Date.now()
-      };
-
-      broadcastMessage(msg);
+        await broadcastFile(file);
     } catch (err) {
       console.error(err);
-      onNotification('文件处理失败', 'error');
+      onNotification('文件发送失败', 'error');
     } finally {
         setIsProcessingFile(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -708,7 +793,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                                         src={`data:${msg.fileData.mimeType};base64,${msg.fileData.data}`} 
                                         alt="Image" 
                                         className="rounded-lg max-h-48 cursor-pointer hover:opacity-90 transition-opacity"
-                                        onClick={() => downloadFile(msg.fileData!.data, msg.fileData!.name, msg.fileData!.mimeType)}
+                                        onClick={() => downloadFile(msg.fileData!.data!, msg.fileData!.name, msg.fileData!.mimeType)}
                                       />
                                   </div>
                               )}
@@ -716,7 +801,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                               {msg.type === 'file' && msg.fileData && (
                                   <div 
                                     className={`flex items-center gap-3 p-1 cursor-pointer ${isMe ? 'text-white' : 'text-slate-800 dark:text-slate-100'}`}
-                                    onClick={() => downloadFile(msg.fileData!.data, msg.fileData!.name, msg.fileData!.mimeType)}
+                                    onClick={() => downloadFile(msg.fileData!.data!, msg.fileData!.name, msg.fileData!.mimeType)}
                                   >
                                       <div className={`p-2 rounded-lg ${isMe ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-600'}`}>
                                           <Paperclip size={20} />

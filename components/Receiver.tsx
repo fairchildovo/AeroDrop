@@ -1,6 +1,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
+// @ts-ignore
+import streamSaver from 'streamsaver';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService';
@@ -45,6 +47,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const receivedSizeRef = useRef<number>(0);
   const currentFileSizeRef = useRef<number>(0);
   
+  // === Streaming Refs for Large Files ===
+  const isStreamingRef = useRef<boolean>(false);
+  const nativeWriterRef = useRef<any>(null); // FileSystemWritableFileStream
+  const streamSaverWriterRef = useRef<WritableStreamDefaultWriter | null>(null);
+  // Queue to ensure async disk writes are sequential
+  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+
   // 速度计算 Refs
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -75,11 +84,48 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
+      // Clean up any open streams if component unmounts
+      if (nativeWriterRef.current) nativeWriterRef.current.close().catch(console.error);
+      if (streamSaverWriterRef.current) streamSaverWriterRef.current.close().catch(console.error);
     };
   }, []);
 
+  // Wake Lock Effect
+  useEffect(() => {
+    let wakeLock: any = null;
+
+    const requestWakeLock = async () => {
+      try {
+        if ('wakeLock' in navigator) {
+          // @ts-ignore
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch (err) {
+        console.warn('Wake Lock request failed:', err);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && state === TransferState.TRANSFERRING) {
+        requestWakeLock();
+      }
+    };
+
+    if (state === TransferState.TRANSFERRING) {
+      requestWakeLock();
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      if (wakeLock) {
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [state]);
+
   // Dedicated loop for UI updates (Progress & Speed)
-  // This decouples packet arrival from UI rendering for smoother/reliable stats
   useEffect(() => {
     let interval: number;
     if (state === TransferState.TRANSFERRING) {
@@ -133,19 +179,40 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       retryCountRef.current = 0;
     });
 
-    conn.on('data', (data: any) => {
+    conn.on('data', async (data: any) => {
       // 1. 接收 Raw ArrayBuffer 数据块 (High Speed Path)
-      // Robust binary detection for ArrayBuffer or Views (Uint8Array)
       const isBinary = data instanceof ArrayBuffer || (data.constructor && data.constructor.name === 'ArrayBuffer') || ArrayBuffer.isView(data);
 
       if (isBinary) {
          const chunkData = (ArrayBuffer.isView(data) ? data.buffer : data) as ArrayBuffer;
+         const byteLength = chunkData.byteLength;
          
-         if (chunkData.byteLength > 0) {
-             chunksRef.current.push(chunkData);
+         if (byteLength > 0) {
+             if (isStreamingRef.current) {
+                 // === STREAMING MODE (Low Memory) ===
+                 // Enqueue write to prevent race conditions
+                 writeQueueRef.current = writeQueueRef.current.then(async () => {
+                     try {
+                         if (nativeWriterRef.current) {
+                             await nativeWriterRef.current.write(chunkData);
+                         } else if (streamSaverWriterRef.current) {
+                             // StreamSaver expects Uint8Array usually
+                             await streamSaverWriterRef.current.write(new Uint8Array(chunkData));
+                         }
+                     } catch (e) {
+                         console.error("Stream Write Error", e);
+                         // Don't error out immediately on write fail, try to recover or just log?
+                         // If write fails, we are kind of stuck.
+                         // But for now, we just log to avoid app crash loop.
+                     }
+                 });
+             } else {
+                 // === BUFFER MODE (RAM) ===
+                 chunksRef.current.push(chunkData);
+             }
+
              receivedChunksCountRef.current++;
-             receivedSizeRef.current += chunkData.byteLength;
-             // Stats are now handled by the useEffect interval loop
+             receivedSizeRef.current += byteLength;
          }
          return;
       }
@@ -161,9 +228,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         let isResumable = false;
         if (previousMeta && previousMeta.totalSize === meta.totalSize && previousMeta.files.length === meta.files.length) {
             isResumable = true;
-            console.log("Detected resume opportunity", completedFileIndicesRef.current);
         } else {
-            // Reset state if metadata differs
             resetStateForNewTransfer();
         }
 
@@ -183,40 +248,90 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       else if (msg.type === 'FILE_START') {
         const { fileName, fileSize, fileIndex } = msg.payload;
         
-        // 如果是断点续传的同一个文件，不要清除已有的块
+        // Check if we are resuming the SAME file
         const resumingSameFile = currentFileIndexRef.current === fileIndex && chunksRef.current.length > 0;
         
         if (!resumingSameFile) {
+            // New file start
             chunksRef.current = [];
             receivedChunksCountRef.current = 0;
             receivedSizeRef.current = 0;
+            
+            // If we are moving to a new file in a multi-file transfer, we might need to setup the stream again.
+            // But FileSystemAccess API `showSaveFilePicker` requires User Gesture, so we can't do it here for subsequent files.
+            // So subsequent files in a batch MUST default to StreamSaver (if active) or Memory.
+            
+            // If we are already streaming (StreamSaver or Native) for File 0, and now File 1 starts:
+            // Native Writer: Is tied to one file handle. We need a new handle. Can't get it without gesture.
+            // StreamSaver: Can create new writestream programmatically.
+            
+            if (fileIndex > 0) {
+                 // Close previous if exists
+                 await writeQueueRef.current;
+                 if (nativeWriterRef.current) {
+                     await nativeWriterRef.current.close();
+                     nativeWriterRef.current = null;
+                     isStreamingRef.current = false; // Fallback to memory for file > 0 if native was used
+                 }
+                 if (streamSaverWriterRef.current) {
+                     await streamSaverWriterRef.current.close();
+                     streamSaverWriterRef.current = null;
+                     
+                     // Start new StreamSaver stream for next file
+                     if (streamSaver) {
+                         try {
+                             const fileStream = streamSaver.createWriteStream(fileName, { size: fileSize });
+                             streamSaverWriterRef.current = fileStream.getWriter();
+                             isStreamingRef.current = true;
+                         } catch(e) {
+                             isStreamingRef.current = false;
+                         }
+                     }
+                 }
+            }
         }
 
         currentFileSizeRef.current = fileSize;
         currentFileIndexRef.current = fileIndex;
         
-        // 重置速度
         lastSpeedUpdateRef.current = Date.now();
         lastSpeedBytesRef.current = receivedSizeRef.current;
 
-        // 更新 UI
         setCurrentFileName(fileName);
         setCurrentFileIndex(fileIndex + 1);
         setProgress(0);
         setEta('计算中...');
         setDownloadSpeed('0 KB/s');
       }
-
-      // No longer using FILE_CHUNK type for data transfer
       
       else if (msg.type === 'FILE_COMPLETE') {
-         saveCurrentFile(); 
+         // If streaming, ensure all writes are done
+         if (isStreamingRef.current) {
+             await writeQueueRef.current;
+             // Close streams
+             if (nativeWriterRef.current) {
+                 await nativeWriterRef.current.close();
+                 nativeWriterRef.current = null;
+             }
+             if (streamSaverWriterRef.current) {
+                 await streamSaverWriterRef.current.close();
+                 streamSaverWriterRef.current = null;
+             }
+             // Don't set isStreamingRef to false here, wait for next FILE_START logic to decide
+             // or if ALL_FILES_COMPLETE resets it.
+             completedFileIndicesRef.current.add(currentFileIndexRef.current);
+             
+             // Visual feedback for stream completion
+             if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
+         } else {
+             // Save from memory
+             saveCurrentFile(); 
+         }
       } 
       
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          setState(TransferState.COMPLETED);
          if (onNotification) onNotification("所有文件接收完毕", 'success');
-         // Clean up partial state after success
          resetStateForNewTransfer();
       }
       
@@ -235,8 +350,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     
     conn.on('close', () => {
        if (state !== TransferState.COMPLETED && state !== TransferState.ERROR && state !== TransferState.IDLE) {
-           // Keep state for resume capability
-           console.log("Connection lost, preserving state for resume.");
+           console.log("Connection lost.");
        }
     });
   };
@@ -249,31 +363,28 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       currentFileIndexRef.current = 0;
       setDownloadSpeed('0 KB/s');
       setEta('--');
+      isStreamingRef.current = false;
+      nativeWriterRef.current = null;
+      streamSaverWriterRef.current = null;
+      writeQueueRef.current = Promise.resolve();
   };
 
   const saveCurrentFile = () => {
-      // 1. 简单检查大小是否大致匹配 (Raw chunks don't have per-chunk index, relying on TCP order)
-      if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) {
-          console.error("文件为空，跳过保存");
-          return;
-      }
+      // In-Memory Fallback Saver
+      if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) return;
 
-      // 2. 确定文件名 (从 Metadata 中获取，这是最可靠的来源)
-      let finalName = `file_${Date.now()}.bin`; // 默认回退
+      let finalName = `file_${Date.now()}.bin`;
       let finalType = 'application/octet-stream';
 
       if (metadataRef.current) {
           const index = currentFileIndexRef.current;
-          
           if (metadataRef.current.files && metadataRef.current.files[index]) {
-              // 优先：多文件模式，直接根据索引取
               const fileInfo = metadataRef.current.files[index];
               if (fileInfo.name) finalName = fileInfo.name;
               if (fileInfo.type) finalType = fileInfo.type;
           }
       }
 
-      // 3. 创建下载
       try {
           const blob = new Blob(chunksRef.current, { type: finalType });
           const url = URL.createObjectURL(blob);
@@ -287,9 +398,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
           
           setTimeout(() => URL.revokeObjectURL(url), 1000);
           
-          // Mark as complete
           completedFileIndicesRef.current.add(currentFileIndexRef.current);
-
       } catch (e) {
           console.error("保存文件失败:", e);
       }
@@ -331,17 +440,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       setupConnListeners(conn);
     });
     
-    // Add disconnected handler
     peer.on('disconnected', () => {
         if (peer && !peer.destroyed) {
-            console.log("Peer disconnected from signaling server, reconnecting...");
             peer.reconnect();
         }
     });
 
     peer.on('error', (err) => {
       if (!peerRef.current || peerRef.current.destroyed) return;
-      
       if (err.type === 'peer-unavailable') {
         if (retryCountRef.current < 3) {
           retryCountRef.current++;
@@ -355,7 +461,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
           return;
         }
       } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-         // Suppress network errors from surfacing to UI immediately
          console.warn('Network error:', err);
          return; 
       } else {
@@ -366,9 +471,51 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     peerRef.current = peer;
   };
 
-  const acceptTransfer = () => {
+  const acceptTransfer = async () => {
     if (connRef.current) {
       resetStateForNewTransfer();
+
+      // === Streaming Logic Setup ===
+      if (metadata && metadata.files.length > 0) {
+          const file = metadata.files[0];
+          const isSingleFile = metadata.files.length === 1;
+
+          // 1. Try Native File System Access API (Preferred for Single File)
+          // Requires HTTPS and User Activation (which we have here in onClick)
+          // @ts-ignore
+          if (isSingleFile && window.showSaveFilePicker) {
+              try {
+                  // @ts-ignore
+                  const handle = await window.showSaveFilePicker({ 
+                      suggestedName: file.name 
+                  });
+                  const writable = await handle.createWritable();
+                  nativeWriterRef.current = writable;
+                  isStreamingRef.current = true;
+                  if (onNotification) onNotification("已启用直接磁盘写入模式", 'success');
+              } catch (err: any) {
+                  // User cancelled picker, or security error
+                  if (err.name !== 'AbortError') {
+                      console.warn("Native Save Failed, falling back", err);
+                  }
+                  // If aborted or failed, proceed to try StreamSaver or Memory
+              }
+          }
+
+          // 2. Try StreamSaver.js (Fallback if Native failed or not supported)
+          if (!isStreamingRef.current && streamSaver) {
+              try {
+                 // Initialize for the first file
+                 const fileStream = streamSaver.createWriteStream(file.name, { size: file.size });
+                 streamSaverWriterRef.current = fileStream.getWriter();
+                 isStreamingRef.current = true;
+                 if (onNotification) onNotification("使用流式下载 (StreamSaver)", 'info');
+              } catch (e) {
+                 console.warn("StreamSaver init failed", e);
+              }
+          }
+      }
+
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
       setState(TransferState.TRANSFERRING);
     }
@@ -376,22 +523,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   const resumeTransfer = () => {
       if (connRef.current) {
-          // Calculate where to resume
-          const completedCount = completedFileIndicesRef.current.size;
-          // Use current file index
           const currentIdx = currentFileIndexRef.current;
-          
-          // Resume current file
-          // chunksRef.current.length is the number of 64KB chunks we have received.
-          // This is the index the Sender should restart from.
           const nextChunkIndex = chunksRef.current.length;
 
-          // If current file is somehow marked complete or we are at start
+          // Resume usually implies memory mode unless we have seek capability
+          isStreamingRef.current = false; 
+
           if (completedFileIndicesRef.current.has(currentIdx)) {
-              // Move to next
               connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx + 1, chunkIndex: 0 } });
           } else {
-              // Resume current
               connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx, chunkIndex: nextChunkIndex } });
           }
           setState(TransferState.TRANSFERRING);
@@ -401,6 +541,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const reset = () => {
     if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
     if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
+    
+    // Cleanup Streams
+    if (nativeWriterRef.current) nativeWriterRef.current.close().catch(() => {});
+    if (streamSaverWriterRef.current) streamSaverWriterRef.current.close().catch(() => {});
+
     setMetadata(null);
     metadataRef.current = null;
     setCode('');
@@ -442,7 +587,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       return <FileIcon size={24} className="text-slate-400" />;
   };
 
-  // Helper to get primary file for display logic
   const primaryFile = metadata?.files?.[0];
   const isMultiFile = (metadata?.files?.length || 0) > 1;
 

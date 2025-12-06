@@ -66,6 +66,41 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     return () => stopSharing();
   }, []);
 
+  // Wake Lock Effect
+  useEffect(() => {
+    let wakeLock: any = null;
+
+    const requestWakeLock = async () => {
+      try {
+        if ('wakeLock' in navigator) {
+          // @ts-ignore
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch (err) {
+        console.warn('Wake Lock request failed:', err);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && state === TransferState.TRANSFERRING) {
+        requestWakeLock();
+      }
+    };
+
+    if (state === TransferState.TRANSFERRING) {
+      requestWakeLock();
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      if (wakeLock) {
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [state]);
+
   // Countdown timer effect
   useEffect(() => {
     if (state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) {
