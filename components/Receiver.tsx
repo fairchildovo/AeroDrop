@@ -1,6 +1,6 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
+// @ts-ignore
 import streamSaver from 'streamsaver';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
@@ -55,10 +55,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   
   // == WRITE BUFFER OPTIMIZATION ==
-  // Accumulate small chunks in memory and write them in bulk (e.g., 16MB) to disk.
+  // Accumulate small chunks in memory and write them in bulk (e.g., 50MB) to disk.
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
-  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024; // 16MB
+  const BUFFER_FLUSH_THRESHOLD = 50 * 1024 * 1024; // 50MB
 
   // 速度计算 Refs
   const lastSpeedUpdateRef = useRef<number>(0);
@@ -145,33 +145,32 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
             const pct = total > 0 ? Math.min(100, Math.floor((received / total) * 100)) : 0;
             setProgress(pct);
             
-            // Speed (every 500ms)
+            // Speed (every 1000ms)
             const timeDiff = now - lastSpeedUpdateRef.current;
-            if (timeDiff >= 500) {
-                const bytesDiff = received - lastSpeedBytesRef.current;
-                const speed = (bytesDiff / timeDiff) * 1000; // Bytes per sec
-                
-                // Prevent negative speed or weird spikes
-                const safeSpeed = Math.max(0, speed);
-                
-                setDownloadSpeed(formatFileSize(safeSpeed) + '/s');
-                
-                // ETA
-                if (safeSpeed > 0 && total > received) {
-                    const remainingBytes = total - received;
-                    const seconds = remainingBytes / safeSpeed;
-                    if (seconds > 60) setEta(`${Math.ceil(seconds / 60)} 分钟`);
-                    else setEta(`${Math.ceil(seconds)} 秒`);
-                } else if (received >= total) {
-                    setEta('完成');
-                } else {
-                    setEta('--');
-                }
-                
-                lastSpeedUpdateRef.current = now;
-                lastSpeedBytesRef.current = received;
+            const bytesDiff = received - lastSpeedBytesRef.current;
+            const speed = (bytesDiff / (timeDiff / 1000)); // Bytes per sec
+            
+            // Prevent negative speed or weird spikes
+            const safeSpeed = Math.max(0, speed);
+            
+            setDownloadSpeed(formatFileSize(safeSpeed) + '/s');
+            
+            // ETA
+            if (safeSpeed > 0 && total > received) {
+                const remainingBytes = total - received;
+                const seconds = remainingBytes / safeSpeed;
+                if (seconds > 60) setEta(`${Math.ceil(seconds / 60)} 分钟`);
+                else setEta(`${Math.ceil(seconds)} 秒`);
+            } else if (received >= total) {
+                setEta('完成');
+            } else {
+                setEta('--');
             }
-        }, 100);
+            
+            lastSpeedUpdateRef.current = now;
+            lastSpeedBytesRef.current = received;
+            
+        }, 1000);
     }
     return () => clearInterval(interval);
   }, [state]);
@@ -569,6 +568,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   };
 
   const reset = () => {
+    // Send cancel message if active transfer
+    if (state === TransferState.TRANSFERRING && connRef.current && connRef.current.open) {
+        try {
+            connRef.current.send({ type: 'TRANSFER_CANCELLED' });
+        } catch (e) {
+            console.warn("Failed to send cancel message", e);
+        }
+    }
+
     if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
     if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
     

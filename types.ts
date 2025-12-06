@@ -1,4 +1,3 @@
-
 export enum TransferState {
   IDLE = 'IDLE',
   CONFIGURING = 'CONFIGURING',
@@ -116,23 +115,6 @@ export interface ChatMessage {
 }
 
 // === Global Type Declarations ===
-import 'react';
-
-declare module 'react' {
-  interface InputHTMLAttributes<T> extends HTMLAttributes<T> {
-    webkitdirectory?: string | boolean;
-    directory?: string | boolean;
-  }
-}
-
-declare module 'streamsaver' {
-  interface StreamSaver {
-    createWriteStream(filename: string, options?: { size?: number; writableStrategy?: any; readableStrategy?: any }): WritableStream;
-    mitm: string;
-  }
-  const streamSaver: StreamSaver;
-  export default streamSaver;
-}
 
 declare global {
   interface File {

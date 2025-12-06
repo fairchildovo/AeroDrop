@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
@@ -361,6 +360,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   setState(TransferState.TRANSFERRING);
                   // Resume from specific point
                   sendFileSequence(conn, payload.fileIndex, payload.chunkIndex);
+              } else if (msg.type === 'TRANSFER_CANCELLED') {
+                  onNotification('接收方已取消传输', 'error');
+                  transferSessionId.current += 1; // Interrupt current loop
+                  activeTransfersCount.current = 0;
+                  setState(TransferState.PEER_CONNECTED);
+                  setCurrentFileIndex(0);
+                  setTotalProgress(0);
+                  setCurrentSpeed('0 KB/s');
+                  setAvgSpeed('0 KB/s');
               }
           });
           conn.on('close', () => {
@@ -385,14 +393,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     activeTransfersCount.current += 1;
     
-    // Chunk size: 64KB is a standard good size for WebRTC to avoid fragmentation overhead
-    // but keep packet loss impact manageable.
-    const CHUNK_SIZE = 64 * 1024; 
+    // Chunk size: 256KB for better performance (Up from 64KB)
+    const CHUNK_SIZE = 256 * 1024; 
     
-    // High Water Mark: 16MB (Increased from 4MB) to maximize throughput
-    const HIGH_WATER_MARK = 16 * 1024 * 1024;
-    // Low Water Mark: 4MB to resume reading sooner
-    const LOW_WATER_MARK = 4 * 1024 * 1024;
+    // High Water Mark: 50MB for aggressive buffering
+    const HIGH_WATER_MARK = 50 * 1024 * 1024;
+    // Low Water Mark: 10MB
+    const LOW_WATER_MARK = 10 * 1024 * 1024;
     
     // Stats Init
     let totalBytesSent = 0;
@@ -477,7 +484,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 bytesInLastPeriod += chunkSize;
 
                 const now = Date.now();
-                if (now - lastUpdateTime >= 200) { 
+                if (now - lastUpdateTime >= 1000) { 
                      const duration = (now - lastUpdateTime) / 1000;
                      if (duration > 0) {
                          const speed = bytesInLastPeriod / duration;
@@ -501,9 +508,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
                 offset += CHUNK_SIZE;
                 
-                // Smart Yield: Only yield if we've been blocking main thread for > 30ms.
-                // This keeps UI responsive (30fps) while maximizing throughput.
-                if (now - lastYieldTime > 30) {
+                // Smart Yield: Relaxed to 100ms to allow higher throughput
+                if (now - lastYieldTime > 100) {
                     await new Promise(r => setTimeout(r, 0));
                     lastYieldTime = Date.now();
                 }
@@ -603,7 +609,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         >
           <input type="file" id="file-upload" className="hidden" multiple onChange={handleFileSelect} />
           <input type="file" id="folder-upload" className="hidden" 
-                 webkitdirectory="" directory="" onChange={handleFolderSelect} 
+                 {...({ webkitdirectory: "", directory: "" } as any)} 
+                 onChange={handleFolderSelect} 
           />
           
           <div className={`w-16 h-16 bg-brand-50 dark:bg-slate-700 text-brand-600 dark:text-brand-400 rounded-full flex items-center justify-center mb-4 transition-transform duration-300 ${isDragOver ? 'scale-110 rotate-12' : 'group-hover:scale-110'}`}>
