@@ -68,12 +68,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   // Wake Lock Effect
   useEffect(() => {
-    let wakeLock: any = null;
+    let wakeLock: WakeLockSentinel | null = null;
 
     const requestWakeLock = async () => {
       try {
         if ('wakeLock' in navigator) {
-          // @ts-ignore
           wakeLock = await navigator.wakeLock.request('screen');
         }
       } catch (err) {
@@ -149,7 +148,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             preview = await generatePreview(f);
         }
         
-        // @ts-ignore
         const name = f.fullPath || f.webkitRelativePath || f.name;
 
         filesInfo.push({
@@ -168,26 +166,24 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   }, []);
 
   // Helper: Traverse File System Entry
-  const traverseFileTree = (item: any, path: string = ""): Promise<File[]> => {
+  const traverseFileTree = (item: FileSystemEntry, path: string = ""): Promise<File[]> => {
     return new Promise((resolve, reject) => {
       if (item.isFile) {
-        item.file((file: any) => {
+        (item as FileSystemFileEntry).file((file: File) => {
           try {
             const safeFile = new File([file], file.name, { type: file.type, lastModified: file.lastModified });
-            // @ts-ignore
             safeFile.fullPath = path + file.name;
             resolve([safeFile]);
           } catch (e) {
-            // @ts-ignore
             file.fullPath = path + file.name;
             resolve([file]);
           }
         }, (err: any) => resolve([]));
       } else if (item.isDirectory) {
-        const dirReader = item.createReader();
-        const entries: any[] = [];
+        const dirReader = (item as FileSystemDirectoryEntry).createReader();
+        const entries: FileSystemEntry[] = [];
         const readEntries = () => {
-          dirReader.readEntries(async (results: any[]) => {
+          dirReader.readEntries(async (results: FileSystemEntry[]) => {
             if (results.length === 0) {
                try {
                   const subPromises = entries.map(entry => traverseFileTree(entry, path + item.name + "/"));
@@ -205,7 +201,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     });
   };
 
-  const handleDirectoryDrop = async (entry: any) => {
+  const handleDirectoryDrop = async (entry: FileSystemEntry) => {
       try {
           const files = await traverseFileTree(entry, ""); 
           if (files.length === 0) throw new Error("文件夹为空");
@@ -225,7 +221,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           const items = e.dataTransfer?.items;
           if (items && items.length > 0) {
               const item = items[0];
-              // @ts-ignore
               const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
               if (entry && entry.isDirectory) {
                   handleDirectoryDrop(entry);
@@ -268,7 +263,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     // Construct full paths based on webkitRelativePath
     const safeFiles = Array.from(files).map((f: any) => {
         const safe = new File([f], f.name, { type: f.type, lastModified: f.lastModified });
-        // @ts-ignore
         safe.fullPath = f.webkitRelativePath || f.name;
         return safe;
     });
@@ -395,10 +389,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     // but keep packet loss impact manageable.
     const CHUNK_SIZE = 64 * 1024; 
     
-    // High Water Mark: 4MB (Start throttling when buffer > 4MB)
-    // Low Water Mark: 1MB (Resume writing when buffer < 1MB)
-    const HIGH_WATER_MARK = 4 * 1024 * 1024;
-    const LOW_WATER_MARK = 1 * 1024 * 1024;
+    // High Water Mark: 16MB (Increased from 4MB) to maximize throughput
+    const HIGH_WATER_MARK = 16 * 1024 * 1024;
+    // Low Water Mark: 4MB to resume reading sooner
+    const LOW_WATER_MARK = 4 * 1024 * 1024;
     
     // Stats Init
     let totalBytesSent = 0;
@@ -434,11 +428,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             const file = files[i];
             setCurrentFileIndex(i);
             
-            // @ts-ignore
             const fName = file.fullPath || file.webkitRelativePath || file.name;
 
             // 1. Notify Start of File (Send every time to sync state)
-            // This is critical for Receiver to know a new stream of raw buffers is coming.
             const startPayload: FileStartPayload = {
                 fileIndex: i,
                 fileName: decodeURIComponent(fName),
@@ -611,7 +603,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         >
           <input type="file" id="file-upload" className="hidden" multiple onChange={handleFileSelect} />
           <input type="file" id="folder-upload" className="hidden" 
-                 // @ts-ignore
                  webkitdirectory="" directory="" onChange={handleFolderSelect} 
           />
           

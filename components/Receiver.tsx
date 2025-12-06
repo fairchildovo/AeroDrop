@@ -1,7 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-// @ts-ignore
 import streamSaver from 'streamsaver';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
@@ -41,18 +40,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const currentFileIndexRef = useRef<number>(0); 
   const completedFileIndicesRef = useRef<Set<number>>(new Set());
   
-  // 分块处理 Refs
+  // 分块处理 Refs (Memory Fallback)
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const receivedChunksCountRef = useRef<number>(0);
   const receivedSizeRef = useRef<number>(0);
   const currentFileSizeRef = useRef<number>(0);
   
-  // === Streaming Refs for Large Files ===
+  // === Streaming & Buffering Refs for Large Files ===
   const isStreamingRef = useRef<boolean>(false);
-  const nativeWriterRef = useRef<any>(null); // FileSystemWritableFileStream
+  const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
   const streamSaverWriterRef = useRef<WritableStreamDefaultWriter | null>(null);
-  // Queue to ensure async disk writes are sequential
+  
+  // Write Queue to ensure async writes are sequential
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  
+  // == WRITE BUFFER OPTIMIZATION ==
+  // Accumulate small chunks in memory and write them in bulk (e.g., 16MB) to disk.
+  const writeBufferRef = useRef<Uint8Array[]>([]);
+  const writeBufferSizeRef = useRef<number>(0);
+  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024; // 16MB
 
   // 速度计算 Refs
   const lastSpeedUpdateRef = useRef<number>(0);
@@ -92,12 +98,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   // Wake Lock Effect
   useEffect(() => {
-    let wakeLock: any = null;
+    let wakeLock: WakeLockSentinel | null = null;
 
     const requestWakeLock = async () => {
       try {
         if ('wakeLock' in navigator) {
-          // @ts-ignore
           wakeLock = await navigator.wakeLock.request('screen');
         }
       } catch (err) {
@@ -171,6 +176,33 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     return () => clearInterval(interval);
   }, [state]);
 
+  // === BUFFER FLUSH LOGIC ===
+  const flushWriteBuffer = async () => {
+      if (writeBufferSizeRef.current === 0) return;
+
+      const chunksToFlush = writeBufferRef.current;
+      const totalLen = writeBufferSizeRef.current;
+
+      // Reset Buffer immediately
+      writeBufferRef.current = [];
+      writeBufferSizeRef.current = 0;
+
+      // Combine chunks
+      const combined = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const chunk of chunksToFlush) {
+          combined.set(chunk, offset);
+          offset += chunk.byteLength;
+      }
+
+      // Write to disk
+      if (nativeWriterRef.current) {
+          await nativeWriterRef.current.write(combined);
+      } else if (streamSaverWriterRef.current) {
+          await streamSaverWriterRef.current.write(combined);
+      }
+  };
+
   const setupConnListeners = (conn: DataConnection) => {
     connRef.current = conn;
 
@@ -188,31 +220,26 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
          const byteLength = chunkData.byteLength;
          
          if (byteLength > 0) {
-             if (isStreamingRef.current) {
-                 // === STREAMING MODE (Low Memory) ===
-                 // Enqueue write to prevent race conditions
-                 writeQueueRef.current = writeQueueRef.current.then(async () => {
-                     try {
-                         if (nativeWriterRef.current) {
-                             await nativeWriterRef.current.write(chunkData);
-                         } else if (streamSaverWriterRef.current) {
-                             // StreamSaver expects Uint8Array usually
-                             await streamSaverWriterRef.current.write(new Uint8Array(chunkData));
-                         }
-                     } catch (e) {
-                         console.error("Stream Write Error", e);
-                         // Don't error out immediately on write fail, try to recover or just log?
-                         // If write fails, we are kind of stuck.
-                         // But for now, we just log to avoid app crash loop.
-                     }
-                 });
-             } else {
-                 // === BUFFER MODE (RAM) ===
-                 chunksRef.current.push(chunkData);
-             }
-
              receivedChunksCountRef.current++;
              receivedSizeRef.current += byteLength;
+
+             if (isStreamingRef.current) {
+                 // === STREAMING MODE WITH BUFFERING ===
+                 // Push to memory buffer first
+                 writeBufferRef.current.push(new Uint8Array(chunkData));
+                 writeBufferSizeRef.current += byteLength;
+
+                 // Only write to disk if buffer is full
+                 if (writeBufferSizeRef.current >= BUFFER_FLUSH_THRESHOLD) {
+                     // Enqueue the flush to ensure order
+                     writeQueueRef.current = writeQueueRef.current.then(flushWriteBuffer).catch(e => {
+                         console.error("Flush Buffer Error", e);
+                     });
+                 }
+             } else {
+                 // === MEMORY BUFFER MODE (For small files/fallback) ===
+                 chunksRef.current.push(chunkData);
+             }
          }
          return;
       }
@@ -254,30 +281,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         if (!resumingSameFile) {
             // New file start
             chunksRef.current = [];
+            writeBufferRef.current = [];
+            writeBufferSizeRef.current = 0;
             receivedChunksCountRef.current = 0;
             receivedSizeRef.current = 0;
             
-            // If we are moving to a new file in a multi-file transfer, we might need to setup the stream again.
-            // But FileSystemAccess API `showSaveFilePicker` requires User Gesture, so we can't do it here for subsequent files.
-            // So subsequent files in a batch MUST default to StreamSaver (if active) or Memory.
-            
-            // If we are already streaming (StreamSaver or Native) for File 0, and now File 1 starts:
-            // Native Writer: Is tied to one file handle. We need a new handle. Can't get it without gesture.
-            // StreamSaver: Can create new writestream programmatically.
-            
+            // Handle Stream Reset for Multi-file transfer
             if (fileIndex > 0) {
                  // Close previous if exists
-                 await writeQueueRef.current;
+                 await writeQueueRef.current; // Wait for pending writes
                  if (nativeWriterRef.current) {
                      await nativeWriterRef.current.close();
                      nativeWriterRef.current = null;
-                     isStreamingRef.current = false; // Fallback to memory for file > 0 if native was used
+                     isStreamingRef.current = false; // Fallback to memory for file > 0 if native was used (native requires gesture)
                  }
                  if (streamSaverWriterRef.current) {
                      await streamSaverWriterRef.current.close();
                      streamSaverWriterRef.current = null;
                      
-                     // Start new StreamSaver stream for next file
+                     // Start new StreamSaver stream for next file automatically
                      if (streamSaver) {
                          try {
                              const fileStream = streamSaver.createWriteStream(fileName, { size: fileSize });
@@ -305,24 +327,30 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       }
       
       else if (msg.type === 'FILE_COMPLETE') {
-         // If streaming, ensure all writes are done
+         // If streaming, ensure all buffer is flushed and writes are done
          if (isStreamingRef.current) {
-             await writeQueueRef.current;
-             // Close streams
-             if (nativeWriterRef.current) {
-                 await nativeWriterRef.current.close();
-                 nativeWriterRef.current = null;
-             }
-             if (streamSaverWriterRef.current) {
-                 await streamSaverWriterRef.current.close();
-                 streamSaverWriterRef.current = null;
-             }
-             // Don't set isStreamingRef to false here, wait for next FILE_START logic to decide
-             // or if ALL_FILES_COMPLETE resets it.
-             completedFileIndicesRef.current.add(currentFileIndexRef.current);
+             // Chain final flush
+             writeQueueRef.current = writeQueueRef.current.then(async () => {
+                 await flushWriteBuffer(); // Flush remainder
+                 
+                 // Close streams
+                 if (nativeWriterRef.current) {
+                     await nativeWriterRef.current.close();
+                     nativeWriterRef.current = null;
+                 }
+                 if (streamSaverWriterRef.current) {
+                     await streamSaverWriterRef.current.close();
+                     streamSaverWriterRef.current = null;
+                 }
+                 
+                 // Mark completion safely inside the queue
+                 completedFileIndicesRef.current.add(currentFileIndexRef.current);
+                 if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
+
+             }).catch(e => console.error("Completion Error", e));
              
-             // Visual feedback for stream completion
-             if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
+             // Wait for queue to finish before proceeding mentally
+             await writeQueueRef.current;
          } else {
              // Save from memory
              saveCurrentFile(); 
@@ -330,6 +358,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       } 
       
       else if (msg.type === 'ALL_FILES_COMPLETE') {
+         // Wait for any pending write operations
+         await writeQueueRef.current;
          setState(TransferState.COMPLETED);
          if (onNotification) onNotification("所有文件接收完毕", 'success');
          resetStateForNewTransfer();
@@ -357,6 +387,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   const resetStateForNewTransfer = () => {
       chunksRef.current = [];
+      writeBufferRef.current = [];
+      writeBufferSizeRef.current = 0;
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
       completedFileIndicesRef.current.clear();
@@ -482,10 +514,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
           // 1. Try Native File System Access API (Preferred for Single File)
           // Requires HTTPS and User Activation (which we have here in onClick)
-          // @ts-ignore
           if (isSingleFile && window.showSaveFilePicker) {
               try {
-                  // @ts-ignore
                   const handle = await window.showSaveFilePicker({ 
                       suggestedName: file.name 
                   });

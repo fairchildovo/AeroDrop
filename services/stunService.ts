@@ -1,3 +1,4 @@
+
 // Hardcoded reliable servers (Cloudflare, Twilio, Google)
 const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun.cloudflare.com:3478' },
@@ -6,7 +7,7 @@ const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
-const STUN_LIST_URL = 'https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt';
+const STUN_LIST_URL = 'https://gh-proxy.org/https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt';
 const CACHE_KEY = 'aerodrop_stun_cache';
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 

@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { ChatMessage, P2PMessage, ChatChunkPayload, ChatFileStartPayload, ChatFileChunkPayload } from '../types';
 import { Send, Paperclip, Copy, LogOut, Users, Loader2, MessageCircle } from 'lucide-react';
-import { formatFileSize, fileToBase64 } from '../services/fileUtils';
+import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService'; 
 
 interface ChatRoomProps {
@@ -348,10 +348,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           const { messageId, data: chunkData, index, total } = payload;
           
           if (!incomingFiles.current[messageId]) {
-               // Must have missed start frame or out of order?
-               // Wait, PeerJS is reliable/ordered usually.
-               // Just create placeholder? No metadata so we can't do much.
-               // Ignore or request resend? Ignoring for MVP.
                return;
           }
 
@@ -368,58 +364,22 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           }
 
           if (fileCtx.count === total) {
-              // Reconstruct
+              // Reconstruct as Blob
               const blob = new Blob(fileCtx.parts, { type: fileCtx.metadata.mimeType });
+              const blobUrl = URL.createObjectURL(blob);
               const isImage = fileCtx.metadata.mimeType.startsWith('image/');
-              
-              // Create a Blob URL or Base64 for display?
-              // For large files, Blob URL is better memory-wise than Base64 string.
-              // ChatMessage interface needs update to support Blob URL or we convert.
-              // Let's use Base64 for images for compatibility with existing UI, 
-              // and raw Blob logic for files?
-              // Actually, converting a 50MB blob to Base64 to string is heavy.
-              // Let's try to update ChatMessage to support Blob/URL but keeping it simple for now:
-              // For images: FileReader to Base64 (usually small enough in chat)
-              // For files: Keep as Blob and create object URL on click? 
-              // Existing UI expects 'data' string.
-              
-              const finishProcessing = async () => {
-                  let fileData: any = {
-                      name: fileCtx.metadata.name,
-                      size: fileCtx.metadata.size,
-                      mimeType: fileCtx.metadata.mimeType,
-                  };
 
-                  if (isImage && fileCtx.metadata.size < 5 * 1024 * 1024) {
-                      // Convert small images to base64 for immediate display
-                      const reader = new FileReader();
-                      reader.readAsDataURL(blob);
-                      reader.onloadend = () => {
-                          fileData.data = (reader.result as string).split(',')[1];
-                          finalizeMessage(fileData);
-                      }
-                  } else {
-                      // Large file or non-image
-                      // We store the data as base64 for compatibility with the current `fileData.data` type
-                      // CAUTION: This might still freeze UI for 50MB file.
-                      // Ideally we should change ChatMessage type to hold Blob.
-                      // I will convert to Base64 for now to stick to strict types, 
-                      // but in a real "Binary" refactor we should use ObjectURLs.
-                      const reader = new FileReader();
-                      reader.readAsDataURL(blob);
-                      reader.onloadend = () => {
-                           fileData.data = (reader.result as string).split(',')[1];
-                           finalizeMessage(fileData);
-                      }
-                  }
-              };
-
-              const finalizeMessage = (fileData: any) => {
+              const finalizeMessage = () => {
                   const chatMsg: ChatMessage = {
                       id: messageId,
                       senderId: fileCtx.metadata.senderId,
                       type: isImage ? 'image' : 'file',
-                      fileData: fileData,
+                      fileData: {
+                          name: fileCtx.metadata.name,
+                          size: fileCtx.metadata.size,
+                          mimeType: fileCtx.metadata.mimeType,
+                          blobUrl: blobUrl
+                      },
                       timestamp: Date.now()
                   };
                   
@@ -433,7 +393,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                   processReceivedChatMessage(chatMsg, conn, false); // false = don't relay, we relay chunks
               };
 
-              finishProcessing();
+              finalizeMessage();
           }
 
           if (isHostRef.current) relayMessage(msg, conn);
@@ -546,11 +506,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           if(conn.open) conn.send({ type: 'CHAT_FILE_START', payload: startPayload });
       });
 
-      // Prepare local preview immediately? 
-      // We can't display it until we read it, but we can add a placeholder message?
-      // Or just wait until we upload it? 
-      // Let's add it to local state as if we received it, but we need data.
-      
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       let offset = 0;
       let chunkIndex = 0;
@@ -578,26 +533,20 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           if (chunkIndex % 10 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
-      // After sending, we also need to display it locally.
-      // We can read the whole file again or just use the File object we have.
+      // Create local preview
+      const blobUrl = URL.createObjectURL(file);
       const isImage = file.type.startsWith('image/');
-      let fileData: any = {
-          name: file.name,
-          size: file.size,
-          mimeType: file.type,
-      };
       
-      if (isImage && file.size < 5 * 1024 * 1024) {
-           fileData.data = await fileToBase64(file);
-      } else {
-           fileData.data = await fileToBase64(file); 
-      }
-
       const chatMsg: ChatMessage = {
           id: msgId,
           senderId: senderId,
           type: isImage ? 'image' : 'file',
-          fileData: fileData,
+          fileData: {
+            name: file.name,
+            size: file.size,
+            mimeType: file.type,
+            blobUrl: blobUrl
+          },
           timestamp: Date.now()
       };
       setMessages(prev => [...prev, chatMsg]);
@@ -646,10 +595,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     onNotification('已复制', 'success');
   };
 
-  const downloadFile = (data: string, name: string, mime: string) => {
+  const downloadFile = (fileData: NonNullable<ChatMessage['fileData']>) => {
       const link = document.createElement('a');
-      link.href = `data:${mime};base64,${data}`;
-      link.download = name;
+      if (fileData.blobUrl) {
+          link.href = fileData.blobUrl;
+      } else if (fileData.data) {
+          // Fallback only if strict types aren't enough, though we aim to avoid this.
+          link.href = `data:${fileData.mimeType};base64,${fileData.data}`;
+      } else {
+          return;
+      }
+      link.download = fileData.name;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -790,10 +746,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                               {msg.type === 'image' && msg.fileData && (
                                   <div>
                                       <img 
-                                        src={`data:${msg.fileData.mimeType};base64,${msg.fileData.data}`} 
+                                        src={msg.fileData.blobUrl || `data:${msg.fileData.mimeType};base64,${msg.fileData.data}`}
                                         alt="Image" 
                                         className="rounded-lg max-h-48 cursor-pointer hover:opacity-90 transition-opacity"
-                                        onClick={() => downloadFile(msg.fileData!.data!, msg.fileData!.name, msg.fileData!.mimeType)}
+                                        onClick={() => downloadFile(msg.fileData!)}
                                       />
                                   </div>
                               )}
@@ -801,7 +757,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
                               {msg.type === 'file' && msg.fileData && (
                                   <div 
                                     className={`flex items-center gap-3 p-1 cursor-pointer ${isMe ? 'text-white' : 'text-slate-800 dark:text-slate-100'}`}
-                                    onClick={() => downloadFile(msg.fileData!.data!, msg.fileData!.name, msg.fileData!.mimeType)}
+                                    onClick={() => downloadFile(msg.fileData!)}
                                   >
                                       <div className={`p-2 rounded-lg ${isMe ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-600'}`}>
                                           <Paperclip size={20} />
