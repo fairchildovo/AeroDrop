@@ -194,6 +194,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       }
     });
 
+    peer.on('disconnected', () => {
+        if (peer && !peer.destroyed) {
+            console.log("Peer disconnected from signaling server, reconnecting...");
+            peer.reconnect();
+        }
+    });
+
     peer.on('connection', (conn) => {
       setupConnection(conn);
 
@@ -244,6 +251,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           setMode('menu');
       } else if (err.type === 'peer-unavailable' || err.type === 'disconnected') {
           console.log("Peer disconnected (Host view):", err.type);
+      } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+         console.warn('Network error detected:', err);
       } else {
           onNotification(`连接服务错误: ${err.type}`, 'error');
           setIsConnecting(false);
@@ -277,8 +286,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
       setupConnection(conn);
     });
 
+    peer.on('disconnected', () => {
+        if (peer && !peer.destroyed) {
+            console.log("Peer disconnected from signaling server, reconnecting...");
+            peer.reconnect();
+        }
+    });
+
     peer.on('error', (err) => {
       console.error(err);
+      if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+          console.warn('Network error detected:', err);
+          return;
+      }
       onNotification('连接房间失败，请检查口令', 'error');
       setIsConnecting(false);
       setMode('menu');

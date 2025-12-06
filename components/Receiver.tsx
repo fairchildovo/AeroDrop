@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, ChunkPayload } from '../types';
@@ -229,6 +230,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
          setState(TransferState.ERROR);
          conn.close();
       }
+
+      else if (msg.type === 'TRANSFER_CANCELLED') {
+         setErrorMsg("发送方已停止分享。");
+         setState(TransferState.ERROR);
+         conn.close();
+      }
     });
     
     conn.on('close', () => {
@@ -333,9 +340,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       const conn = peer.connect(destId, { reliable: true });
       setupConnListeners(conn);
     });
+    
+    // Add disconnected handler
+    peer.on('disconnected', () => {
+        if (peer && !peer.destroyed) {
+            console.log("Peer disconnected from signaling server, reconnecting...");
+            peer.reconnect();
+        }
+    });
 
     peer.on('error', (err) => {
       if (!peerRef.current || peerRef.current.destroyed) return;
+      
       if (err.type === 'peer-unavailable') {
         if (retryCountRef.current < 3) {
           retryCountRef.current++;
@@ -348,6 +364,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
           }, 2000);
           return;
         }
+      } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+         // Suppress network errors from surfacing to UI immediately
+         console.warn('Network error:', err);
+         return; 
       } else {
         console.error(err);
       }

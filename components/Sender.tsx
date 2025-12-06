@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, ChunkPayload, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
@@ -37,6 +38,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const peerRef = useRef<Peer | null>(null);
   const activeConnections = useRef<Set<DataConnection>>(new Set());
+  const isDestroyingRef = useRef(false);
   
   // To handle canceling stale loops when resuming or restarting
   const transferSessionId = useRef<number>(0);
@@ -243,6 +245,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const startSharing = async () => {
     if (!fileList.length || !metadata) return;
 
+    isDestroyingRef.current = false;
     setState(TransferState.GENERATING_CODE);
     setConnectionStatus('');
 
@@ -266,6 +269,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     });
     
     peer.on('error', (err) => {
+        // Suppress network errors from initial peer as we destroy it anyway or retry
+        if (err.type === 'network' || err.type === 'server-error') return;
         setErrorMsg('网络初始化失败，请重试');
         setState(TransferState.ERROR);
     });
@@ -277,11 +282,24 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           setTransferCode(code);
           setState(TransferState.WAITING_FOR_PEER);
       });
+      
+      peer.on('disconnected', () => {
+          console.log("Connection to signaling server lost. Reconnecting...");
+          if (peer && !peer.destroyed) {
+              peer.reconnect();
+          }
+      });
+
       peer.on('error', (err) => {
           if (err.type === 'unavailable-id') {
               setErrorMsg('该口令已被占用，请换一个。');
               setState(TransferState.CONFIGURING);
           } else {
+              // Filter out network errors that might be resolved by reconnect
+              if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+                  console.warn('Network issue detected:', err);
+                  return;
+              }
               setErrorMsg(`连接错误: ${err.type}`);
               setState(TransferState.ERROR);
           }
@@ -318,6 +336,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           });
           conn.on('close', () => {
               activeConnections.current.delete(conn);
+              if (isDestroyingRef.current) return;
+
               if (activeConnections.current.size === 0 && activeTransfersCount.current === 0) {
                   setConnectionStatus('');
                   setState(TransferState.WAITING_FOR_PEER);
@@ -336,9 +356,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     activeTransfersCount.current += 1;
     
-    // Chunk size 256KB
-    const CHUNK_SIZE = 256 * 1024; 
-    const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024; // 16MB Backpressure limit
+    // Chunk size 64KB for granular flow control
+    // Reducing chunk size helps with "stop-and-wait" smoothness at the cost of slight overhead.
+    const CHUNK_SIZE = 64 * 1024; 
+    
+    // Backpressure limit. 
+    // If we buffer too much (e.g. 16MB), the Sender loop will run way ahead of the actual network speed,
+    // causing the progress bar to complete while data is still queued in memory.
+    // Keeping this low (e.g. 128KB or 2 chunks) ensures the Sender loop is synchronized with the Network consumption rate.
+    const MAX_BUFFERED_AMOUNT = 128 * 1024; 
 
     // Stats Init
     let totalBytesSent = 0;
@@ -394,10 +420,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 // Backpressure check
                 // @ts-ignore
                 const dataChannel = conn.dataChannel;
-                if (dataChannel && dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                if (dataChannel) {
                     while (dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
                         if (transferSessionId.current !== currentSessionId || !conn.open) return;
-                        await new Promise(r => setTimeout(r, 5));
+                        // Wait for buffer to drain. 1ms polling for tight sync.
+                        await new Promise(r => setTimeout(r, 1));
                     }
                 }
 
@@ -433,6 +460,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                      }
                      
                      if (totalSize > 0) {
+                         // Math.min ensures we don't show >100% due to slight calc mismatches
                          const prog = Math.min(100, Math.floor((totalBytesSent / totalSize) * 100));
                          setTotalProgress(prog);
                      }
@@ -444,7 +472,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 offset += CHUNK_SIZE;
                 chunkIndex++;
                 
-                if (chunkIndex % 64 === 0) await new Promise(r => setTimeout(r, 0));
+                // Allow UI to breathe periodically
+                if (chunkIndex % 32 === 0) await new Promise(r => setTimeout(r, 0));
             }
 
             // 3. Notify End of File
@@ -476,10 +505,25 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   };
 
   const stopSharing = () => {
+    isDestroyingRef.current = true;
     transferSessionId.current += 1; // Cancel any active loops
-    if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
-    activeConnections.current.forEach(conn => conn.close());
-    activeConnections.current.clear();
+    
+    // Notify connected peers
+    activeConnections.current.forEach(conn => {
+        if (conn.open) {
+            try {
+                conn.send({ type: 'TRANSFER_CANCELLED' });
+            } catch(e) { console.error(e); }
+        }
+    });
+
+    // Delay destruction slightly to ensure message is sent
+    setTimeout(() => {
+        if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
+        activeConnections.current.forEach(conn => conn.close());
+        activeConnections.current.clear();
+    }, 100);
+
     activeTransfersCount.current = 0;
     setConnectionStatus('');
     setState(TransferState.IDLE);
