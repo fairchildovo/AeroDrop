@@ -1,10 +1,10 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-import { TransferState, FileMetadata, P2PMessage, ChunkPayload } from '../types';
+import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService';
-import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileCode, FileImage, FileAudio, FileVideo, FileArchive, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
+import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileCode, FileImage, FileAudio, FileVideo, FileArchive, File as FileIcon, ClipboardPaste, Layers, PlayCircle, X } from 'lucide-react';
 
 interface ReceiverProps {
   initialCode?: string;
@@ -43,14 +43,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const receivedChunksCountRef = useRef<number>(0);
   const receivedSizeRef = useRef<number>(0);
-  const totalChunksRef = useRef<number>(0);
   const currentFileSizeRef = useRef<number>(0);
   
   // 速度计算 Refs
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
-  // UI Throttling
-  const lastRenderTimeRef = useRef<number>(0);
 
   useEffect(() => {
     if (initialCode) setCode(initialCode);
@@ -81,30 +78,52 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     };
   }, []);
 
-  const updateStats = (currentBytes: number, totalBytes: number) => {
-      const now = Date.now();
-      if (now - lastSpeedUpdateRef.current > 500 || currentBytes === totalBytes) {
-          const timeDiff = now - lastSpeedUpdateRef.current;
-          const bytesDiff = currentBytes - lastSpeedBytesRef.current;
-          
-          if (timeDiff > 0) {
-            const speedBytesPerSec = (bytesDiff / timeDiff) * 1000;
-            setDownloadSpeed(formatFileSize(speedBytesPerSec) + '/s');
-
-            const remainingBytes = totalBytes - currentBytes;
-            const remainingSec = speedBytesPerSec > 0 ? remainingBytes / speedBytesPerSec : 0;
+  // Dedicated loop for UI updates (Progress & Speed)
+  // This decouples packet arrival from UI rendering for smoother/reliable stats
+  useEffect(() => {
+    let interval: number;
+    if (state === TransferState.TRANSFERRING) {
+        interval = window.setInterval(() => {
+            if (!currentFileSizeRef.current) return;
             
-            if (isFinite(remainingSec) && remainingSec > 0) {
-                if (remainingSec > 60) setEta(`${Math.ceil(remainingSec / 60)} 分钟`);
-                else setEta(`${Math.ceil(remainingSec)} 秒`);
-            } else {
-                setEta(currentBytes >= totalBytes ? '完成' : '计算中...');
+            const now = Date.now();
+            const received = receivedSizeRef.current;
+            const total = currentFileSizeRef.current;
+            
+            // Progress
+            const pct = total > 0 ? Math.min(100, Math.floor((received / total) * 100)) : 0;
+            setProgress(pct);
+            
+            // Speed (every 500ms)
+            const timeDiff = now - lastSpeedUpdateRef.current;
+            if (timeDiff >= 500) {
+                const bytesDiff = received - lastSpeedBytesRef.current;
+                const speed = (bytesDiff / timeDiff) * 1000; // Bytes per sec
+                
+                // Prevent negative speed or weird spikes
+                const safeSpeed = Math.max(0, speed);
+                
+                setDownloadSpeed(formatFileSize(safeSpeed) + '/s');
+                
+                // ETA
+                if (safeSpeed > 0 && total > received) {
+                    const remainingBytes = total - received;
+                    const seconds = remainingBytes / safeSpeed;
+                    if (seconds > 60) setEta(`${Math.ceil(seconds / 60)} 分钟`);
+                    else setEta(`${Math.ceil(seconds)} 秒`);
+                } else if (received >= total) {
+                    setEta('完成');
+                } else {
+                    setEta('--');
+                }
+                
+                lastSpeedUpdateRef.current = now;
+                lastSpeedBytesRef.current = received;
             }
-          }
-          lastSpeedUpdateRef.current = now;
-          lastSpeedBytesRef.current = currentBytes;
-      }
-  };
+        }, 100);
+    }
+    return () => clearInterval(interval);
+  }, [state]);
 
   const setupConnListeners = (conn: DataConnection) => {
     connRef.current = conn;
@@ -115,9 +134,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     });
 
     conn.on('data', (data: any) => {
+      // 1. 接收 Raw ArrayBuffer 数据块 (High Speed Path)
+      // Robust binary detection for ArrayBuffer or Views (Uint8Array)
+      const isBinary = data instanceof ArrayBuffer || (data.constructor && data.constructor.name === 'ArrayBuffer') || ArrayBuffer.isView(data);
+
+      if (isBinary) {
+         const chunkData = (ArrayBuffer.isView(data) ? data.buffer : data) as ArrayBuffer;
+         
+         if (chunkData.byteLength > 0) {
+             chunksRef.current.push(chunkData);
+             receivedChunksCountRef.current++;
+             receivedSizeRef.current += chunkData.byteLength;
+             // Stats are now handled by the useEffect interval loop
+         }
+         return;
+      }
+
+      // 2. Control Messages (JSON)
       const msg = data as P2PMessage;
       
-      // 1. 收到元数据
       if (msg.type === 'METADATA') {
         const meta = msg.payload as FileMetadata;
         const previousMeta = metadataRef.current;
@@ -145,7 +180,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         }
       } 
       
-      // 2. 开始新文件
       else if (msg.type === 'FILE_START') {
         const { fileName, fileSize, fileIndex } = msg.payload;
         
@@ -156,7 +190,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
             chunksRef.current = [];
             receivedChunksCountRef.current = 0;
             receivedSizeRef.current = 0;
-            totalChunksRef.current = 0;
         }
 
         currentFileSizeRef.current = fileSize;
@@ -164,60 +197,22 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         
         // 重置速度
         lastSpeedUpdateRef.current = Date.now();
-        lastSpeedBytesRef.current = 0;
-        lastRenderTimeRef.current = Date.now();
+        lastSpeedBytesRef.current = receivedSizeRef.current;
 
         // 更新 UI
         setCurrentFileName(fileName);
         setCurrentFileIndex(fileIndex + 1);
         setProgress(0);
         setEta('计算中...');
+        setDownloadSpeed('0 KB/s');
       }
 
-      // 3. 接收数据块
-      else if (msg.type === 'FILE_CHUNK') {
-        const payload = msg.payload as ChunkPayload;
-        
-        if (totalChunksRef.current === 0 && payload.total > 0) {
-            totalChunksRef.current = payload.total;
-            // 只有在新文件时初始化数组，续传时保留
-            if (chunksRef.current.length !== payload.total) {
-                // 如果是新开始，创建新数组。如果是续传，可能需要扩展？通常 total 不变
-                 const newArr = new Array(payload.total);
-                 // Copy old chunks if any (rare case if resuming same file but total chunks differs? unlikely)
-                 if (chunksRef.current.length > 0) {
-                     for(let i=0; i<chunksRef.current.length; i++) newArr[i] = chunksRef.current[i];
-                 }
-                 chunksRef.current = newArr;
-            }
-        }
-
-        if (!chunksRef.current[payload.index]) {
-            chunksRef.current[payload.index] = payload.data;
-            receivedChunksCountRef.current++;
-            receivedSizeRef.current += payload.data.byteLength;
-        }
-
-        if (currentFileSizeRef.current > 0) {
-            const now = Date.now();
-            // Throttle UI updates to prevent blocking the event loop
-            const isComplete = receivedChunksCountRef.current === totalChunksRef.current;
-            
-            if (now - lastRenderTimeRef.current > 200 || isComplete) {
-                const pct = Math.floor((receivedSizeRef.current / currentFileSizeRef.current) * 100);
-                setProgress(pct);
-                updateStats(receivedSizeRef.current, currentFileSizeRef.current);
-                lastRenderTimeRef.current = now;
-            }
-        }
-      } 
+      // No longer using FILE_CHUNK type for data transfer
       
-      // 4. 当前文件完成
       else if (msg.type === 'FILE_COMPLETE') {
          saveCurrentFile(); 
       } 
       
-      // 5. 全部完成
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          setState(TransferState.COMPLETED);
          if (onNotification) onNotification("所有文件接收完毕", 'success');
@@ -252,19 +247,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       receivedSizeRef.current = 0;
       completedFileIndicesRef.current.clear();
       currentFileIndexRef.current = 0;
+      setDownloadSpeed('0 KB/s');
+      setEta('--');
   };
 
   const saveCurrentFile = () => {
-      // 1. 检查完整性
-      let hasGaps = false;
-      for(let i=0; i<totalChunksRef.current; i++) {
-          if(!chunksRef.current[i]) {
-              hasGaps = true;
-              break;
-          }
-      }
-      if (hasGaps) {
-          console.error("文件数据不完整，跳过保存");
+      // 1. 简单检查大小是否大致匹配 (Raw chunks don't have per-chunk index, relying on TCP order)
+      if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) {
+          console.error("文件为空，跳过保存");
           return;
       }
 
@@ -388,18 +378,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (connRef.current) {
           // Calculate where to resume
           const completedCount = completedFileIndicesRef.current.size;
-          // Use current file index and current chunks count
+          // Use current file index
           const currentIdx = currentFileIndexRef.current;
           
-          // Calculate the next chunk index needed for the current incomplete file
-          // If chunksRef is [data, data, undefined, data], we should probably request from index 2?
-          // For simplicity, just count valid chunks from start or just length if sequential reliable.
-          // Since we use TCP-like reliable, we assume sequential.
-          let nextChunkIndex = 0;
-          for(let i=0; i<chunksRef.current.length; i++) {
-              if (chunksRef.current[i]) nextChunkIndex = i + 1;
-              else break;
-          }
+          // Resume current file
+          // chunksRef.current.length is the number of 64KB chunks we have received.
+          // This is the index the Sender should restart from.
+          const nextChunkIndex = chunksRef.current.length;
 
           // If current file is somehow marked complete or we are at start
           if (completedFileIndicesRef.current.has(currentIdx)) {
@@ -589,6 +574,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                     <span className="font-medium text-slate-700 dark:text-slate-300">{eta}</span>
                     <span>预计剩余</span>
                   </div>
+               </div>
+
+               <div className="pt-2">
+                 <button onClick={reset} className="w-full py-2 bg-red-50 dark:bg-red-900/10 text-red-600 dark:text-red-400 rounded-lg text-sm hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors flex items-center justify-center gap-1">
+                    <X size={14} /> 取消接收
+                 </button>
                </div>
              </div>
            )}

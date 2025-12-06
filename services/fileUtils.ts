@@ -1,8 +1,20 @@
+
 export const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return '0 Bytes';
+  if (bytes < 0) return '0 Bytes';
+  if (!isFinite(bytes)) return '---';
+  
   const k = 1024;
+  // Handle small rates (e.g. 0.5 KB/s) which might result in negative log index
+  if (bytes < 1) return parseFloat(bytes.toFixed(2)) + ' Bytes';
+
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  // Safety check for index out of bounds
+  if (i < 0) return parseFloat(bytes.toFixed(2)) + ' Bytes';
+  if (i >= sizes.length) return parseFloat((bytes / Math.pow(k, sizes.length - 1)).toFixed(2)) + ' ' + sizes[sizes.length - 1];
+
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 

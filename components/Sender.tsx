@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-import { TransferState, FileMetadata, P2PMessage, ChunkPayload, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
+import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
 import { formatFileSize, generatePreview } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService'; 
 import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp } from 'lucide-react';
@@ -356,16 +356,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     activeTransfersCount.current += 1;
     
-    // Chunk size 64KB for granular flow control
-    // Reducing chunk size helps with "stop-and-wait" smoothness at the cost of slight overhead.
+    // Chunk size: 64KB is a standard good size for WebRTC to avoid fragmentation overhead
+    // but keep packet loss impact manageable.
     const CHUNK_SIZE = 64 * 1024; 
     
-    // Backpressure limit. 
-    // If we buffer too much (e.g. 16MB), the Sender loop will run way ahead of the actual network speed,
-    // causing the progress bar to complete while data is still queued in memory.
-    // Keeping this low (e.g. 128KB or 2 chunks) ensures the Sender loop is synchronized with the Network consumption rate.
-    const MAX_BUFFERED_AMOUNT = 128 * 1024; 
-
+    // High Water Mark: 4MB (Start throttling when buffer > 4MB)
+    // Low Water Mark: 1MB (Resume writing when buffer < 1MB)
+    const HIGH_WATER_MARK = 4 * 1024 * 1024;
+    const LOW_WATER_MARK = 1 * 1024 * 1024;
+    
     // Stats Init
     let totalBytesSent = 0;
     
@@ -381,6 +380,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const startTime = Date.now();
     let lastUpdateTime = startTime;
     let bytesInLastPeriod = 0;
+    let lastYieldTime = startTime;
+
+    // @ts-ignore
+    const dataChannel = conn.dataChannel as RTCDataChannel;
+    if (dataChannel) {
+        dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
+    }
 
     try {
         let chunkStartOffset = startChunkIndex;
@@ -397,6 +403,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             const fName = file.fullPath || file.webkitRelativePath || file.name;
 
             // 1. Notify Start of File (Send every time to sync state)
+            // This is critical for Receiver to know a new stream of raw buffers is coming.
             const startPayload: FileStartPayload = {
                 fileIndex: i,
                 fileName: decodeURIComponent(fName),
@@ -405,10 +412,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             };
             conn.send({ type: 'FILE_START', payload: startPayload });
 
-            // 2. Send Chunks
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            // 2. Send Chunks as RAW ArrayBuffers
             let offset = chunkStartOffset * CHUNK_SIZE;
-            let chunkIndex = chunkStartOffset;
 
             // Reset for subsequent files
             chunkStartOffset = 0; 
@@ -417,28 +422,27 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 if (transferSessionId.current !== currentSessionId) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
                 
-                // Backpressure check
-                // @ts-ignore
-                const dataChannel = conn.dataChannel;
-                if (dataChannel) {
-                    while (dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-                        if (transferSessionId.current !== currentSessionId || !conn.open) return;
-                        // Wait for buffer to drain. 1ms polling for tight sync.
-                        await new Promise(r => setTimeout(r, 1));
-                    }
+                // Backpressure Check using High/Low Water Mark
+                if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
+                    await new Promise<void>(resolve => {
+                        const handler = () => {
+                            dataChannel.removeEventListener('bufferedamountlow', handler);
+                            resolve();
+                        };
+                        dataChannel.addEventListener('bufferedamountlow', handler);
+                        // Double check in case it drained before listener attached
+                        if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
+                             dataChannel.removeEventListener('bufferedamountlow', handler);
+                             resolve();
+                        }
+                    });
                 }
 
                 const slice = file.slice(offset, offset + CHUNK_SIZE);
                 const chunkData = await slice.arrayBuffer();
 
-                const payload: ChunkPayload = {
-                    data: chunkData,
-                    index: chunkIndex,
-                    total: totalChunks,
-                    fileIndex: i
-                };
-
-                conn.send({ type: 'FILE_CHUNK', payload });
+                // Send Raw Buffer - Much faster than JSON wrapper
+                conn.send(chunkData);
 
                 // Update metrics
                 const chunkSize = chunkData.byteLength;
@@ -460,7 +464,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                      }
                      
                      if (totalSize > 0) {
-                         // Math.min ensures we don't show >100% due to slight calc mismatches
                          const prog = Math.min(100, Math.floor((totalBytesSent / totalSize) * 100));
                          setTotalProgress(prog);
                      }
@@ -470,17 +473,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 }
 
                 offset += CHUNK_SIZE;
-                chunkIndex++;
                 
-                // Allow UI to breathe periodically
-                if (chunkIndex % 32 === 0) await new Promise(r => setTimeout(r, 0));
+                // Smart Yield: Only yield if we've been blocking main thread for > 30ms.
+                // This keeps UI responsive (30fps) while maximizing throughput.
+                if (now - lastYieldTime > 30) {
+                    await new Promise(r => setTimeout(r, 0));
+                    lastYieldTime = Date.now();
+                }
             }
 
             // 3. Notify End of File
             const completePayload: FileCompletePayload = { fileIndex: i };
             conn.send({ type: 'FILE_COMPLETE', payload: completePayload });
-            
-            await new Promise(r => setTimeout(r, 10));
         }
 
         // 4. All Done
@@ -518,11 +522,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     });
 
     // Delay destruction slightly to ensure message is sent
+    // Increased delay from 100ms to 800ms to handle reliable delivery of cancel message
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
         activeConnections.current.forEach(conn => conn.close());
         activeConnections.current.clear();
-    }, 100);
+    }, 800);
 
     activeTransfersCount.current = 0;
     setConnectionStatus('');
