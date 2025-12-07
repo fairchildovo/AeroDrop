@@ -22,7 +22,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const [currentSpeed, setCurrentSpeed] = useState<string>('0 KB/s');
   const [avgSpeed, setAvgSpeed] = useState<string>('0 KB/s');
   
-  // New state for individual stats
   const [individualStats, setIndividualStats] = useState<{peerId: string, speed: string, progress: number}[]>([]);
 
   const [isDragOver, setIsDragOver] = useState(false);
@@ -42,7 +41,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const transferSessionId = useRef<number>(0);
   const activeTransfersCount = useRef<number>(0);
 
-  // 多用户并发状态追踪
+  // Track LAN/WAN status per peer to optimize buffer sizes
+  const peerNetworkTypes = useRef<Map<string, 'LAN' | 'WAN' | 'RELAY'>>(new Map());
+
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
   const peerAverageSpeed = useRef<Map<string, number>>(new Map());
@@ -50,13 +51,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileListRef = useRef<File[]>([]);
 
-  // === ✨ UI Updater for Multi-User Stats & ICE Info ===
+  // === ✨ UI Updater ===
   useEffect(() => {
     let interval: number;
-    // Check stats active if we are transferring OR connected
     if (state === TransferState.TRANSFERRING || state === TransferState.PEER_CONNECTED) {
         interval = window.setInterval(() => {
-            // 1. Update Speed Stats
             let totalSpeed = 0;
             let totalAvgSpeed = 0;
             let combinedProgress = 0;
@@ -64,13 +63,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             
             const stats: {peerId: string, speed: string, progress: number}[] = [];
 
-            // Iterate over peerProgress to ensure we cover all active transfers
             peerProgress.current.forEach((p, peerId) => {
                 combinedProgress += p;
-                
                 const s = peerRealtimeSpeed.current.get(peerId) || 0;
                 totalSpeed += s;
-                
                 const avg = peerAverageSpeed.current.get(peerId) || 0;
                 totalAvgSpeed += avg;
 
@@ -97,16 +93,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 }
             }
 
-            // 2. Poll ICE Stats Periodically (every ~2s via mod check or just run it)
-            // We run it every tick (800ms) which is fine for local stats check
             activeConnections.current.forEach(conn => updateConnectionStats(conn));
-
         }, 800);
     }
     return () => clearInterval(interval);
   }, [state, totalProgress]);
 
-  // === ✨ Connection Stats Detection ===
   const updateConnectionStatusUI = () => {
     const count = activeConnections.current.size;
     if (count > 1) {
@@ -116,47 +108,81 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     }
   };
 
+  // === ✨ Private IP Detection (RFC 1918 + Localhost) ===
+  const isPrivateIP = (ip: string) => {
+      // Remove IPv6 brackets and port if present
+      const cleanIp = ip.replace(/^\[|\](:[0-9]+)?$/g, '').split(':')[0];
+      
+      // Localhost
+      if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.toLowerCase() === 'localhost') return true;
+
+      // IPv4 Private Ranges
+      const parts = cleanIp.split('.').map(Number);
+      if (parts.length === 4) {
+          if (parts[0] === 10) return true; // 10.0.0.0/8
+          if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12
+          if (parts[0] === 192 && parts[1] === 168) return true; // 192.168.0.0/16
+          return false;
+      }
+      
+      // Simple IPv6 Link-Local check (fe80::)
+      if (cleanIp.toLowerCase().startsWith('fe80:')) return true;
+
+      return false;
+  };
+
+  // === ✨ Robust Network Type Detection ===
   const updateConnectionStats = async (conn: DataConnection) => {
       if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') return;
-      if (activeConnections.current.size > 1) return; // For multiple devices, we show count only
-
+      
       try {
           const stats = await conn.peerConnection.getStats();
-          let selectedPairId = null;
+          let selectedPair: any = null;
           
           stats.forEach(report => {
               if (report.type === 'transport' && report.selectedCandidatePairId) {
-                  selectedPairId = report.selectedCandidatePairId;
+                  selectedPair = stats.get(report.selectedCandidatePairId);
               }
           });
           
-          // Fallback logic
-          if (!selectedPairId) {
+          // Fallback to searching active pair
+          if (!selectedPair) {
               stats.forEach(report => {
                   if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.selected) {
-                      selectedPairId = report.id;
+                      selectedPair = report;
                   }
               });
           }
 
-          if (selectedPairId) {
-              const pair = stats.get(selectedPairId);
-              const localCandidate = stats.get(pair.localCandidateId);
-              // const remoteCandidate = stats.get(pair.remoteCandidateId); // Optional info
-              const type = localCandidate?.candidateType;
-              const protocol = localCandidate?.protocol;
-
-              let typeDisplay = '未知';
-              if (type === 'host') typeDisplay = '⚡️ 局域网直连 (Host)';
-              else if (type === 'srflx') typeDisplay = '🌐 公网穿透 (STUN)';
-              else if (type === 'relay') typeDisplay = '🐢 服务器中继 (TURN)';
-              else if (type === 'prflx') typeDisplay = '🌐 对等穿透 (Prflx)';
-
-              setConnectionStatus(`${typeDisplay} | ${protocol?.toUpperCase()}`);
+          if (selectedPair) {
+              const remoteCandidate = stats.get(selectedPair.remoteCandidateId);
+              const localCandidate = stats.get(selectedPair.localCandidateId);
+              const candidateType = localCandidate?.candidateType; // host, srflx, prflx, relay
               
-              if (type === 'relay') {
-                  // Only notify once per connection if we haven't already? 
-                  // For now, simpler to just log or rely on user seeing the status.
+              const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
+              const protocol = localCandidate?.protocol || 'udp';
+
+              let typeDisplay = '连接中...';
+              let networkType: 'LAN' | 'WAN' | 'RELAY' = 'WAN';
+
+              if (candidateType === 'relay') {
+                  typeDisplay = '🐢 中继连接 (Relay/TURN)';
+                  networkType = 'RELAY';
+              } else if (isPrivateIP(remoteIP)) {
+                  typeDisplay = '⚡️ 局域网直连 (LAN)';
+                  networkType = 'LAN';
+              } else {
+                  typeDisplay = '🌐 公网 P2P (WAN)';
+                  networkType = 'WAN';
+              }
+
+              // Store for optimization logic
+              peerNetworkTypes.current.set(conn.peer, networkType);
+
+              if (activeConnections.current.size === 1) {
+                  setConnectionStatus(`${typeDisplay} | ${protocol.toUpperCase()}`);
+              } else {
+                  setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
               }
           }
       } catch (e) {
@@ -164,6 +190,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       }
   };
 
+  // ... (Hooks for unload, wakeLock, timer - unchanged) ...
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) {
@@ -233,6 +260,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [state, metadata]);
 
+  // ... (processFiles, traverseFileTree, DnD, Handlers - unchanged) ...
   const processFiles = useCallback(async (files: File[]) => {
     setFileList(files);
     fileListRef.current = files;
@@ -369,6 +397,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
+    peerNetworkTypes.current.clear();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -430,8 +459,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
           conn.on('open', () => {
               updateConnectionStatusUI();
-              // Initial stat check
-              setTimeout(() => updateConnectionStats(conn), 800);
+              // Perform an immediate check to set the network type
+              updateConnectionStats(conn);
 
               setState(TransferState.PEER_CONNECTED);
               try {
@@ -443,12 +472,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               const msg = data as P2PMessage;
               if (msg.type === 'ACCEPT_TRANSFER') {
                   setState(TransferState.TRANSFERRING);
-                  sendFileSequence(conn, 0, 0);
+                  // Wait a tick to ensure stats have updated network type
+                  setTimeout(() => sendFileSequence(conn, 0, 0), 100);
               } else if (msg.type === 'RESUME_REQUEST') {
                   const payload = msg.payload as ResumePayload;
                   onNotification(`检测到断点，正在从第 ${payload.fileIndex + 1} 个文件恢复...`, 'info');
                   setState(TransferState.TRANSFERRING);
-                  sendFileSequence(conn, payload.fileIndex, payload.chunkIndex);
+                  setTimeout(() => sendFileSequence(conn, payload.fileIndex, payload.chunkIndex), 100);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
                   onNotification(`设备 ${conn.peer.slice(0,5)}... 取消了下载`, 'info');
               }
@@ -459,6 +489,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               peerProgress.current.delete(conn.peer);
               peerRealtimeSpeed.current.delete(conn.peer);
               peerAverageSpeed.current.delete(conn.peer);
+              peerNetworkTypes.current.delete(conn.peer);
               
               updateConnectionStatusUI();
               
@@ -475,7 +506,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       });
   };
 
-  // === 核心优化后的发送逻辑（支持多用户 & 局域网高速优化） ===
+  // === ✨ OPTIMIZED SEND LOGIC WITH HYSTERESIS FLOW CONTROL ===
   const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
@@ -483,13 +514,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
     
-    // === PERFORMANCE CONSTANTS ===
-    const CHUNK_SIZE = 64 * 1024;        // 64KB (WebRTC Safe)
-    const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer
+    // Determine network capabilities for this peer
+    // Update stats one last time to be sure
+    await updateConnectionStats(conn);
     
-    // ✨ BACKPRESSURE SETTINGS (Crucial for LAN speed)
-    // Reduce to 64KB - 256KB to ensure smooth streaming without bursts
-    const MAX_BUFFERED_AMOUNT = 64 * 1024; 
+    const networkType = peerNetworkTypes.current.get(conn.peer) || 'WAN';
+    const isLan = networkType === 'LAN';
+
+    console.log(`Starting transfer to ${conn.peer} via ${networkType}`);
+
+    // === TUNING PARAMETERS ===
+    const CHUNK_SIZE = 64 * 1024; // 64KB
+    const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer for fewer IO ops
+    
+    // ✨ Hysteresis Flow Control Settings
+    // High Water Mark: Stop sending when buffer hits this
+    const HIGH_WATER_MARK = isLan ? 1024 * 1024 : 128 * 1024; // 1MB (LAN) vs 128KB (WAN)
+    
+    // Low Water Mark: Resume sending when buffer drops to this
+    // For LAN, we keep the pipe fuller. For WAN, we let it drain more to avoid bloat.
+    const LOW_WATER_MARK = isLan ? 256 * 1024 : 0; 
 
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;
@@ -513,7 +557,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const dataChannel = conn.dataChannel as RTCDataChannel;
     
     if (dataChannel) {
-        dataChannel.bufferedAmountLowThreshold = 0; 
+        // Use the Low Water Mark as the trigger for the event
+        dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
     }
 
     try {
@@ -528,7 +573,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             }
             
             const file = files[i];
-            
             // @ts-ignore
             const fName = file.fullPath || file.webkitRelativePath || file.name;
 
@@ -557,18 +601,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 while (bufferOffset < readSize) {
                     if (!conn.open) throw new Error("Connection closed");
 
-                    // === ✨ CORE FIX: Granular Backpressure INSIDE the chunk loop ===
-                    if (dataChannel && dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                    // === ✨ CORE FIX: Hysteresis Loop ===
+                    if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
+                        // Wait until bufferedAmount drops <= LOW_WATER_MARK
                         await new Promise<void>(resolve => {
                             const onLow = () => {
                                 dataChannel.removeEventListener('bufferedamountlow', onLow);
                                 resolve();
                             };
-                            dataChannel.addEventListener('bufferedamountlow', onLow);
                             
-                            if (dataChannel.bufferedAmount <= dataChannel.bufferedAmountLowThreshold) {
-                                dataChannel.removeEventListener('bufferedamountlow', onLow);
+                            // Double check before waiting (race condition safety)
+                            if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
                                 resolve();
+                            } else {
+                                dataChannel.addEventListener('bufferedamountlow', onLow);
                             }
                         });
                     }
@@ -579,8 +625,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     try {
                         conn.send(chunk);
                     } catch (e) {
+                         // Safari sometimes throws if buffer is full despite check
                          if (!conn.open) throw new Error("Connection closed during send");
-                         throw e;
+                         // Backoff slightly and retry once
+                         await new Promise(r => setTimeout(r, 50));
+                         try { conn.send(chunk); } catch(err) { throw err; }
                     }
 
                     const currentChunkSize = chunk.byteLength;
@@ -588,17 +637,21 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     bytesInLastPeriod += currentChunkSize;
                     bufferOffset += currentChunkSize;
 
-                    // Update stats (less frequent for performance)
+                    // Update stats (every ~500ms)
                     const now = Date.now();
                     if (now - lastUpdateTime >= 500) { 
                         const duration = (now - lastUpdateTime) / 1000;
                         const currentBuffered = dataChannel?.bufferedAmount || 0;
-                        const actualBytesSent = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
+                        
+                        // Calculate effective throughput (excluding what's sitting in buffer)
+                        // Note: totalBytesSent includes what is in buffer.
+                        // Sent to network = totalBytesSent - currentBuffered.
+                        const actualBytesTransferred = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
                         
                         if (duration > 0) {
-                            const effectiveSpeed = Math.max(0, actualBytesSent) / duration;
+                            const effectiveSpeed = Math.max(0, actualBytesTransferred) / duration;
                             const totalDuration = (now - startTime) / 1000;
-                            const realTotal = totalBytesSent - currentBuffered;
+                            const realTotal = Math.max(0, totalBytesSent - currentBuffered);
                             
                             peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
                             peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
@@ -613,7 +666,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                         bytesInLastPeriod = 0;
                     }
                 }
-
                 fileOffset += readSize;
             }
 
@@ -666,6 +718,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
+    peerNetworkTypes.current.clear();
     setIndividualStats([]);
 
     setConnectionStatus('');
