@@ -87,12 +87,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 // 显示所有连接的平均进度
                 setTotalProgress(Math.floor(combinedProgress / count));
             } else {
-                setTotalProgress(0);
+                // 如果没有连接但状态是 TRANSFERRING，保持进度显示（例如已完成）
+                if (activeTransfersCount.current === 0 && totalProgress === 100) {
+                    // keep 100
+                } else {
+                    setTotalProgress(0);
+                }
             }
         }, 800);
     }
     return () => clearInterval(interval);
-  }, [state]);
+  }, [state, totalProgress]);
 
   // === ✨ Connection Stats Detection ===
   const updateConnectionStatusUI = () => {
@@ -106,7 +111,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   };
 
   const updateConnectionStats = async (conn: DataConnection) => {
-      if (!conn.peerConnection) return;
+      if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') return;
       if (activeConnections.current.size > 1) return; // 多设备时不覆盖简单计数状态
 
       try {
@@ -142,7 +147,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               }
           }
       } catch (e) {
-          console.error("Stats check failed", e);
+          // ignore stats error
       }
   };
 
@@ -391,8 +396,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               setState(TransferState.CONFIGURING);
           } else {
               if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
-              setErrorMsg(`连接错误: ${err.type}`);
-              setState(TransferState.ERROR);
+              console.error("Peer Error:", err);
+              // Don't error out completely on minor connection errors if we have other active connections
+              if (activeConnections.current.size === 0) {
+                 setErrorMsg(`连接错误: ${err.type}`);
+                 setState(TransferState.ERROR);
+              }
           }
       });
       peer.on('connection', (conn) => {
@@ -413,8 +422,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               setTimeout(() => updateConnectionStats(conn), 800);
 
               setState(TransferState.PEER_CONNECTED);
-              conn.send({ type: 'METADATA', payload: metadata });
+              try {
+                  conn.send({ type: 'METADATA', payload: metadata });
+              } catch(e) { console.error("Failed to send metadata", e); }
           });
+          
           conn.on('data', (data: any) => {
               const msg = data as P2PMessage;
               if (msg.type === 'ACCEPT_TRANSFER') {
@@ -426,11 +438,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   setState(TransferState.TRANSFERRING);
                   sendFileSequence(conn, payload.fileIndex, payload.chunkIndex);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
-                  // 对于多设备，我们不应直接重置整个会话，除非这是唯一的连接
-                  // 这里简单处理：仅通知
                   onNotification(`设备 ${conn.peer.slice(0,5)}... 取消了下载`, 'info');
+                  // Do not close connection immediately to allow reconnection or stats update
               }
           });
+          
           conn.on('close', () => {
               activeConnections.current.delete(conn);
               peerProgress.current.delete(conn.peer);
@@ -444,6 +456,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   setConnectionStatus('');
                   setState(TransferState.WAITING_FOR_PEER);
               }
+          });
+          
+          conn.on('error', (err) => {
+              console.warn("Connection error", err);
           });
       });
   };
@@ -513,7 +529,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 fileSize: file.size,
                 fileType: file.type
             };
-            conn.send({ type: 'FILE_START', payload: startPayload });
+            try {
+                conn.send({ type: 'FILE_START', payload: startPayload });
+            } catch(e) { throw new Error("Failed to send FILE_START"); }
 
             let fileOffset = chunkStartOffset * CHUNK_SIZE;
             chunkStartOffset = 0; 
@@ -545,10 +563,19 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 // 3. 内存切片发送
                 let bufferOffset = 0;
                 while (bufferOffset < readSize) {
+                    // Check before send
+                    if (!conn.open) throw new Error("Connection closed");
+
                     const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
                     const chunk = largeBuffer.slice(bufferOffset, chunkEnd);
                     
-                    conn.send(chunk);
+                    try {
+                        conn.send(chunk);
+                    } catch (e) {
+                         // Double check open state or throw
+                         if (!conn.open) throw new Error("Connection closed during send");
+                         throw e;
+                    }
 
                     const currentChunkSize = chunk.byteLength;
                     totalBytesSent += currentChunkSize;
@@ -588,10 +615,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             }
 
             const completePayload: FileCompletePayload = { fileIndex: i };
-            conn.send({ type: 'FILE_COMPLETE', payload: completePayload });
+            try { conn.send({ type: 'FILE_COMPLETE', payload: completePayload }); } catch(e) {}
         }
 
-        conn.send({ type: 'ALL_FILES_COMPLETE' });
+        try { conn.send({ type: 'ALL_FILES_COMPLETE' }); } catch(e) {}
         
         // Mark as done
         peerProgress.current.set(peerId, 100);
@@ -603,15 +630,16 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     } catch (err) {
         if (transferSessionId.current === currentSessionId) {
-            console.error("Transfer failed", err);
+            console.warn(`Transfer to ${peerId} interrupted/failed:`, err);
         }
     } finally {
         if (transferSessionId.current === currentSessionId) {
             activeTransfersCount.current -= 1;
             if (activeTransfersCount.current === 0) {
-                setState(TransferState.PEER_CONNECTED);
-                setCurrentFileIndex(0);
+                // All transfers done. We stay in TRANSFERRING state to show 100%.
+                // The user can stop sharing manually.
                 setTotalProgress(100);
+                setCurrentFileIndex(0);
             }
         }
     }
@@ -624,13 +652,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     activeConnections.current.forEach(conn => {
         if (conn.open) {
             try { conn.send({ type: 'TRANSFER_CANCELLED' }); } catch(e) { console.error(e); }
+            conn.close();
         }
     });
+    activeConnections.current.clear();
+
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
-        activeConnections.current.forEach(conn => conn.close());
-        activeConnections.current.clear();
-    }, 800);
+    }, 100);
     
     activeTransfersCount.current = 0;
     
@@ -789,9 +818,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
            {state === TransferState.TRANSFERRING && (
                <div className="w-full space-y-5">
                    <div className="flex flex-col items-center gap-2">
-                       <Loader2 size={32} className="animate-spin text-brand-500" />
+                       {totalProgress === 100 && activeTransfersCount.current === 0 ? (
+                           <Check size={32} className="text-green-500" />
+                       ) : (
+                           <Loader2 size={32} className="animate-spin text-brand-500" />
+                       )}
                        <div className="text-center">
-                           <p className="text-lg font-bold text-slate-700 dark:text-slate-200">正在发送...</p>
+                           <p className="text-lg font-bold text-slate-700 dark:text-slate-200">
+                               {totalProgress === 100 && activeTransfersCount.current === 0 ? '传输完成' : '正在发送...'}
+                           </p>
                            {activeConnections.current.size > 1 ? (
                                <p className="text-sm text-slate-500 dark:text-slate-400 font-medium flex items-center gap-1 justify-center mt-1">
                                   <Users size={14} /> 正在向 {activeConnections.current.size} 个设备传输
@@ -811,7 +846,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                        </div>
                        <div className="w-full bg-slate-100 dark:bg-slate-700 rounded-full h-3 overflow-hidden">
                            <div 
-                               className="h-full bg-brand-500 transition-all duration-300 relative" 
+                               className={`h-full transition-all duration-300 relative ${totalProgress === 100 ? 'bg-green-500' : 'bg-brand-500'}`}
                                style={{ width: `${totalProgress}%` }}
                            >
                                <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
