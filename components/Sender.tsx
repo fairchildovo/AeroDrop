@@ -50,11 +50,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileListRef = useRef<File[]>([]);
 
-  // === ✨ UI Updater for Multi-User Stats ===
+  // === ✨ UI Updater for Multi-User Stats & ICE Info ===
   useEffect(() => {
     let interval: number;
-    if (state === TransferState.TRANSFERRING) {
+    // Check stats active if we are transferring OR connected
+    if (state === TransferState.TRANSFERRING || state === TransferState.PEER_CONNECTED) {
         interval = window.setInterval(() => {
+            // 1. Update Speed Stats
             let totalSpeed = 0;
             let totalAvgSpeed = 0;
             let combinedProgress = 0;
@@ -79,21 +81,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 });
             });
 
-            setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
-            setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
-            setIndividualStats(stats);
-            
-            if (count > 0) {
-                // 显示所有连接的平均进度
-                setTotalProgress(Math.floor(combinedProgress / count));
-            } else {
-                // 如果没有连接但状态是 TRANSFERRING，保持进度显示（例如已完成）
-                if (activeTransfersCount.current === 0 && totalProgress === 100) {
-                    // keep 100
+            if (state === TransferState.TRANSFERRING) {
+                setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
+                setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
+                setIndividualStats(stats);
+                
+                if (count > 0) {
+                    setTotalProgress(Math.floor(combinedProgress / count));
                 } else {
-                    setTotalProgress(0);
+                    if (activeTransfersCount.current === 0 && totalProgress === 100) {
+                        // keep 100
+                    } else {
+                        setTotalProgress(0);
+                    }
                 }
             }
+
+            // 2. Poll ICE Stats Periodically (every ~2s via mod check or just run it)
+            // We run it every tick (800ms) which is fine for local stats check
+            activeConnections.current.forEach(conn => updateConnectionStats(conn));
+
         }, 800);
     }
     return () => clearInterval(interval);
@@ -107,21 +114,23 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     } else if (count === 0) {
        setConnectionStatus('');
     }
-    // count === 1 时，由 updateConnectionStats 显示详细信息
   };
 
   const updateConnectionStats = async (conn: DataConnection) => {
       if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') return;
-      if (activeConnections.current.size > 1) return; // 多设备时不覆盖简单计数状态
+      if (activeConnections.current.size > 1) return; // For multiple devices, we show count only
 
       try {
           const stats = await conn.peerConnection.getStats();
           let selectedPairId = null;
+          
           stats.forEach(report => {
               if (report.type === 'transport' && report.selectedCandidatePairId) {
                   selectedPairId = report.selectedCandidatePairId;
               }
           });
+          
+          // Fallback logic
           if (!selectedPairId) {
               stats.forEach(report => {
                   if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.selected) {
@@ -129,9 +138,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   }
               });
           }
+
           if (selectedPairId) {
               const pair = stats.get(selectedPairId);
               const localCandidate = stats.get(pair.localCandidateId);
+              // const remoteCandidate = stats.get(pair.remoteCandidateId); // Optional info
               const type = localCandidate?.candidateType;
               const protocol = localCandidate?.protocol;
 
@@ -139,11 +150,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               if (type === 'host') typeDisplay = '⚡️ 局域网直连 (Host)';
               else if (type === 'srflx') typeDisplay = '🌐 公网穿透 (STUN)';
               else if (type === 'relay') typeDisplay = '🐢 服务器中继 (TURN)';
+              else if (type === 'prflx') typeDisplay = '🌐 对等穿透 (Prflx)';
 
-              setConnectionStatus(`已连接 [${typeDisplay} | ${protocol?.toUpperCase()}]`);
+              setConnectionStatus(`${typeDisplay} | ${protocol?.toUpperCase()}`);
               
               if (type === 'relay') {
-                  onNotification('警告：连接经过中继服务器，速度受限。建议使用局域网。', 'info');
+                  // Only notify once per connection if we haven't already? 
+                  // For now, simpler to just log or rely on user seeing the status.
               }
           }
       } catch (e) {
@@ -397,7 +410,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           } else {
               if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
               console.error("Peer Error:", err);
-              // Don't error out completely on minor connection errors if we have other active connections
               if (activeConnections.current.size === 0) {
                  setErrorMsg(`连接错误: ${err.type}`);
                  setState(TransferState.ERROR);
@@ -417,8 +429,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           updateConnectionStatusUI();
 
           conn.on('open', () => {
-              // ✨ Stat Check
               updateConnectionStatusUI();
+              // Initial stat check
               setTimeout(() => updateConnectionStats(conn), 800);
 
               setState(TransferState.PEER_CONNECTED);
@@ -439,7 +451,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   sendFileSequence(conn, payload.fileIndex, payload.chunkIndex);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
                   onNotification(`设备 ${conn.peer.slice(0,5)}... 取消了下载`, 'info');
-                  // Do not close connection immediately to allow reconnection or stats update
               }
           });
           
@@ -464,30 +475,28 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       });
   };
 
-  // === 核心优化后的发送逻辑（支持多用户） ===
+  // === 核心优化后的发送逻辑（支持多用户 & 局域网高速优化） ===
   const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
     
-    // IMPORTANT: 移除 transferSessionId 递增，允许并发传输
-    // 仅捕获当前会话ID用于 Stop Sharing 检测
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
     
     // === PERFORMANCE CONSTANTS ===
-    const CHUNK_SIZE = 64 * 1024;        // 64KB (WebRTC 安全分片)
-    const READ_BUFFER_SIZE = 8 * 1024 * 1024; // 8MB (大块读取，减少IO次数)
-    const HIGH_WATER_MARK = 16 * 1024 * 1024; // 16MB (缓冲区上限)
-    const LOW_WATER_MARK = 4 * 1024 * 1024;   // 4MB (缓冲区下限)
+    const CHUNK_SIZE = 64 * 1024;        // 64KB (WebRTC Safe)
+    const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer
+    
+    // ✨ BACKPRESSURE SETTINGS (Crucial for LAN speed)
+    // Reduce to 64KB - 256KB to ensure smooth streaming without bursts
+    const MAX_BUFFERED_AMOUNT = 64 * 1024; 
 
-    // Speed calc state
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;
     let lastUpdateTime = Date.now();
     let bytesInLastPeriod = 0;
     const startTime = Date.now();
 
-    // Init peer stats
     const peerId = conn.peer;
     peerProgress.current.set(peerId, 0);
 
@@ -502,8 +511,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     // @ts-ignore
     const dataChannel = conn.dataChannel as RTCDataChannel;
+    
     if (dataChannel) {
-        dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
+        dataChannel.bufferedAmountLowThreshold = 0; 
     }
 
     try {
@@ -513,7 +523,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             if (transferSessionId.current !== currentSessionId) return;
             if (!conn.open) throw new Error("Connection closed");
             
-            // 仅在单用户时更新 UI 的文件索引，避免闪烁
             if (activeConnections.current.size === 1) {
                 setCurrentFileIndex(i);
             }
@@ -539,32 +548,30 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
-                
-                // 1. 背压控制
-                if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
-                    await new Promise<void>(resolve => {
-                        const handler = () => {
-                            dataChannel.removeEventListener('bufferedamountlow', handler);
-                            resolve();
-                        };
-                        dataChannel.addEventListener('bufferedamountlow', handler);
-                        if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
-                             dataChannel.removeEventListener('bufferedamountlow', handler);
-                             resolve();
-                        }
-                    });
-                }
 
-                // 2. 批量读取
                 const readSize = Math.min(READ_BUFFER_SIZE, file.size - fileOffset);
                 const blobSlice = file.slice(fileOffset, fileOffset + readSize);
                 const largeBuffer = await blobSlice.arrayBuffer();
 
-                // 3. 内存切片发送
                 let bufferOffset = 0;
                 while (bufferOffset < readSize) {
-                    // Check before send
                     if (!conn.open) throw new Error("Connection closed");
+
+                    // === ✨ CORE FIX: Granular Backpressure INSIDE the chunk loop ===
+                    if (dataChannel && dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                        await new Promise<void>(resolve => {
+                            const onLow = () => {
+                                dataChannel.removeEventListener('bufferedamountlow', onLow);
+                                resolve();
+                            };
+                            dataChannel.addEventListener('bufferedamountlow', onLow);
+                            
+                            if (dataChannel.bufferedAmount <= dataChannel.bufferedAmountLowThreshold) {
+                                dataChannel.removeEventListener('bufferedamountlow', onLow);
+                                resolve();
+                            }
+                        });
+                    }
 
                     const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
                     const chunk = largeBuffer.slice(bufferOffset, chunkEnd);
@@ -572,7 +579,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     try {
                         conn.send(chunk);
                     } catch (e) {
-                         // Double check open state or throw
                          if (!conn.open) throw new Error("Connection closed during send");
                          throw e;
                     }
@@ -582,9 +588,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     bytesInLastPeriod += currentChunkSize;
                     bufferOffset += currentChunkSize;
 
-                    // 4. 统计更新 (仅更新 Ref，UI 循环负责渲染)
+                    // Update stats (less frequent for performance)
                     const now = Date.now();
-                    if (now - lastUpdateTime >= 800) { 
+                    if (now - lastUpdateTime >= 500) { 
                         const duration = (now - lastUpdateTime) / 1000;
                         const currentBuffered = dataChannel?.bufferedAmount || 0;
                         const actualBytesSent = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
@@ -594,7 +600,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                             const totalDuration = (now - startTime) / 1000;
                             const realTotal = totalBytesSent - currentBuffered;
                             
-                            // 更新 Ref
                             peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
                             peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
                             if (totalSize > 0) {
@@ -606,8 +611,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                         lastUpdateTime = now;
                         lastBufferedAmount = currentBuffered;
                         bytesInLastPeriod = 0;
-
-                        await new Promise(r => setTimeout(r, 0));
                     }
                 }
 
@@ -620,7 +623,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
         try { conn.send({ type: 'ALL_FILES_COMPLETE' }); } catch(e) {}
         
-        // Mark as done
         peerProgress.current.set(peerId, 100);
         peerRealtimeSpeed.current.set(peerId, 0);
 
@@ -636,8 +638,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         if (transferSessionId.current === currentSessionId) {
             activeTransfersCount.current -= 1;
             if (activeTransfersCount.current === 0) {
-                // All transfers done. We stay in TRANSFERRING state to show 100%.
-                // The user can stop sharing manually.
                 setTotalProgress(100);
                 setCurrentFileIndex(0);
             }
@@ -647,7 +647,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const stopSharing = () => {
     isDestroyingRef.current = true;
-    transferSessionId.current += 1; // 增加 Session ID，终止所有进行中的循环
+    transferSessionId.current += 1; 
     
     activeConnections.current.forEach(conn => {
         if (conn.open) {
@@ -663,7 +663,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     
     activeTransfersCount.current = 0;
     
-    // Clear refs
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
