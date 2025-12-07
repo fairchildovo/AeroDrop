@@ -3,7 +3,7 @@ import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
 import { formatFileSize, generatePreview } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService'; 
-import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp } from 'lucide-react';
+import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Users, Monitor } from 'lucide-react';
 
 interface SenderProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
@@ -22,6 +22,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const [currentSpeed, setCurrentSpeed] = useState<string>('0 KB/s');
   const [avgSpeed, setAvgSpeed] = useState<string>('0 KB/s');
   
+  // New state for individual stats
+  const [individualStats, setIndividualStats] = useState<{peerId: string, speed: string, progress: number}[]>([]);
+
   const [isDragOver, setIsDragOver] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [showFileList, setShowFileList] = useState(false);
@@ -39,12 +42,73 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const transferSessionId = useRef<number>(0);
   const activeTransfersCount = useRef<number>(0);
 
+  // 多用户并发状态追踪
+  const peerProgress = useRef<Map<string, number>>(new Map());
+  const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
+  const peerAverageSpeed = useRef<Map<string, number>>(new Map());
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileListRef = useRef<File[]>([]);
 
+  // === ✨ UI Updater for Multi-User Stats ===
+  useEffect(() => {
+    let interval: number;
+    if (state === TransferState.TRANSFERRING) {
+        interval = window.setInterval(() => {
+            let totalSpeed = 0;
+            let totalAvgSpeed = 0;
+            let combinedProgress = 0;
+            const count = peerProgress.current.size;
+            
+            const stats: {peerId: string, speed: string, progress: number}[] = [];
+
+            // Iterate over peerProgress to ensure we cover all active transfers
+            peerProgress.current.forEach((p, peerId) => {
+                combinedProgress += p;
+                
+                const s = peerRealtimeSpeed.current.get(peerId) || 0;
+                totalSpeed += s;
+                
+                const avg = peerAverageSpeed.current.get(peerId) || 0;
+                totalAvgSpeed += avg;
+
+                stats.push({
+                    peerId,
+                    speed: formatFileSize(s) + '/s',
+                    progress: p
+                });
+            });
+
+            setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
+            setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
+            setIndividualStats(stats);
+            
+            if (count > 0) {
+                // 显示所有连接的平均进度
+                setTotalProgress(Math.floor(combinedProgress / count));
+            } else {
+                setTotalProgress(0);
+            }
+        }, 800);
+    }
+    return () => clearInterval(interval);
+  }, [state]);
+
   // === ✨ Connection Stats Detection ===
+  const updateConnectionStatusUI = () => {
+    const count = activeConnections.current.size;
+    if (count > 1) {
+       setConnectionStatus(`已连接 ${count} 个设备`);
+    } else if (count === 0) {
+       setConnectionStatus('');
+    }
+    // count === 1 时，由 updateConnectionStats 显示详细信息
+  };
+
   const updateConnectionStats = async (conn: DataConnection) => {
       if (!conn.peerConnection) return;
+      if (activeConnections.current.size > 1) return; // 多设备时不覆盖简单计数状态
+
       try {
           const stats = await conn.peerConnection.getStats();
           let selectedPairId = null;
@@ -282,6 +346,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const startSharing = async () => {
     if (!fileList.length || !metadata) return;
     isDestroyingRef.current = false;
+    
+    // Clear stats
+    peerProgress.current.clear();
+    peerRealtimeSpeed.current.clear();
+    peerAverageSpeed.current.clear();
+    setIndividualStats([]);
+
     setState(TransferState.GENERATING_CODE);
     setConnectionStatus('');
     let expiresAt: number | undefined;
@@ -332,10 +403,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
              });
              return;
           }
-          setConnectionStatus('正在建立连接...');
+          
           activeConnections.current.add(conn);
+          updateConnectionStatusUI();
+
           conn.on('open', () => {
               // ✨ Stat Check
+              updateConnectionStatusUI();
               setTimeout(() => updateConnectionStats(conn), 800);
 
               setState(TransferState.PEER_CONNECTED);
@@ -352,16 +426,19 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   setState(TransferState.TRANSFERRING);
                   sendFileSequence(conn, payload.fileIndex, payload.chunkIndex);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
-                  transferSessionId.current += 1; 
-                  activeTransfersCount.current = 0; 
-                  onNotification('接收方已取消下载', 'info');
-                  setState(TransferState.PEER_CONNECTED); 
-                  setTotalProgress(0);
-                  setCurrentSpeed('0 KB/s');
+                  // 对于多设备，我们不应直接重置整个会话，除非这是唯一的连接
+                  // 这里简单处理：仅通知
+                  onNotification(`设备 ${conn.peer.slice(0,5)}... 取消了下载`, 'info');
               }
           });
           conn.on('close', () => {
               activeConnections.current.delete(conn);
+              peerProgress.current.delete(conn.peer);
+              peerRealtimeSpeed.current.delete(conn.peer);
+              peerAverageSpeed.current.delete(conn.peer);
+              
+              updateConnectionStatusUI();
+              
               if (isDestroyingRef.current) return;
               if (activeConnections.current.size === 0 && activeTransfersCount.current === 0) {
                   setConnectionStatus('');
@@ -371,12 +448,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       });
   };
 
-  // === 核心优化后的发送逻辑 ===
+  // === 核心优化后的发送逻辑（支持多用户） ===
   const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
     
-    transferSessionId.current += 1;
+    // IMPORTANT: 移除 transferSessionId 递增，允许并发传输
+    // 仅捕获当前会话ID用于 Stop Sharing 检测
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
     
@@ -392,6 +470,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     let lastUpdateTime = Date.now();
     let bytesInLastPeriod = 0;
     const startTime = Date.now();
+
+    // Init peer stats
+    const peerId = conn.peer;
+    peerProgress.current.set(peerId, 0);
 
     for(let i = 0; i < startFileIndex; i++) {
         totalBytesSent += files[i].size;
@@ -415,8 +497,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             if (transferSessionId.current !== currentSessionId) return;
             if (!conn.open) throw new Error("Connection closed");
             
+            // 仅在单用户时更新 UI 的文件索引，避免闪烁
+            if (activeConnections.current.size === 1) {
+                setCurrentFileIndex(i);
+            }
+            
             const file = files[i];
-            setCurrentFileIndex(i);
             
             // @ts-ignore
             const fName = file.fullPath || file.webkitRelativePath || file.name;
@@ -436,7 +522,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 if (transferSessionId.current !== currentSessionId) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
                 
-                // 1. 背压控制 (Backpressure) - 自动适应网络状况
+                // 1. 背压控制
                 if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
                     await new Promise<void>(resolve => {
                         const handler = () => {
@@ -451,8 +537,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     });
                 }
 
-                // 2. 批量读取 (Batch Read)
-                // 每次读取 8MB 数据，相比原先的 64KB 读取，减少了 128 倍的异步上下文切换
+                // 2. 批量读取
                 const readSize = Math.min(READ_BUFFER_SIZE, file.size - fileOffset);
                 const blobSlice = file.slice(fileOffset, fileOffset + readSize);
                 const largeBuffer = await blobSlice.arrayBuffer();
@@ -461,7 +546,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 let bufferOffset = 0;
                 while (bufferOffset < readSize) {
                     const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
-                    const chunk = largeBuffer.slice(bufferOffset, chunkEnd); // ArrayBuffer slice 是高效的内存视图操作
+                    const chunk = largeBuffer.slice(bufferOffset, chunkEnd);
                     
                     conn.send(chunk);
 
@@ -470,7 +555,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     bytesInLastPeriod += currentChunkSize;
                     bufferOffset += currentChunkSize;
 
-                    // 4. UI 更新限流 (每 800ms 更新一次，避免卡顿)
+                    // 4. 统计更新 (仅更新 Ref，UI 循环负责渲染)
                     const now = Date.now();
                     if (now - lastUpdateTime >= 800) { 
                         const duration = (now - lastUpdateTime) / 1000;
@@ -479,14 +564,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                         
                         if (duration > 0) {
                             const effectiveSpeed = Math.max(0, actualBytesSent) / duration;
-                            setCurrentSpeed(formatFileSize(effectiveSpeed) + '/s');
-                            
                             const totalDuration = (now - startTime) / 1000;
                             const realTotal = totalBytesSent - currentBuffered;
-                            setAvgSpeed(formatFileSize(realTotal / totalDuration) + '/s');
                             
+                            // 更新 Ref
+                            peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
+                            peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
                             if (totalSize > 0) {
-                                setTotalProgress(Math.min(100, Math.floor((realTotal / totalSize) * 100)));
+                                const p = Math.min(100, Math.floor((realTotal / totalSize) * 100));
+                                peerProgress.current.set(peerId, p);
                             }
                         }
                         
@@ -494,7 +580,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                         lastBufferedAmount = currentBuffered;
                         bytesInLastPeriod = 0;
 
-                        // 极短的 Yield，仅为了让 React 渲染进度条，不影响传输流
                         await new Promise(r => setTimeout(r, 0));
                     }
                 }
@@ -506,14 +591,19 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             conn.send({ type: 'FILE_COMPLETE', payload: completePayload });
         }
 
-        setTotalProgress(100);
         conn.send({ type: 'ALL_FILES_COMPLETE' });
-        onNotification("所有文件发送完成！", 'success');
+        
+        // Mark as done
+        peerProgress.current.set(peerId, 100);
+        peerRealtimeSpeed.current.set(peerId, 0);
+
+        if (activeConnections.current.size === 1) {
+            onNotification("文件发送完成！", 'success');
+        }
 
     } catch (err) {
         if (transferSessionId.current === currentSessionId) {
             console.error("Transfer failed", err);
-            onNotification("传输中断", 'error');
         }
     } finally {
         if (transferSessionId.current === currentSessionId) {
@@ -521,6 +611,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             if (activeTransfersCount.current === 0) {
                 setState(TransferState.PEER_CONNECTED);
                 setCurrentFileIndex(0);
+                setTotalProgress(100);
             }
         }
     }
@@ -528,7 +619,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const stopSharing = () => {
     isDestroyingRef.current = true;
-    transferSessionId.current += 1;
+    transferSessionId.current += 1; // 增加 Session ID，终止所有进行中的循环
+    
     activeConnections.current.forEach(conn => {
         if (conn.open) {
             try { conn.send({ type: 'TRANSFER_CANCELLED' }); } catch(e) { console.error(e); }
@@ -539,7 +631,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         activeConnections.current.forEach(conn => conn.close());
         activeConnections.current.clear();
     }, 800);
+    
     activeTransfersCount.current = 0;
+    
+    // Clear refs
+    peerProgress.current.clear();
+    peerRealtimeSpeed.current.clear();
+    peerAverageSpeed.current.clear();
+    setIndividualStats([]);
+
     setConnectionStatus('');
     setState(TransferState.IDLE);
     setFileList([]);
@@ -617,9 +717,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                <button onClick={stopSharing} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20} /></button>
             </div>
             
+            {metadata.files.length > 1 && (
             <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden animate-slide-up">
                 <button onClick={() => setShowFileList(!showFileList)} className="w-full px-4 py-2 bg-slate-50 dark:bg-slate-900 flex justify-between text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-700 dark:text-slate-300">
-                    <span>文件列表</span>
+                    <span>文件列表 ({metadata.files.length})</span>
                     {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                 </button>
                 {showFileList && (
@@ -633,6 +734,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     </div>
                 )}
             </div>
+            )}
 
             <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -690,15 +792,21 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                        <Loader2 size={32} className="animate-spin text-brand-500" />
                        <div className="text-center">
                            <p className="text-lg font-bold text-slate-700 dark:text-slate-200">正在发送...</p>
-                           <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">
-                               {currentFileIndex + 1}/{metadata?.files.length}: {fileList[currentFileIndex]?.name}
-                           </p>
+                           {activeConnections.current.size > 1 ? (
+                               <p className="text-sm text-slate-500 dark:text-slate-400 font-medium flex items-center gap-1 justify-center mt-1">
+                                  <Users size={14} /> 正在向 {activeConnections.current.size} 个设备传输
+                               </p>
+                           ) : (
+                               <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">
+                                   {currentFileIndex + 1}/{metadata?.files.length}: {fileList[currentFileIndex]?.name}
+                               </p>
+                           )}
                        </div>
                    </div>
 
                    <div className="space-y-2">
                        <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 px-1">
-                           <span>总进度</span>
+                           <span>{activeConnections.current.size > 1 ? '总进度 (平均)' : '总进度'}</span>
                            <span>{totalProgress}%</span>
                        </div>
                        <div className="w-full bg-slate-100 dark:bg-slate-700 rounded-full h-3 overflow-hidden">
@@ -713,14 +821,43 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
                    <div className="grid grid-cols-2 gap-3">
                        <div className="bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border border-slate-100 dark:border-slate-700 text-center">
-                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">实时速度</p>
+                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">总实时速度</p>
                            <p className="text-brand-600 dark:text-brand-400 font-bold font-mono">{currentSpeed}</p>
                        </div>
                        <div className="bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border border-slate-100 dark:border-slate-700 text-center">
-                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">平均速度</p>
+                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">总平均速度</p>
                            <p className="text-blue-600 dark:text-blue-400 font-bold font-mono">{avgSpeed}</p>
                        </div>
                    </div>
+
+                   {individualStats.length > 1 && (
+                       <div className="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700 overflow-hidden mt-4 animate-slide-up">
+                           <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-500 dark:text-slate-400 flex justify-between items-center">
+                               <span>设备列表 ({individualStats.length})</span>
+                               <Monitor size={14} />
+                           </div>
+                           <div className="divide-y divide-slate-100 dark:divide-slate-700 max-h-40 overflow-y-auto">
+                               {individualStats.map((stat) => (
+                                   <div key={stat.peerId} className="px-4 py-2 flex items-center justify-between text-xs">
+                                       <div className="flex items-center gap-2">
+                                           <div className={`w-2 h-2 rounded-full ${stat.progress === 100 ? 'bg-green-500' : 'bg-brand-500 animate-pulse'}`}></div>
+                                           <span className="text-slate-600 dark:text-slate-300 font-mono" title={stat.peerId}>
+                                               设备 ...{stat.peerId.slice(-4)}
+                                           </span>
+                                       </div>
+                                       <div className="flex items-center gap-3">
+                                            {stat.progress === 100 ? (
+                                                <span className="text-green-600 font-bold flex items-center gap-1"><Check size={12} /> 完成</span>
+                                            ) : (
+                                                <span className="text-slate-500">{stat.progress}%</span>
+                                            )}
+                                            <span className="text-slate-700 dark:text-slate-300 font-mono w-16 text-right tabular-nums">{stat.speed}</span>
+                                       </div>
+                                   </div>
+                               ))}
+                           </div>
+                       </div>
+                   )}
                </div>
            )}
 

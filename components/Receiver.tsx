@@ -51,7 +51,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
-  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024; // 16MB 缓冲区
+  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024; // 16MB 缓冲区 (Sweet Spot for Performance/UI Blocking)
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -131,6 +131,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   // === 核心写入逻辑：合并小块并写入磁盘 ===
   const flushSpecificBatch = async (batch: Uint8Array[], totalLen: number) => {
+      // 卫语句：防止取消后继续写入 (Fix Race Condition)
       if (!isStreamingRef.current) return;
       
       try {
@@ -461,8 +462,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   };
 
   const reset = () => {
-    // ... 保持原有逻辑 ...
+    isStreamingRef.current = false; // Fix: Immediate flag to prevent queued writes from executing
     isTransferActiveRef.current = false;
+    // ... 保持原有逻辑 ...
     abortStreams().then(() => {
         if (connRef.current) connRef.current.close();
         if (peerRef.current) peerRef.current.destroy();
