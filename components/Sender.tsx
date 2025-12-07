@@ -110,23 +110,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   // === ✨ Private IP Detection (RFC 1918 + Localhost) ===
   const isPrivateIP = (ip: string) => {
+      if (!ip) return false;
       // Remove IPv6 brackets and port if present
       const cleanIp = ip.replace(/^\[|\](:[0-9]+)?$/g, '').split(':')[0];
       
       // Localhost
       if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.toLowerCase() === 'localhost') return true;
 
-      // IPv4 Private Ranges
-      const parts = cleanIp.split('.').map(Number);
-      if (parts.length === 4) {
-          if (parts[0] === 10) return true; // 10.0.0.0/8
-          if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12
-          if (parts[0] === 192 && parts[1] === 168) return true; // 192.168.0.0/16
-          return false;
-      }
-      
-      // Simple IPv6 Link-Local check (fe80::)
+      // IPv6 Link-Local
       if (cleanIp.toLowerCase().startsWith('fe80:')) return true;
+
+      // IPv4 Private Ranges
+      const parts = cleanIp.split('.');
+      if (parts.length === 4) {
+          const p0 = parseInt(parts[0], 10);
+          const p1 = parseInt(parts[1], 10);
+          
+          if (p0 === 10) return true; // 10.0.0.0/8
+          if (p0 === 172 && p1 >= 16 && p1 <= 31) return true; // 172.16.0.0/12
+          if (p0 === 192 && p1 === 168) return true; // 192.168.0.0/16
+      }
 
       return false;
   };
@@ -139,6 +142,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           const stats = await conn.peerConnection.getStats();
           let selectedPair: any = null;
           
+          // Spec-compliant way to find selected pair
           stats.forEach(report => {
               if (report.type === 'transport' && report.selectedCandidatePairId) {
                   selectedPair = stats.get(report.selectedCandidatePairId);
@@ -157,8 +161,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           if (selectedPair) {
               const remoteCandidate = stats.get(selectedPair.remoteCandidateId);
               const localCandidate = stats.get(selectedPair.localCandidateId);
-              const candidateType = localCandidate?.candidateType; // host, srflx, prflx, relay
               
+              // Get candidate details
+              // Note: 'candidateType' helps, but IP is the ultimate source of truth for "LAN-ness"
+              const candidateType = localCandidate?.candidateType; // host, srflx, prflx, relay
               const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
               const protocol = localCandidate?.protocol || 'udp';
 
@@ -169,14 +175,16 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                   typeDisplay = '🐢 中继连接 (Relay/TURN)';
                   networkType = 'RELAY';
               } else if (isPrivateIP(remoteIP)) {
+                  // If remote IP is private, we are definitely on a LAN/VPN structure
                   typeDisplay = '⚡️ 局域网直连 (LAN)';
                   networkType = 'LAN';
               } else {
+                  // Public IP
                   typeDisplay = '🌐 公网 P2P (WAN)';
                   networkType = 'WAN';
               }
 
-              // Store for optimization logic
+              // Store for flow control optimization
               peerNetworkTypes.current.set(conn.peer, networkType);
 
               if (activeConnections.current.size === 1) {
@@ -528,11 +536,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer for fewer IO ops
     
     // ✨ Hysteresis Flow Control Settings
-    // High Water Mark: Stop sending when buffer hits this
-    const HIGH_WATER_MARK = isLan ? 1024 * 1024 : 128 * 1024; // 1MB (LAN) vs 128KB (WAN)
-    
-    // Low Water Mark: Resume sending when buffer drops to this
-    // For LAN, we keep the pipe fuller. For WAN, we let it drain more to avoid bloat.
+    // LAN: We can fill the pipe more (1MB) and drain less (256KB) to keep throughput high.
+    // WAN: We fill less (64KB) and drain completely (0KB) to avoid bufferbloat.
+    const HIGH_WATER_MARK = isLan ? 1024 * 1024 : 64 * 1024; 
     const LOW_WATER_MARK = isLan ? 256 * 1024 : 0; 
 
     let totalBytesSent = 0;
@@ -556,11 +562,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     // @ts-ignore
     const dataChannel = conn.dataChannel as RTCDataChannel;
     
-    if (dataChannel) {
-        // Use the Low Water Mark as the trigger for the event
-        dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
-    }
-
     try {
         let chunkStartOffset = startChunkIndex;
 
@@ -603,7 +604,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
                     // === ✨ CORE FIX: Hysteresis Loop ===
                     if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
-                        // Wait until bufferedAmount drops <= LOW_WATER_MARK
+                        // Set threshold to the Low Water Mark
+                        // The 'bufferedamountlow' event will fire when bufferedAmount drops <= LOW_WATER_MARK
+                        dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
+
                         await new Promise<void>(resolve => {
                             const onLow = () => {
                                 dataChannel.removeEventListener('bufferedamountlow', onLow);
@@ -644,8 +648,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                         const currentBuffered = dataChannel?.bufferedAmount || 0;
                         
                         // Calculate effective throughput (excluding what's sitting in buffer)
-                        // Note: totalBytesSent includes what is in buffer.
-                        // Sent to network = totalBytesSent - currentBuffered.
                         const actualBytesTransferred = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
                         
                         if (duration > 0) {
