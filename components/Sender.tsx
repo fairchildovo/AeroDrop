@@ -17,18 +17,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const [customCodeInput, setCustomCodeInput] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
   
-  // Progress states
   const [currentFileIndex, setCurrentFileIndex] = useState(0);
-  const [totalProgress, setTotalProgress] = useState(0); // 0-100
+  const [totalProgress, setTotalProgress] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState<string>('0 KB/s');
   const [avgSpeed, setAvgSpeed] = useState<string>('0 KB/s');
   
-  // UI States
   const [isDragOver, setIsDragOver] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [showFileList, setShowFileList] = useState(false);
 
-  // Constraints State
   const [expiryOption, setExpiryOption] = useState<string>('1h');
   const [remainingTime, setRemainingTime] = useState<string>('');
 
@@ -39,16 +36,52 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const activeConnections = useRef<Set<DataConnection>>(new Set());
   const isDestroyingRef = useRef(false);
   
-  // To handle canceling stale loops when resuming or restarting
   const transferSessionId = useRef<number>(0);
   const activeTransfersCount = useRef<number>(0);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  
-  // Ref to hold current file list for async access
   const fileListRef = useRef<File[]>([]);
 
-  // Prevent accidental tab close when hosting
+  // === ✨ Connection Stats Detection ===
+  const updateConnectionStats = async (conn: DataConnection) => {
+      if (!conn.peerConnection) return;
+      try {
+          const stats = await conn.peerConnection.getStats();
+          let selectedPairId = null;
+          stats.forEach(report => {
+              if (report.type === 'transport' && report.selectedCandidatePairId) {
+                  selectedPairId = report.selectedCandidatePairId;
+              }
+          });
+          if (!selectedPairId) {
+              stats.forEach(report => {
+                  if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.selected) {
+                      selectedPairId = report.id;
+                  }
+              });
+          }
+          if (selectedPairId) {
+              const pair = stats.get(selectedPairId);
+              const localCandidate = stats.get(pair.localCandidateId);
+              const type = localCandidate?.candidateType;
+              const protocol = localCandidate?.protocol;
+
+              let typeDisplay = '未知';
+              if (type === 'host') typeDisplay = '⚡️ 局域网直连 (Host)';
+              else if (type === 'srflx') typeDisplay = '🌐 公网穿透 (STUN)';
+              else if (type === 'relay') typeDisplay = '🐢 服务器中继 (TURN)';
+
+              setConnectionStatus(`已连接 [${typeDisplay} | ${protocol?.toUpperCase()}]`);
+              
+              if (type === 'relay') {
+                  onNotification('警告：连接经过中继服务器，速度受限。建议使用局域网。', 'info');
+              }
+          }
+      } catch (e) {
+          console.error("Stats check failed", e);
+      }
+  };
+
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) {
@@ -60,46 +93,34 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [state]);
 
-  // Clean up on unmount
   useEffect(() => {
     return () => stopSharing();
   }, []);
 
-  // Wake Lock Effect
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
-
     const requestWakeLock = async () => {
       try {
         if ('wakeLock' in navigator) {
           wakeLock = await navigator.wakeLock.request('screen');
         }
-      } catch (err) {
-        console.warn('Wake Lock request failed:', err);
-      }
+      } catch (err) { console.warn('Wake Lock request failed:', err); }
     };
-
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && state === TransferState.TRANSFERRING) {
         requestWakeLock();
       }
     };
-
     if (state === TransferState.TRANSFERRING) {
       requestWakeLock();
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
-
     return () => {
-      if (wakeLock) {
-        wakeLock.release().catch(() => {});
-        wakeLock = null;
-      }
+      if (wakeLock) wakeLock.release().catch(() => {});
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [state]);
 
-  // Countdown timer effect
   useEffect(() => {
     if (state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) {
       if (metadata?.constraints?.expiresAt) {
@@ -107,7 +128,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           const now = Date.now();
           const end = metadata.constraints!.expiresAt!;
           const diff = end - now;
-          
           if (diff <= 0) {
             setRemainingTime('已过期');
             stopSharing();
@@ -136,19 +156,16 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     fileListRef.current = files;
     setState(TransferState.CONFIGURING);
     
-    // Calculate total size and generate basic metadata
     let totalSize = 0;
     const filesInfo = [];
-
     for (const f of files) {
         totalSize += f.size;
         let preview = undefined;
         if (files.length === 1) {
             preview = await generatePreview(f);
         }
-        
+        // @ts-ignore
         const name = f.fullPath || f.webkitRelativePath || f.name;
-
         filesInfo.push({
             name: decodeURIComponent(name),
             size: f.size,
@@ -157,14 +174,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             preview
         });
     }
-
-    setMetadata({
-      files: filesInfo,
-      totalSize: totalSize
-    });
+    setMetadata({ files: filesInfo, totalSize: totalSize });
   }, []);
 
-  // Helper: Traverse File System Entry
   const traverseFileTree = (item: FileSystemEntry, path: string = ""): Promise<File[]> => {
     return new Promise((resolve, reject) => {
       if (item.isFile) {
@@ -258,46 +270,35 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    
-    // Construct full paths based on webkitRelativePath
     const safeFiles = Array.from(files).map((f: any) => {
         const safe = new File([f], f.name, { type: f.type, lastModified: f.lastModified });
         safe.fullPath = f.webkitRelativePath || f.name;
         return safe;
     });
-
     e.target.value = '';
     processFiles(safeFiles);
   };
 
   const startSharing = async () => {
     if (!fileList.length || !metadata) return;
-
     isDestroyingRef.current = false;
     setState(TransferState.GENERATING_CODE);
     setConnectionStatus('');
-
-    // Calculate constraints
     let expiresAt: number | undefined;
     const now = Date.now();
     if (expiryOption === '10m') expiresAt = now + 10 * 60 * 1000;
     if (expiryOption === '1h') expiresAt = now + 60 * 60 * 1000;
     if (expiryOption === '1d') expiresAt = now + 24 * 60 * 60 * 1000;
-
     setMetadata({ ...metadata, constraints: { expiresAt } });
-
     const iceConfig = await getIceConfig();
     const peer = new Peer({ debug: 1, config: iceConfig });
-
     peer.on('open', (id) => {
       let finalCode = customCodeInput.length === 4 ? customCodeInput : Math.floor(1000 + Math.random() * 9000).toString();
-      peer.destroy(); // Recreate with custom ID
+      peer.destroy();
       const customPeer = new Peer(`aerodrop-${finalCode}`, { debug: 1, config: iceConfig });
       setupPeerListeners(customPeer, finalCode);
     });
-    
     peer.on('error', (err) => {
-        // Suppress network errors from initial peer as we destroy it anyway or retry
         if (err.type === 'network' || err.type === 'server-error') return;
         setErrorMsg('网络初始化失败，请重试');
         setState(TransferState.ERROR);
@@ -310,24 +311,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           setTransferCode(code);
           setState(TransferState.WAITING_FOR_PEER);
       });
-      
       peer.on('disconnected', () => {
-          console.log("Connection to signaling server lost. Reconnecting...");
-          if (peer && !peer.destroyed) {
-              peer.reconnect();
-          }
+          if (peer && !peer.destroyed) peer.reconnect();
       });
-
       peer.on('error', (err) => {
           if (err.type === 'unavailable-id') {
               setErrorMsg('该口令已被占用，请换一个。');
               setState(TransferState.CONFIGURING);
           } else {
-              // Filter out network errors that might be resolved by reconnect
-              if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-                  console.warn('Network issue detected:', err);
-                  return;
-              }
+              if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
               setErrorMsg(`连接错误: ${err.type}`);
               setState(TransferState.ERROR);
           }
@@ -343,38 +335,34 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           setConnectionStatus('正在建立连接...');
           activeConnections.current.add(conn);
           conn.on('open', () => {
-              setConnectionStatus('已连接');
+              // ✨ Stat Check
+              setTimeout(() => updateConnectionStats(conn), 800);
+
               setState(TransferState.PEER_CONNECTED);
-              // Send metadata (list of files)
               conn.send({ type: 'METADATA', payload: metadata });
           });
           conn.on('data', (data: any) => {
               const msg = data as P2PMessage;
               if (msg.type === 'ACCEPT_TRANSFER') {
                   setState(TransferState.TRANSFERRING);
-                  // Start fresh
                   sendFileSequence(conn, 0, 0);
               } else if (msg.type === 'RESUME_REQUEST') {
                   const payload = msg.payload as ResumePayload;
                   onNotification(`检测到断点，正在从第 ${payload.fileIndex + 1} 个文件恢复...`, 'info');
                   setState(TransferState.TRANSFERRING);
-                  // Resume from specific point
                   sendFileSequence(conn, payload.fileIndex, payload.chunkIndex);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
-                  onNotification('接收方已取消传输', 'error');
-                  transferSessionId.current += 1; // Interrupt current loop
-                  activeTransfersCount.current = 0;
-                  setState(TransferState.PEER_CONNECTED);
-                  setCurrentFileIndex(0);
+                  transferSessionId.current += 1; 
+                  activeTransfersCount.current = 0; 
+                  onNotification('接收方已取消下载', 'info');
+                  setState(TransferState.PEER_CONNECTED); 
                   setTotalProgress(0);
                   setCurrentSpeed('0 KB/s');
-                  setAvgSpeed('0 KB/s');
               }
           });
           conn.on('close', () => {
               activeConnections.current.delete(conn);
               if (isDestroyingRef.current) return;
-
               if (activeConnections.current.size === 0 && activeTransfersCount.current === 0) {
                   setConnectionStatus('');
                   setState(TransferState.WAITING_FOR_PEER);
@@ -387,24 +375,21 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const files = fileListRef.current;
     if (!files.length) return;
     
-    // Increment session ID to invalidate any previous loops
     transferSessionId.current += 1;
     const currentSessionId = transferSessionId.current;
-
     activeTransfersCount.current += 1;
     
-    // Chunk size: 256KB for better performance (Up from 64KB)
-    const CHUNK_SIZE = 256 * 1024; 
-    
-    // High Water Mark: 16MB (Optimized for main thread responsiveness)
-    const HIGH_WATER_MARK = 16 * 1024 * 1024;
-    // Low Water Mark: 10MB
-    const LOW_WATER_MARK = 10 * 1024 * 1024;
-    
-    // Stats Init
+    // === 🚀 FINAL PERFORMANCE TUNING 🚀 ===
+    // 64KB for safe MTU traversal
+    const CHUNK_SIZE = 64 * 1024; 
+    const HIGH_WATER_MARK = 16 * 1024 * 1024; 
+    const LOW_WATER_MARK = 4 * 1024 * 1024;
+    const SPEED_UPDATE_INTERVAL = 1000; 
+
+    // Speed calc state
     let totalBytesSent = 0;
-    
-    // Recalculate already sent bytes for progress bar accuracy
+    let lastBufferedAmount = 0;
+
     for(let i = 0; i < startFileIndex; i++) {
         totalBytesSent += files[i].size;
     }
@@ -428,16 +413,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         let chunkStartOffset = startChunkIndex;
 
         for (let i = startFileIndex; i < files.length; i++) {
-            // Check session validity
             if (transferSessionId.current !== currentSessionId) return;
             if (!conn.open) throw new Error("Connection closed");
             
             const file = files[i];
             setCurrentFileIndex(i);
             
+            // @ts-ignore
             const fName = file.fullPath || file.webkitRelativePath || file.name;
 
-            // 1. Notify Start of File (Send every time to sync state)
             const startPayload: FileStartPayload = {
                 fileIndex: i,
                 fileName: decodeURIComponent(fName),
@@ -446,17 +430,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             };
             conn.send({ type: 'FILE_START', payload: startPayload });
 
-            // 2. Send Chunks as RAW ArrayBuffers
             let offset = chunkStartOffset * CHUNK_SIZE;
-
-            // Reset for subsequent files
             chunkStartOffset = 0; 
 
             while (offset < file.size) {
                 if (transferSessionId.current !== currentSessionId) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
                 
-                // Backpressure Check using High/Low Water Mark
                 if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
                     await new Promise<void>(resolve => {
                         const handler = () => {
@@ -464,7 +444,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                             resolve();
                         };
                         dataChannel.addEventListener('bufferedamountlow', handler);
-                        // Double check in case it drained before listener attached
                         if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
                              dataChannel.removeEventListener('bufferedamountlow', handler);
                              resolve();
@@ -474,53 +453,53 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
                 const slice = file.slice(offset, offset + CHUNK_SIZE);
                 const chunkData = await slice.arrayBuffer();
-
-                // Send Raw Buffer - Much faster than JSON wrapper
                 conn.send(chunkData);
 
-                // Update metrics
                 const chunkSize = chunkData.byteLength;
                 totalBytesSent += chunkSize;
                 bytesInLastPeriod += chunkSize;
 
                 const now = Date.now();
-                if (now - lastUpdateTime >= 1000) { 
+                if (now - lastUpdateTime >= SPEED_UPDATE_INTERVAL) { 
                      const duration = (now - lastUpdateTime) / 1000;
                      if (duration > 0) {
-                         const speed = bytesInLastPeriod / duration;
-                         setCurrentSpeed(formatFileSize(speed) + '/s');
+                         // ✨ Real speed calc: pushed - (backlog_now - backlog_prev)
+                         const currentBuffered = dataChannel?.bufferedAmount || 0;
+                         const actualBytesSent = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
+                         const effectiveSpeed = Math.max(0, actualBytesSent) / duration;
+                         
+                         setCurrentSpeed(formatFileSize(effectiveSpeed) + '/s');
+                         lastBufferedAmount = currentBuffered;
                      }
                      
                      const totalDuration = (now - startTime) / 1000;
                      if (totalDuration > 0) {
-                         const avg = totalBytesSent / totalDuration;
+                         const realTotal = totalBytesSent - (dataChannel?.bufferedAmount || 0);
+                         const avg = realTotal / totalDuration;
                          setAvgSpeed(formatFileSize(avg) + '/s');
                      }
-                     
                      if (totalSize > 0) {
-                         const prog = Math.min(100, Math.floor((totalBytesSent / totalSize) * 100));
+                         const realProgress = totalBytesSent - (dataChannel?.bufferedAmount || 0);
+                         const prog = Math.min(100, Math.floor((realProgress / totalSize) * 100));
                          setTotalProgress(prog);
                      }
-
                      lastUpdateTime = now;
                      bytesInLastPeriod = 0;
                 }
 
                 offset += CHUNK_SIZE;
                 
-                // Smart Yield: Relaxed to 100ms to allow higher throughput
-                if (now - lastYieldTime > 100) {
+                // ✨ 30ms Yield: Critical for high throughput
+                if (now - lastYieldTime > 30) {
                     await new Promise(r => setTimeout(r, 0));
                     lastYieldTime = Date.now();
                 }
             }
 
-            // 3. Notify End of File
             const completePayload: FileCompletePayload = { fileIndex: i };
             conn.send({ type: 'FILE_COMPLETE', payload: completePayload });
         }
 
-        // 4. All Done
         setTotalProgress(100);
         conn.send({ type: 'ALL_FILES_COMPLETE' });
         onNotification("所有文件发送完成！", 'success');
@@ -543,25 +522,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const stopSharing = () => {
     isDestroyingRef.current = true;
-    transferSessionId.current += 1; // Cancel any active loops
-    
-    // Notify connected peers
+    transferSessionId.current += 1;
     activeConnections.current.forEach(conn => {
         if (conn.open) {
-            try {
-                conn.send({ type: 'TRANSFER_CANCELLED' });
-            } catch(e) { console.error(e); }
+            try { conn.send({ type: 'TRANSFER_CANCELLED' }); } catch(e) { console.error(e); }
         }
     });
-
-    // Delay destruction slightly to ensure message is sent
-    // Increased delay from 100ms to 800ms to handle reliable delivery of cancel message
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
         activeConnections.current.forEach(conn => conn.close());
         activeConnections.current.clear();
     }, 800);
-
     activeTransfersCount.current = 0;
     setConnectionStatus('');
     setState(TransferState.IDLE);
@@ -609,8 +580,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         >
           <input type="file" id="file-upload" className="hidden" multiple onChange={handleFileSelect} />
           <input type="file" id="folder-upload" className="hidden" 
-                 {...({ webkitdirectory: "", directory: "" } as any)} 
-                 onChange={handleFolderSelect} 
+                 // @ts-ignore
+                 webkitdirectory="" directory="" onChange={handleFolderSelect} 
           />
           
           <div className={`w-16 h-16 bg-brand-50 dark:bg-slate-700 text-brand-600 dark:text-brand-400 rounded-full flex items-center justify-center mb-4 transition-transform duration-300 ${isDragOver ? 'scale-110 rotate-12' : 'group-hover:scale-110'}`}>
@@ -640,7 +611,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                <button onClick={stopSharing} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20} /></button>
             </div>
             
-            {/* File List Preview */}
             <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden animate-slide-up">
                 <button onClick={() => setShowFileList(!showFileList)} className="w-full px-4 py-2 bg-slate-50 dark:bg-slate-900 flex justify-between text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-700 dark:text-slate-300">
                     <span>文件列表</span>

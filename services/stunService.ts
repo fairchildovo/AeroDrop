@@ -1,3 +1,4 @@
+// services/stunService.ts
 
 // Hardcoded reliable servers (Cloudflare, Twilio, Google)
 const DEFAULT_ICE_SERVERS = [
@@ -11,12 +12,19 @@ const STUN_LIST_URL = 'https://gh-proxy.org/https://raw.githubusercontent.com/pr
 const CACHE_KEY = 'aerodrop_stun_cache';
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
+const ENABLE_LAN_ONLY_MODE = false; 
+
 interface StunCache {
   timestamp: number;
   servers: string[];
 }
 
 export const getIceConfig = async (): Promise<{ iceServers: { urls: string | string[] }[], secure: boolean }> => {
+  if (ENABLE_LAN_ONLY_MODE) {
+      console.log('[STUN] LAN Mode enabled. Skipping external STUN servers.');
+      return { iceServers: [], secure: false };
+  }
+
   try {
     const cached = localStorage.getItem(CACHE_KEY);
     if (cached) {
@@ -34,7 +42,7 @@ export const getIceConfig = async (): Promise<{ iceServers: { urls: string | str
     console.log('[STUN] Fetching dynamic server list...');
     
     const timeout = new Promise<never>((_, reject) => 
-      setTimeout(() => reject(new Error('Fetch timeout')), 800)
+      setTimeout(() => reject(new Error('Fetch timeout')), 1000)
     );
 
     const fetchRequest = fetch(STUN_LIST_URL).then(res => {
