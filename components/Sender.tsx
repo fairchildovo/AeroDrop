@@ -371,6 +371,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       });
   };
 
+  // === 核心优化后的发送逻辑 ===
   const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
@@ -379,16 +380,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
     
-    // === 🚀 FINAL PERFORMANCE TUNING 🚀 ===
-    // 64KB for safe MTU traversal
-    const CHUNK_SIZE = 64 * 1024; 
-    const HIGH_WATER_MARK = 16 * 1024 * 1024; 
-    const LOW_WATER_MARK = 4 * 1024 * 1024;
-    const SPEED_UPDATE_INTERVAL = 1000; 
+    // === PERFORMANCE CONSTANTS ===
+    const CHUNK_SIZE = 64 * 1024;        // 64KB (WebRTC 安全分片)
+    const READ_BUFFER_SIZE = 8 * 1024 * 1024; // 8MB (大块读取，减少IO次数)
+    const HIGH_WATER_MARK = 16 * 1024 * 1024; // 16MB (缓冲区上限)
+    const LOW_WATER_MARK = 4 * 1024 * 1024;   // 4MB (缓冲区下限)
 
     // Speed calc state
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;
+    let lastUpdateTime = Date.now();
+    let bytesInLastPeriod = 0;
+    const startTime = Date.now();
 
     for(let i = 0; i < startFileIndex; i++) {
         totalBytesSent += files[i].size;
@@ -398,10 +401,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     }
 
     const totalSize = metadata?.totalSize || 0;
-    const startTime = Date.now();
-    let lastUpdateTime = startTime;
-    let bytesInLastPeriod = 0;
-    let lastYieldTime = startTime;
 
     // @ts-ignore
     const dataChannel = conn.dataChannel as RTCDataChannel;
@@ -430,13 +429,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             };
             conn.send({ type: 'FILE_START', payload: startPayload });
 
-            let offset = chunkStartOffset * CHUNK_SIZE;
+            let fileOffset = chunkStartOffset * CHUNK_SIZE;
             chunkStartOffset = 0; 
 
-            while (offset < file.size) {
+            while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
                 
+                // 1. 背压控制 (Backpressure) - 自动适应网络状况
                 if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
                     await new Promise<void>(resolve => {
                         const handler = () => {
@@ -451,49 +451,55 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     });
                 }
 
-                const slice = file.slice(offset, offset + CHUNK_SIZE);
-                const chunkData = await slice.arrayBuffer();
-                conn.send(chunkData);
+                // 2. 批量读取 (Batch Read)
+                // 每次读取 8MB 数据，相比原先的 64KB 读取，减少了 128 倍的异步上下文切换
+                const readSize = Math.min(READ_BUFFER_SIZE, file.size - fileOffset);
+                const blobSlice = file.slice(fileOffset, fileOffset + readSize);
+                const largeBuffer = await blobSlice.arrayBuffer();
 
-                const chunkSize = chunkData.byteLength;
-                totalBytesSent += chunkSize;
-                bytesInLastPeriod += chunkSize;
+                // 3. 内存切片发送
+                let bufferOffset = 0;
+                while (bufferOffset < readSize) {
+                    const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
+                    const chunk = largeBuffer.slice(bufferOffset, chunkEnd); // ArrayBuffer slice 是高效的内存视图操作
+                    
+                    conn.send(chunk);
 
-                const now = Date.now();
-                if (now - lastUpdateTime >= SPEED_UPDATE_INTERVAL) { 
-                     const duration = (now - lastUpdateTime) / 1000;
-                     if (duration > 0) {
-                         // ✨ Real speed calc: pushed - (backlog_now - backlog_prev)
-                         const currentBuffered = dataChannel?.bufferedAmount || 0;
-                         const actualBytesSent = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
-                         const effectiveSpeed = Math.max(0, actualBytesSent) / duration;
-                         
-                         setCurrentSpeed(formatFileSize(effectiveSpeed) + '/s');
-                         lastBufferedAmount = currentBuffered;
-                     }
-                     
-                     const totalDuration = (now - startTime) / 1000;
-                     if (totalDuration > 0) {
-                         const realTotal = totalBytesSent - (dataChannel?.bufferedAmount || 0);
-                         const avg = realTotal / totalDuration;
-                         setAvgSpeed(formatFileSize(avg) + '/s');
-                     }
-                     if (totalSize > 0) {
-                         const realProgress = totalBytesSent - (dataChannel?.bufferedAmount || 0);
-                         const prog = Math.min(100, Math.floor((realProgress / totalSize) * 100));
-                         setTotalProgress(prog);
-                     }
-                     lastUpdateTime = now;
-                     bytesInLastPeriod = 0;
+                    const currentChunkSize = chunk.byteLength;
+                    totalBytesSent += currentChunkSize;
+                    bytesInLastPeriod += currentChunkSize;
+                    bufferOffset += currentChunkSize;
+
+                    // 4. UI 更新限流 (每 800ms 更新一次，避免卡顿)
+                    const now = Date.now();
+                    if (now - lastUpdateTime >= 800) { 
+                        const duration = (now - lastUpdateTime) / 1000;
+                        const currentBuffered = dataChannel?.bufferedAmount || 0;
+                        const actualBytesSent = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
+                        
+                        if (duration > 0) {
+                            const effectiveSpeed = Math.max(0, actualBytesSent) / duration;
+                            setCurrentSpeed(formatFileSize(effectiveSpeed) + '/s');
+                            
+                            const totalDuration = (now - startTime) / 1000;
+                            const realTotal = totalBytesSent - currentBuffered;
+                            setAvgSpeed(formatFileSize(realTotal / totalDuration) + '/s');
+                            
+                            if (totalSize > 0) {
+                                setTotalProgress(Math.min(100, Math.floor((realTotal / totalSize) * 100)));
+                            }
+                        }
+                        
+                        lastUpdateTime = now;
+                        lastBufferedAmount = currentBuffered;
+                        bytesInLastPeriod = 0;
+
+                        // 极短的 Yield，仅为了让 React 渲染进度条，不影响传输流
+                        await new Promise(r => setTimeout(r, 0));
+                    }
                 }
 
-                offset += CHUNK_SIZE;
-                
-                // ✨ 30ms Yield: Critical for high throughput
-                if (now - lastYieldTime > 30) {
-                    await new Promise(r => setTimeout(r, 0));
-                    lastYieldTime = Date.now();
-                }
+                fileOffset += readSize;
             }
 
             const completePayload: FileCompletePayload = { fileIndex: i };
