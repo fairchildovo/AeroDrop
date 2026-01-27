@@ -67,8 +67,22 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
 
+  const codeRef = useRef<string>('');
+  useEffect(() => { codeRef.current = code; }, [code]);
+
   useEffect(() => { if (initialCode) setCode(initialCode); }, [initialCode]);
-  useEffect(() => { if (code.length === 4 && state === TransferState.IDLE) handleConnect(); }, [code, state]);
+
+  // Auto-connect when code is complete - use ref to avoid stale closure
+  const handleConnectRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    handleConnectRef.current = handleConnect;
+  });
+
+  useEffect(() => {
+    if (code.length === 4 && state === TransferState.IDLE) {
+      handleConnectRef.current();
+    }
+  }, [code, state]);
 
   useEffect(() => {
       const handleFocus = async () => {
@@ -261,7 +275,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                 // iOS/Safari 不支持 StreamSaver，使用内存缓存模式
                 if (isIOS || isSafari) {
                     isStreamingRef.current = false;
-                    console.log("iOS/Safari detected, using memory buffer mode");
                 } else if (streamSaver) {
                      try {
                          const fileStream = streamSaver.createWriteStream(fileName, { size: fileSize });
@@ -338,7 +351,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
            setErrorMsg("连接已断开");
            setState(TransferState.ERROR);
        }
-       console.log("Connection closed.");
     });
   };
 

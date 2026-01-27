@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ChatRoom } from './components/ChatRoom';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Share, DownloadCloud, Zap, Bell, MessageCircle } from 'lucide-react';
 import { AppNotification } from './types';
 
@@ -110,15 +111,21 @@ const App: React.FC = () => {
         {/* Component View with 3D Flip Effect */}
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
           {/* We use hidden/block instead of conditional rendering to keep PeerJS connections alive (Send mode) */}
-          <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-            <Sender onNotification={addNotification} />
-          </div>
-          <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-            <Receiver initialCode={initialCode} onNotification={addNotification} />
-          </div>
-          <div className={`${mode === 'chat' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-            <ChatRoom onNotification={addNotification} />
-          </div>
+          <ErrorBoundary>
+            <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+              <Sender onNotification={addNotification} />
+            </div>
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+              <Receiver initialCode={initialCode} onNotification={addNotification} />
+            </div>
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <div className={`${mode === 'chat' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+              <ChatRoom onNotification={addNotification} />
+            </div>
+          </ErrorBoundary>
         </div>
         
         <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">

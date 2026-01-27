@@ -92,7 +92,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
         if (saved) {
           const { code, host } = JSON.parse(saved);
           if (code) {
-             console.log("Restoring chat session:", code, host ? "HOST" : "GUEST");
              if (host) {
                  startHosting(code, true);
              } else {
@@ -199,7 +198,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     });
 
     peer.on('open', (id) => {
-      console.log('Chat Room Ready:', id);
       setMode('chatting');
       setIsConnecting(false);
       hostRetryCountRef.current = 0; 
@@ -215,7 +213,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
     peer.on('disconnected', () => {
         if (peer && !peer.destroyed) {
-            console.log("Peer disconnected from signaling server, reconnecting...");
             peer.reconnect();
         }
     });
@@ -255,7 +252,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           if (isRestoring) {
               if (hostRetryCountRef.current < MAX_HOST_RETRIES) {
                   hostRetryCountRef.current++;
-                  console.log(`ID taken, retrying (${hostRetryCountRef.current}/${MAX_HOST_RETRIES})...`);
                   hostRetryTimeoutRef.current = setTimeout(() => {
                       startHosting(code, true);
                   }, 2000);
@@ -269,9 +265,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           setIsConnecting(false);
           setMode('menu');
       } else if (err.type === 'peer-unavailable' || err.type === 'disconnected') {
-          console.log("Peer disconnected (Host view):", err.type);
+          // Expected disconnection events, no action needed
       } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-         console.warn('Network error detected:', err);
+         // Network errors are transient, PeerJS will auto-reconnect
       } else {
           onNotification(`连接服务错误: ${err.type}`, 'error');
           setIsConnecting(false);
@@ -308,7 +304,6 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
     peer.on('disconnected', () => {
         if (peer && !peer.destroyed) {
-            console.log("Peer disconnected from signaling server, reconnecting...");
             peer.reconnect();
         }
     });
@@ -316,7 +311,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     peer.on('error', (err) => {
       console.error(err);
       if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-          console.warn('Network error detected:', err);
+          // Network errors are transient, PeerJS will auto-reconnect
           return;
       }
       onNotification('连接房间失败，请检查口令', 'error');

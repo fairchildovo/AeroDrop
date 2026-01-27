@@ -278,7 +278,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     setFileList(files);
     fileListRef.current = files;
     setState(TransferState.CONFIGURING);
-    
+
     let totalSize = 0;
     const filesInfo = [];
     for (const f of files) {
@@ -287,8 +287,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         if (files.length === 1) {
             preview = await generatePreview(f);
         }
-        // @ts-ignore
-        const name = f.fullPath || f.webkitRelativePath || f.name;
+        const name = f.fullPath || (f as any).webkitRelativePath || f.name;
         filesInfo.push({
             name: decodeURIComponent(name),
             size: f.size,
@@ -534,7 +533,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const networkType = peerNetworkTypes.current.get(conn.peer) || 'WAN';
     const isLan = networkType === 'LAN';
 
-    console.log(`Starting transfer to ${conn.peer} via ${networkType}`);
 
     // === TUNING PARAMETERS ===
     // 局域网使用更大的 Chunk 以减少协议开销，提高吞吐量
@@ -567,8 +565,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     const totalSize = metadata?.totalSize || 0;
 
-    // @ts-ignore
-    const dataChannel = conn.dataChannel as RTCDataChannel;
+    // PeerJS internal: access the underlying RTCDataChannel
+    const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
     
     try {
         let chunkStartOffset = startChunkIndex;
@@ -582,8 +580,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             }
             
             const file = files[i];
-            // @ts-ignore
-            const fName = file.fullPath || file.webkitRelativePath || file.name;
+            const fName = file.fullPath || (file as any).webkitRelativePath || file.name;
 
             const startPayload: FileStartPayload = {
                 fileIndex: i,
@@ -746,18 +743,28 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const handleCopyCode = async () => {
       if (!transferCode) return;
-      await navigator.clipboard.writeText(transferCode);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-      onNotification('口令已复制', 'success');
+      try {
+          await navigator.clipboard.writeText(transferCode);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+          onNotification('口令已复制', 'success');
+      } catch (err) {
+          console.warn('Clipboard write failed:', err);
+          onNotification('复制失败，请手动复制', 'error');
+      }
   };
 
   const shareLink = `${window.location.origin}${window.location.pathname}?code=${transferCode}`;
   const handleCopyLink = async () => {
-      await navigator.clipboard.writeText(shareLink);
-      setLinkCopied(true);
-      setTimeout(() => setLinkCopied(false), 2000);
-      onNotification('链接已复制', 'success');
+      try {
+          await navigator.clipboard.writeText(shareLink);
+          setLinkCopied(true);
+          setTimeout(() => setLinkCopied(false), 2000);
+          onNotification('链接已复制', 'success');
+      } catch (err) {
+          console.warn('Clipboard write failed:', err);
+          onNotification('复制失败，请手动复制', 'error');
+      }
   };
 
   return (
