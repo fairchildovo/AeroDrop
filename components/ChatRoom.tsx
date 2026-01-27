@@ -67,6 +67,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const hostRetryCountRef = useRef<number>(0);
   
   const isHostRef = useRef(false);
+  const roomCodeRef = useRef(''); // 用于闭包中访问最新 roomCode
+
+  // 追踪所有创建的 Blob URLs 以便清理
+  const blobUrlsRef = useRef<Set<string>>(new Set());
 
   // Buffer for reconstructing binary files
   // Map<MessageID, { parts: ArrayBuffer[], count: number, total: number, metadata: ... }>
@@ -145,6 +149,12 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const leaveRoom = () => {
     localStorage.removeItem(SESSION_KEY);
 
+    // 清理所有 Blob URLs 防止内存泄漏
+    blobUrlsRef.current.forEach(url => {
+      try { URL.revokeObjectURL(url); } catch (e) {}
+    });
+    blobUrlsRef.current.clear();
+
     connectionsRef.current.forEach(conn => conn.close());
     connectionsRef.current = [];
     if (peerRef.current) {
@@ -173,6 +183,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
   const startHosting = async (code: string, isRestoring = false) => {
     setIsConnecting(true);
     setRoomCode(code);
+    roomCodeRef.current = code; // 同步更新 ref
     setIsHost(true);
     isHostRef.current = true;
     
@@ -280,6 +291,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
     setIsHost(false);
     isHostRef.current = false;
     setRoomCode(code);
+    roomCodeRef.current = code; // 同步更新 ref
 
     if (peerRef.current) peerRef.current.destroy();
 
@@ -367,6 +379,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
               // Reconstruct as Blob
               const blob = new Blob(fileCtx.parts, { type: fileCtx.metadata.mimeType });
               const blobUrl = URL.createObjectURL(blob);
+              blobUrlsRef.current.add(blobUrl); // 追踪以便清理
               const isImage = fileCtx.metadata.mimeType.startsWith('image/');
 
               const finalizeMessage = () => {
@@ -434,7 +447,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
           addSystemMessage('连接中断，尝试重连...');
           setTimeout(() => {
             if (localStorage.getItem(SESSION_KEY)) {
-              joinChat(roomCode);
+              joinChat(roomCodeRef.current); // 使用 ref 获取最新值，避免闭包问题
             }
           }, 2000);
         }
@@ -535,6 +548,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({ onNotification }) => {
 
       // Create local preview
       const blobUrl = URL.createObjectURL(file);
+      blobUrlsRef.current.add(blobUrl); // 追踪以便清理
       const isImage = file.type.startsWith('image/');
       
       const chatMsg: ChatMessage = {

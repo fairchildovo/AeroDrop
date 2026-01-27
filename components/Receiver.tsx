@@ -13,7 +13,12 @@ interface ReceiverProps {
 }
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification }) => {
-  const [state, setState] = useState<TransferState>(TransferState.IDLE);
+  const [state, _setState] = useState<TransferState>(TransferState.IDLE);
+  // 包装 setState 以同步更新 ref（解决闭包问题）
+  const setState = (newState: TransferState) => {
+    stateRef.current = newState;
+    _setState(newState);
+  };
   const [code, setCode] = useState<string>('');
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
   const [progress, setProgress] = useState<number>(0);
@@ -32,6 +37,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const retryCountRef = useRef<number>(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stateRef = useRef<TransferState>(TransferState.IDLE); // 用于闭包中访问最新状态
+
+  // iOS/Safari 检测
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
   const metadataRef = useRef<FileMetadata | null>(null);
   const currentFileIndexRef = useRef<number>(0); 
@@ -245,10 +256,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
             receivedSizeRef.current = 0;
 
             // 尝试建立流式写入
-            // 注意：对于 Index 0，通常在 acceptTransfer 已建立 nativeWriter。
-            // 但如果是 Resume 且 nativeWriter 已失效，我们需要在此处重建 (降级为 StreamSaver)
+            // 注意：iOS Safari 不支持 StreamSaver，需要降级到内存模式
             if (!nativeWriterRef.current) {
-                if (streamSaver) {
+                // iOS/Safari 不支持 StreamSaver，使用内存缓存模式
+                if (isIOS || isSafari) {
+                    isStreamingRef.current = false;
+                    console.log("iOS/Safari detected, using memory buffer mode");
+                } else if (streamSaver) {
                      try {
                          const fileStream = streamSaver.createWriteStream(fileName, { size: fileSize });
                          streamSaverWriterRef.current = fileStream.getWriter();
@@ -318,8 +332,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     });
 
     conn.on('close', () => {
-       // 修复：断开连接时若未完成，应切换到错误状态，而不是卡在传输界面
-       if (state === TransferState.TRANSFERRING || state === TransferState.WAITING_FOR_PEER) {
+       // 修复：使用 stateRef 而非闭包中的 state，避免过时值
+       const currentState = stateRef.current;
+       if (currentState === TransferState.TRANSFERRING || currentState === TransferState.WAITING_FOR_PEER) {
            setErrorMsg("连接已断开");
            setState(TransferState.ERROR);
        }
@@ -341,10 +356,69 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       writeQueueRef.current = Promise.resolve();
   };
 
+  // iOS/Safari 专用保存函数 - 解决 iOS Safari 不支持自动下载的问题
+  // 注意：使用 DOM API 而非 innerHTML 防止 XSS 攻击
+  const saveFileForIOS = (blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+
+    // iOS Safari 需要用户手动点击链接才能触发下载
+    // 创建一个可见的下载按钮让用户点击
+    const downloadModal = document.createElement('div');
+    downloadModal.id = 'ios-download-modal';
+    downloadModal.style.cssText = `
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.8); z-index: 99999;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 20px;
+    `;
+
+    // 使用 DOM API 构建元素，防止 XSS
+    const contentDiv = document.createElement('div');
+    contentDiv.style.cssText = 'background: white; padding: 24px; border-radius: 16px; max-width: 320px; text-align: center;';
+
+    const title = document.createElement('h3');
+    title.style.cssText = 'margin: 0 0 12px; font-size: 18px; color: #1e293b;';
+    title.textContent = '文件已准备就绪';
+
+    const fileNameP = document.createElement('p');
+    fileNameP.style.cssText = 'margin: 0 0 20px; font-size: 14px; color: #64748b; word-break: break-all;';
+    fileNameP.textContent = fileName; // 安全：textContent 自动转义
+
+    const downloadLink = document.createElement('a');
+    downloadLink.href = url;
+    downloadLink.download = fileName;
+    downloadLink.style.cssText = 'display: block; background: #3b82f6; color: white; padding: 14px 24px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 16px;';
+    downloadLink.textContent = '点击保存文件';
+    downloadLink.onclick = () => {
+      setTimeout(() => downloadModal.remove(), 500);
+    };
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.style.cssText = 'margin-top: 12px; background: none; border: none; color: #64748b; font-size: 14px; cursor: pointer;';
+    cancelBtn.textContent = '取消';
+    cancelBtn.onclick = () => {
+      downloadModal.remove();
+      URL.revokeObjectURL(url);
+    };
+
+    contentDiv.appendChild(title);
+    contentDiv.appendChild(fileNameP);
+    contentDiv.appendChild(downloadLink);
+    contentDiv.appendChild(cancelBtn);
+    downloadModal.appendChild(contentDiv);
+    document.body.appendChild(downloadModal);
+
+    // 30秒后自动清理
+    setTimeout(() => {
+      downloadModal.remove();
+      URL.revokeObjectURL(url);
+    }, 30000);
+  };
+
   const saveCurrentFile = () => {
       if (!isTransferActiveRef.current) return;
       if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) return;
-      
+
       let finalName = `file_${Date.now()}.bin`;
       let finalType = 'application/octet-stream';
       if (metadataRef.current && metadataRef.current.files[currentFileIndexRef.current]) {
@@ -353,11 +427,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       }
       try {
           const blob = new Blob(chunksRef.current, { type: finalType });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = finalName;
-          document.body.appendChild(a); a.click(); document.body.removeChild(a);
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+          // iOS Safari 特殊处理：需要用户手动点击下载
+          if (isIOS || isSafari) {
+              saveFileForIOS(blob, finalName);
+          } else {
+              // 标准浏览器：自动触发下载
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url; a.download = finalName;
+              document.body.appendChild(a); a.click(); document.body.removeChild(a);
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }
+
           completedFileIndicesRef.current.add(currentFileIndexRef.current);
           if (onNotification) onNotification(`文件 ${finalName} 已保存`, 'success');
       } catch (e) { console.error("Save failed:", e); }
@@ -373,11 +455,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     retryCountRef.current = 0;
     
     if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+    // 增加超时时间到 15 秒，跨平台 WebRTC 连接需要更长时间（特别是 Android）
     connectionTimeoutRef.current = setTimeout(() => {
         if (peerRef.current) peerRef.current.destroy();
         setErrorMsg("连接超时。请检查口令是否正确。");
         setState(TransferState.ERROR);
-    }, 8000);
+    }, 15000);
 
     if (peerRef.current) peerRef.current.destroy();
     
@@ -412,28 +495,33 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     if (connRef.current) {
       resetStateForNewTransfer();
       isTransferActiveRef.current = true;
-      
+
       // 尝试初始化第一个文件的写入器 (Native FS)
+      // 注意：iOS Safari 不支持 File System Access API 和 StreamSaver
       if (metadata && metadata.files.length > 0) {
           const file = metadata.files[0];
           const isSingleFile = metadata.files.length === 1;
-          
-          if (isSingleFile && window.showSaveFilePicker) {
+
+          // iOS/Safari 只能使用内存模式
+          if (isIOS || isSafari) {
+              isStreamingRef.current = false;
+              if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
+          } else if (isSingleFile && window.showSaveFilePicker) {
               try {
                   const handle = await window.showSaveFilePicker({ suggestedName: file.name });
                   const writable = await handle.createWritable();
                   nativeWriterRef.current = writable;
                   isStreamingRef.current = true;
                   if (onNotification) onNotification("已启用直接磁盘写入模式", 'success');
-              } catch (err: any) { 
-                  if (err.name !== 'AbortError') console.warn("Native Save Failed", err); 
+              } catch (err: any) {
+                  if (err.name !== 'AbortError') console.warn("Native Save Failed", err);
                   // 如果取消，不强制流式，回退到内存或 StreamSaver
               }
           }
-          
+
           // 如果 Native 失败或未启用，StreamSaver 将在 FILE_START 中按需初始化
       }
-      
+
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
       setState(TransferState.TRANSFERRING);
     }

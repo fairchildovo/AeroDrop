@@ -52,6 +52,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const fileListRef = useRef<File[]>([]);
 
   // === ✨ UI Updater ===
+  const totalProgressRef = useRef(0);
+  useEffect(() => {
+    totalProgressRef.current = totalProgress;
+  }, [totalProgress]);
+
   useEffect(() => {
     let interval: number;
     if (state === TransferState.TRANSFERRING || state === TransferState.PEER_CONNECTED) {
@@ -60,7 +65,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             let totalAvgSpeed = 0;
             let combinedProgress = 0;
             const count = peerProgress.current.size;
-            
+
             const stats: {peerId: string, speed: string, progress: number}[] = [];
 
             peerProgress.current.forEach((p, peerId) => {
@@ -81,11 +86,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
                 setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
                 setIndividualStats(stats);
-                
+
                 if (count > 0) {
                     setTotalProgress(Math.floor(combinedProgress / count));
                 } else {
-                    if (activeTransfersCount.current === 0 && totalProgress === 100) {
+                    if (activeTransfersCount.current === 0 && totalProgressRef.current === 100) {
                         // keep 100
                     } else {
                         setTotalProgress(0);
@@ -97,7 +102,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         }, 800);
     }
     return () => clearInterval(interval);
-  }, [state, totalProgress]);
+  }, [state]);
 
   const updateConnectionStatusUI = () => {
     const count = activeConnections.current.size;
@@ -532,14 +537,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     console.log(`Starting transfer to ${conn.peer} via ${networkType}`);
 
     // === TUNING PARAMETERS ===
-    const CHUNK_SIZE = 64 * 1024; // 64KB
+    // 局域网使用更大的 Chunk 以减少协议开销，提高吞吐量
+    const CHUNK_SIZE = isLan ? 256 * 1024 : 64 * 1024; // LAN: 256KB, WAN: 64KB
     const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer for fewer IO ops
-    
+
     // ✨ Hysteresis Flow Control Settings
-    // LAN: We can fill the pipe more (1MB) and drain less (256KB) to keep throughput high.
-    // WAN: We fill less (64KB) and drain completely (0KB) to avoid bufferbloat.
-    const HIGH_WATER_MARK = isLan ? 1024 * 1024 : 64 * 1024; 
-    const LOW_WATER_MARK = isLan ? 256 * 1024 : 0; 
+    // LAN: 大幅增加水位线，充分利用高速网络带宽
+    // - High Water Mark 4MB: 允许更多数据在发送缓冲区中排队
+    // - Low Water Mark 1MB: 保持管道充满，避免空转
+    // WAN: 保守设置避免 bufferbloat
+    const HIGH_WATER_MARK = isLan ? 4 * 1024 * 1024 : 256 * 1024;
+    const LOW_WATER_MARK = isLan ? 1 * 1024 * 1024 : 0; 
 
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;
