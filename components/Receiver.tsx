@@ -598,7 +598,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   // ... JSX 部分与之前相同，省略以节省空间 ...
   // 注意：确保 JSX 中的 onClick={handleRetry} 等绑定正确
   return (
-    <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
+    <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
       {/* 头部标题 */}
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-slate-800 dark:text-white">接收文件</h2>
@@ -657,11 +657,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
            {state === TransferState.PEER_CONNECTED && (
              <div className="space-y-3">
                  {canResume && (
-                     <button onClick={resumeTransfer} className="w-full bg-brand-600 text-white font-bold py-3 rounded-lg hover:bg-brand-700 transition-all flex items-center justify-center gap-2 shadow-md">
+                     <button onClick={resumeTransfer} className="w-full bg-brand-600 text-white font-bold py-3 rounded-full hover:bg-brand-700 transition-all flex items-center justify-center gap-2 shadow-md">
                          <PlayCircle size={18} /> {isStreamingRef.current ? '重新开始' : '继续下载'}
                      </button>
                  )}
-                 <button onClick={acceptTransfer} className={`w-full font-bold py-3 rounded-lg transition-all flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200' : 'bg-slate-900 dark:bg-brand-600 text-white'}`}>
+                 <button onClick={acceptTransfer} className={`w-full font-bold py-3 rounded-full transition-all flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200' : 'bg-slate-900 dark:bg-brand-600 text-white'}`}>
                    <Download size={18} /> {canResume ? '重新下载所有' : '确认并下载'}
                  </button>
              </div>
@@ -680,7 +680,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                   <span>{downloadSpeed}</span>
                   <span>{eta}</span>
                </div>
-               <button onClick={reset} className="w-full py-2 mt-2 bg-red-50 text-red-600 rounded-lg text-sm">取消</button>
+               <button onClick={reset} className="w-full py-2.5 mt-2 bg-red-50 text-red-600 rounded-full text-sm font-medium">取消</button>
              </div>
            )}
         </div>
@@ -693,8 +693,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
            <h3 className="text-lg font-bold text-slate-800 dark:text-white">传输失败</h3>
            <p className="text-slate-500 dark:text-slate-400 mt-2 mb-6">{errorMsg}</p>
            <div className="flex gap-4 justify-center">
-               <button onClick={reset} className="px-6 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg">取消</button>
-               <button onClick={handleRetry} className="px-6 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300">重试</button>
+               <button onClick={reset} className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-full font-medium">取消</button>
+               <button onClick={handleRetry} className="px-6 py-2.5 bg-slate-200 text-slate-700 rounded-full font-medium hover:bg-slate-300">重试</button>
            </div>
         </div>
       )}
@@ -704,7 +704,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         <div className="text-center py-8 animate-pop-in">
           <HardDriveDownload size={36} className="text-green-500 mx-auto mb-6" />
           <h3 className="text-2xl font-bold text-slate-800 dark:text-white">下载完成</h3>
-          <button onClick={reset} className="mt-8 px-6 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200">接收下一个</button>
+          <button onClick={reset} className="mt-8 px-6 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-full hover:bg-slate-200">接收下一个</button>
         </div>
       )}
     </div>

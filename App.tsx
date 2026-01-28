@@ -63,7 +63,7 @@ const App: React.FC = () => {
       <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 transition-colors duration-300">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
           <div className="flex items-center gap-2 cursor-pointer" onClick={() => setMode('send')}>
-            <div className="bg-brand-600 p-1.5 md:p-2 rounded-lg text-white">
+            <div className="bg-brand-600 p-1.5 md:p-2 rounded-xl text-white">
               <Zap size={18} fill="currentColor" className="md:w-5 md:h-5" />
             </div>
             <h1 className="text-lg md:text-xl font-bold text-slate-900 dark:text-white tracking-tight">AeroDrop</h1>
@@ -74,17 +74,17 @@ const App: React.FC = () => {
       {/* Main Content */}
       <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
         
-        {/* Navigation Tabs - Sliding Animation */}
+        {/* Navigation Tabs - iOS Segmented Control Style */}
         <div className="w-full max-w-xl mb-6 relative z-10">
-            <div className="bg-white dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm grid grid-cols-3 relative transition-colors duration-300">
+            <div className="bg-white dark:bg-slate-900 p-1 rounded-full grid grid-cols-3 relative transition-colors duration-300 shadow-sm border border-slate-100 dark:border-slate-800">
               {/* Sliding Background */}
               <div
-                  className={`absolute top-1 left-1 bottom-1 w-[calc((100%-0.5rem)/3)] bg-brand-600 rounded-lg shadow-md transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
+                  className={`absolute top-1 left-1 bottom-1 w-[calc((100%-0.5rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-sm transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
               ></div>
 
               <button
                 onClick={() => setMode('send')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-full text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
                   mode === 'send' ? 'text-white' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
                 }`}
               >
@@ -93,7 +93,7 @@ const App: React.FC = () => {
               </button>
               <button
                 onClick={() => setMode('receive')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-full text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
                   mode === 'receive' ? 'text-white' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
                 }`}
               >
@@ -102,7 +102,7 @@ const App: React.FC = () => {
               </button>
               <button
                 onClick={() => setMode('screen')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-full text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
                   mode === 'screen' ? 'text-white' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
                 }`}
               >

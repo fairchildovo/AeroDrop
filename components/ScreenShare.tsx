@@ -48,23 +48,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // Current quality level state
   const [qualityLevel, setQualityLevel] = useState<'high' | 'medium' | 'low'>('high');
 
-  // Video constraints for different quality levels
-  const videoConstraints = useMemo(() => ({
-    high: {
-      width: { ideal: 1920, max: 2560 },
-      height: { ideal: 1080, max: 1440 },
-      frameRate: { ideal: 30, max: 60 },
-    },
-    medium: {
-      width: { ideal: 1280, max: 1920 },
-      height: { ideal: 720, max: 1080 },
-      frameRate: { ideal: 24, max: 30 },
-    },
-    low: {
-      width: { ideal: 854, max: 1280 },
-      height: { ideal: 480, max: 720 },
-      frameRate: { ideal: 15, max: 24 },
-    },
+  // Ref to track current quality level (for use in intervals/callbacks to avoid stale closures)
+  const qualityLevelRef = useRef<'high' | 'medium' | 'low'>('high');
+
+  // Quality level display names
+  const qualityLabels = useMemo(() => ({
+    high: '高清',
+    medium: '标清',
+    low: '流畅',
   }), []);
 
   // Bitrate limits for different quality levels (in bps)
@@ -109,6 +100,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, [bitrateLimits]);
 
+  // Keep qualityLevelRef in sync with state
+  useEffect(() => {
+    qualityLevelRef.current = qualityLevel;
+  }, [qualityLevel]);
+
   // Monitor bandwidth and adjust quality
   const startBandwidthMonitoring = useCallback((call: MediaConnection) => {
     const pc = call.peerConnection;
@@ -145,8 +141,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         lastBytesSent = currentBytesSent;
         lastTimestamp = now;
 
-        // Determine if we need to adjust quality
-        const limits = bitrateLimits[qualityLevel];
+        // Use ref to get current quality level (avoids stale closure)
+        const currentQuality = qualityLevelRef.current;
+        const limits = bitrateLimits[currentQuality];
 
         // Downgrade conditions: high packet loss or bandwidth significantly below target
         if (packetLossRate > 0.05 || currentBitrate < limits.min * 0.7) {
@@ -154,11 +151,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           consecutiveHighBandwidth = 0;
 
           if (consecutiveLowBandwidth >= 3) {
-            if (qualityLevel === 'high') {
+            if (currentQuality === 'high') {
               setQualityLevel('medium');
               await applyBitrateConstraints(pc, 'medium');
               onNotification('网络较慢，已降低画质', 'info');
-            } else if (qualityLevel === 'medium') {
+            } else if (currentQuality === 'medium') {
               setQualityLevel('low');
               await applyBitrateConstraints(pc, 'low');
               onNotification('网络不佳，已切换到低画质', 'info');
@@ -172,11 +169,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           consecutiveLowBandwidth = 0;
 
           if (consecutiveHighBandwidth >= 5) {
-            if (qualityLevel === 'low') {
+            if (currentQuality === 'low') {
               setQualityLevel('medium');
               await applyBitrateConstraints(pc, 'medium');
               onNotification('网络恢复，已提升画质', 'info');
-            } else if (qualityLevel === 'medium') {
+            } else if (currentQuality === 'medium') {
               setQualityLevel('high');
               await applyBitrateConstraints(pc, 'high');
               onNotification('网络良好，已切换到高画质', 'info');
@@ -194,7 +191,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     // Monitor every 2 seconds
     bandwidthMonitorRef.current = setInterval(monitor, 2000);
-  }, [qualityLevel, bitrateLimits, applyBitrateConstraints, onNotification]);
+  }, [bitrateLimits, applyBitrateConstraints, onNotification]);
 
   // Stop bandwidth monitoring
   const stopBandwidthMonitoring = useCallback(() => {
@@ -275,7 +272,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peerRef.current = peer;
     return peer;
-  }, [generatePeerId, onNotification]);
+  }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, stopBandwidthMonitoring]);
 
   // Create a dummy stream for viewer (required by PeerJS to establish call)
   // 必须同时包含视频和音频轨道，否则 WebRTC SDP 协商时不会包含音频能力
@@ -335,6 +332,29 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
 
     return combinedStream;
+  }, []);
+
+  // Stop viewing (defined before connectToSharer to avoid circular dependency)
+  const stopViewing = useCallback(() => {
+    if (mediaConnectionRef.current) {
+      mediaConnectionRef.current.close();
+      mediaConnectionRef.current = null;
+    }
+
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    streamRef.current = null;
+    setIsViewing(false);
+    setIsConnecting(false);
+    setTargetSharerId(null);
+    setError(null);
   }, []);
 
   // Connect to sharer as viewer
@@ -443,30 +463,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       setIsConnecting(false);
     });
-  }, [onNotification, createDummyStream]);
-
-  // Stop viewing
-  const stopViewing = useCallback(() => {
-    if (mediaConnectionRef.current) {
-      mediaConnectionRef.current.close();
-      mediaConnectionRef.current = null;
-    }
-
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-
-    streamRef.current = null;
-    setIsViewing(false);
-    setIsConnecting(false);
-    setTargetSharerId(null);
-    setError(null);
-  }, []);
+  }, [onNotification, createDummyStream, stopViewing]);
 
   // Cancel connecting
   const cancelConnecting = useCallback(() => {
@@ -737,10 +734,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   return (
     <div className="w-full max-w-xl mx-auto">
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 p-6 md:p-8 transition-colors duration-300">
+      <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 p-6 md:p-8 transition-colors duration-300">
         {/* Header */}
         <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-900/30 rounded-2xl mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-900/30 rounded-3xl mb-4">
             {isViewing || isConnecting ? (
               <Eye size={32} className="text-brand-600" />
             ) : (
@@ -757,7 +754,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
         {/* Error Message */}
         {error && !(targetSharerId && !isConnecting && !isViewing && !isSharing) && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl flex items-center gap-3">
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-2xl flex items-center gap-3">
             <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
             <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
           </div>
@@ -772,7 +769,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             </p>
             <button
               onClick={cancelConnecting}
-              className="flex items-center justify-center gap-2 px-4 py-2 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              className="flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             >
               <X size={16} />
               取消连接
@@ -783,14 +780,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         {/* Connection Error with Retry */}
         {error && !isConnecting && !isViewing && !isSharing && targetSharerId && (
           <div className="mb-6">
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl flex items-center gap-3 mb-4">
+            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-2xl flex items-center gap-3 mb-4">
               <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
               <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
             </div>
             <div className="flex justify-center gap-3">
               <button
                 onClick={retryConnection}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-lg transition-colors"
+                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-full transition-colors"
               >
                 <RefreshCw size={16} />
                 重试连接
@@ -800,7 +797,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                   setTargetSharerId(null);
                   setError(null);
                 }}
-                className="flex items-center justify-center gap-2 px-4 py-2.5 text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                className="flex items-center justify-center gap-2 px-5 py-2.5 text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
               >
                 <X size={16} />
                 取消
@@ -812,8 +809,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         {/* Viewer Video Display */}
         {isViewing && (
           <>
-            <div className="mb-4 relative overflow-hidden rounded-xl">
-              <div className="bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+            <div className="mb-4 relative overflow-hidden rounded-2xl">
+              <div className="bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden">
                 <video
                   ref={viewerVideoRef}
                   autoPlay
@@ -872,7 +869,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           <>
             {/* Share Link Display */}
             {isSharing && shareLink && (
-              <div className="mb-6 p-4 bg-brand-50 dark:bg-brand-900/20 border border-brand-200 dark:border-brand-800 rounded-xl">
+              <div className="mb-6 p-4 bg-brand-50 dark:bg-brand-900/20 border border-brand-200 dark:border-brand-800 rounded-2xl">
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-2 text-center">
                   将此链接分享给观看者
                 </p>
@@ -914,7 +911,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                 )}
                 {viewerCount > 0 && (
                   <p className="text-xs text-green-600 dark:text-green-400 mt-2 text-center">
-                    当前观看人数: {viewerCount}
+                    当前观看人数: {viewerCount} | 画质: {qualityLabels[qualityLevel]}
                   </p>
                 )}
               </div>
@@ -923,7 +920,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             {/* Video Preview */}
             {isSharing && (
               <div className="mb-6 relative group">
-                <div className="rounded-xl overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700">
+                <div className="rounded-2xl overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700">
                   <video
                     ref={videoRef}
                     autoPlay
@@ -948,7 +945,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               {!isSharing ? (
                 <button
                   onClick={startScreenShare}
-                  className="flex items-center justify-center gap-3 w-full max-w-xs bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 px-6 rounded-xl shadow-lg shadow-brand-600/25 transition-all duration-200 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5"
+                  className="flex items-center justify-center gap-3 w-full max-w-xs bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 px-6 rounded-full shadow-lg shadow-brand-600/25 transition-all duration-200 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5"
                 >
                   <Play size={20} fill="currentColor" />
                   开始共享屏幕
@@ -956,7 +953,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               ) : (
                 <button
                   onClick={stopScreenShare}
-                  className="flex items-center justify-center gap-3 w-full max-w-xs bg-red-500 hover:bg-red-600 text-white font-bold py-3.5 px-6 rounded-xl shadow-lg shadow-red-500/25 transition-all duration-200 hover:shadow-xl hover:shadow-red-500/30 hover:-translate-y-0.5"
+                  className="flex items-center justify-center gap-3 w-full max-w-xs bg-red-500 hover:bg-red-600 text-white font-bold py-3.5 px-6 rounded-full shadow-lg shadow-red-500/25 transition-all duration-200 hover:shadow-xl hover:shadow-red-500/30 hover:-translate-y-0.5"
                 >
                   <StopCircle size={20} />
                   停止共享

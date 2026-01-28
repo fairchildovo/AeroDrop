@@ -751,17 +751,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   };
 
   return (
-    <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
+    <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-slate-800 dark:text-white">发送文件</h2>
         <p className="text-slate-500 dark:text-slate-400">点对点加密传输 (支持文件夹/多文件)</p>
       </div>
 
       {state === TransferState.IDLE && (
-        <div 
-          className={`relative border-2 border-dashed rounded-xl p-8 md:p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 group ${
-            isDragOver 
-              ? 'border-brand-500 bg-brand-50 dark:bg-slate-700 scale-[1.02] shadow-xl' 
+        <div
+          className={`relative border-2 border-dashed rounded-3xl p-8 md:p-10 flex flex-col items-center justify-center cursor-pointer transition-all duration-300 group ${
+            isDragOver
+              ? 'border-brand-500 bg-brand-50 dark:bg-slate-700 scale-[1.02] shadow-xl'
               : 'border-slate-300 dark:border-slate-600 hover:border-brand-400 hover:bg-slate-50 dark:hover:bg-slate-800/50'
           }`}
         >
@@ -834,7 +834,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     </div>
                 </div>
                 {errorMsg && <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 dark:bg-red-900/20 p-2 rounded"><AlertCircle size={14} /> {errorMsg}</div>}
-                <button onClick={startSharing} className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-lg hover:bg-brand-700 shadow-lg">创建分享</button>
+                <button onClick={startSharing} className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-full hover:bg-brand-700 shadow-lg">创建分享</button>
             </div>
          </div>
       )}
@@ -948,7 +948,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                </div>
            )}
 
-           <button onClick={stopSharing} className="w-full bg-red-50 text-red-600 font-bold py-3.5 rounded-lg hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2">
+           <button onClick={stopSharing} className="w-full bg-red-50 text-red-600 font-bold py-3.5 rounded-full hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2">
              <X size={18} /> 停止分享
            </button>
         </div>
@@ -959,7 +959,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4"><AlertCircle size={32} /></div>
               <h3 className="text-lg font-bold">发生错误</h3>
               <p className="text-slate-500 mt-2 mb-6">{errorMsg}</p>
-              <button onClick={stopSharing} className="px-6 py-2 bg-slate-200 rounded-lg">返回</button>
+              <button onClick={stopSharing} className="px-6 py-2 bg-slate-200 rounded-full">返回</button>
           </div>
       )}
     </div>
