@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 // @ts-ignore
 import streamSaver from 'streamsaver';
+// 配置使用本地 mitm.html，解决 jimmywarting.github.io 前缀问题
+streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService';
@@ -115,6 +117,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
           if (streamSaverWriterRef.current) { await streamSaverWriterRef.current.abort(); streamSaverWriterRef.current = null; }
           isStreamingRef.current = false;
       } catch (e) { console.warn("Stream abort warning:", e); }
+  };
+
+  // 正常关闭流（用于文件传输完成时）
+  const closeStreams = async () => {
+      try {
+          if (nativeWriterRef.current) { await nativeWriterRef.current.close(); nativeWriterRef.current = null; }
+          if (streamSaverWriterRef.current) { await streamSaverWriterRef.current.close(); streamSaverWriterRef.current = null; }
+          isStreamingRef.current = false;
+      } catch (e) { console.warn("Stream close warning:", e); }
   };
 
   useEffect(() => {
@@ -322,8 +333,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
              writeQueueRef.current = writeQueueRef.current.then(async () => {
                  if (finalSize > 0) await flushSpecificBatch(finalBatch, finalSize);
-                 await abortStreams(); // 关闭文件句柄，完成保存
-                 
+                 await closeStreams(); // 正常关闭文件句柄，完成保存（不是 abort）
+
                  if (isTransferActiveRef.current) {
                     completedFileIndicesRef.current.add(currentFileIndexRef.current);
                     if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');

@@ -123,10 +123,15 @@ function onMessage (event) {
   // remove protocol
   let org = origin.replace(/(^\w+:|^)\/\//, '')
 
-  // set the absolute pathname to the download url.
-  data.url = new URL(`${scope + org}/${data.pathname}`).toString()
+  // 判断是否为本地 mitm（scope 和 origin 同源）
+  // 如果是本地部署，不需要添加 org 前缀，避免重复域名问题
+  const isLocalMitm = scope.startsWith(origin)
+  const urlPrefix = isLocalMitm ? scope : (scope + org + '/')
 
-  if (!data.url.startsWith(`${scope + org}/`)) {
+  // set the absolute pathname to the download url.
+  data.url = new URL(`${urlPrefix}${data.pathname}`).toString()
+
+  if (!data.url.startsWith(urlPrefix)) {
     throw new TypeError('[StreamSaver] bad `data.pathname`')
   }
 

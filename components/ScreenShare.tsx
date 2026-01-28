@@ -42,6 +42,168 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // AudioContext ref for cleanup (used in dummy stream creation)
   const audioContextRef = useRef<AudioContext | null>(null);
 
+  // Bandwidth monitoring interval ref
+  const bandwidthMonitorRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Current quality level state
+  const [qualityLevel, setQualityLevel] = useState<'high' | 'medium' | 'low'>('high');
+
+  // Video constraints for different quality levels
+  const videoConstraints = useMemo(() => ({
+    high: {
+      width: { ideal: 1920, max: 2560 },
+      height: { ideal: 1080, max: 1440 },
+      frameRate: { ideal: 30, max: 60 },
+    },
+    medium: {
+      width: { ideal: 1280, max: 1920 },
+      height: { ideal: 720, max: 1080 },
+      frameRate: { ideal: 24, max: 30 },
+    },
+    low: {
+      width: { ideal: 854, max: 1280 },
+      height: { ideal: 480, max: 720 },
+      frameRate: { ideal: 15, max: 24 },
+    },
+  }), []);
+
+  // Bitrate limits for different quality levels (in bps)
+  const bitrateLimits = useMemo(() => ({
+    high: { min: 2500000, max: 8000000 },    // 2.5-8 Mbps
+    medium: { min: 1000000, max: 2500000 },  // 1-2.5 Mbps
+    low: { min: 300000, max: 1000000 },      // 300kbps-1 Mbps
+  }), []);
+
+  // Apply bitrate constraints to a peer connection
+  const applyBitrateConstraints = useCallback(async (
+    peerConnection: RTCPeerConnection,
+    level: 'high' | 'medium' | 'low'
+  ) => {
+    const senders = peerConnection.getSenders();
+    const videoSender = senders.find(s => s.track?.kind === 'video');
+
+    if (videoSender) {
+      const params = videoSender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+
+      const limits = bitrateLimits[level];
+      params.encodings[0].maxBitrate = limits.max;
+
+      // Set scale resolution for lower quality levels
+      if (level === 'low') {
+        params.encodings[0].scaleResolutionDownBy = 2;
+      } else if (level === 'medium') {
+        params.encodings[0].scaleResolutionDownBy = 1.5;
+      } else {
+        params.encodings[0].scaleResolutionDownBy = 1;
+      }
+
+      try {
+        await videoSender.setParameters(params);
+        console.log(`Applied ${level} quality bitrate: ${limits.max / 1000000}Mbps`);
+      } catch (err) {
+        console.error('Failed to set bitrate parameters:', err);
+      }
+    }
+  }, [bitrateLimits]);
+
+  // Monitor bandwidth and adjust quality
+  const startBandwidthMonitoring = useCallback((call: MediaConnection) => {
+    const pc = call.peerConnection;
+    if (!pc) return;
+
+    let lastBytesSent = 0;
+    let lastTimestamp = Date.now();
+    let consecutiveLowBandwidth = 0;
+    let consecutiveHighBandwidth = 0;
+
+    const monitor = async () => {
+      try {
+        const stats = await pc.getStats();
+        let currentBytesSent = 0;
+        let packetsLost = 0;
+        let packetsSent = 0;
+
+        stats.forEach((report) => {
+          if (report.type === 'outbound-rtp' && report.kind === 'video') {
+            currentBytesSent = report.bytesSent || 0;
+            packetsSent = report.packetsSent || 0;
+          }
+          if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
+            packetsLost = report.packetsLost || 0;
+          }
+        });
+
+        const now = Date.now();
+        const timeDiff = (now - lastTimestamp) / 1000; // seconds
+        const bytesDiff = currentBytesSent - lastBytesSent;
+        const currentBitrate = (bytesDiff * 8) / timeDiff; // bits per second
+        const packetLossRate = packetsSent > 0 ? packetsLost / packetsSent : 0;
+
+        lastBytesSent = currentBytesSent;
+        lastTimestamp = now;
+
+        // Determine if we need to adjust quality
+        const limits = bitrateLimits[qualityLevel];
+
+        // Downgrade conditions: high packet loss or bandwidth significantly below target
+        if (packetLossRate > 0.05 || currentBitrate < limits.min * 0.7) {
+          consecutiveLowBandwidth++;
+          consecutiveHighBandwidth = 0;
+
+          if (consecutiveLowBandwidth >= 3) {
+            if (qualityLevel === 'high') {
+              setQualityLevel('medium');
+              await applyBitrateConstraints(pc, 'medium');
+              onNotification('网络较慢，已降低画质', 'info');
+            } else if (qualityLevel === 'medium') {
+              setQualityLevel('low');
+              await applyBitrateConstraints(pc, 'low');
+              onNotification('网络不佳，已切换到低画质', 'info');
+            }
+            consecutiveLowBandwidth = 0;
+          }
+        }
+        // Upgrade conditions: stable high bandwidth with low packet loss
+        else if (packetLossRate < 0.01 && currentBitrate > limits.max * 0.8) {
+          consecutiveHighBandwidth++;
+          consecutiveLowBandwidth = 0;
+
+          if (consecutiveHighBandwidth >= 5) {
+            if (qualityLevel === 'low') {
+              setQualityLevel('medium');
+              await applyBitrateConstraints(pc, 'medium');
+              onNotification('网络恢复，已提升画质', 'info');
+            } else if (qualityLevel === 'medium') {
+              setQualityLevel('high');
+              await applyBitrateConstraints(pc, 'high');
+              onNotification('网络良好，已切换到高画质', 'info');
+            }
+            consecutiveHighBandwidth = 0;
+          }
+        } else {
+          consecutiveLowBandwidth = 0;
+          consecutiveHighBandwidth = 0;
+        }
+      } catch (err) {
+        console.error('Bandwidth monitoring error:', err);
+      }
+    };
+
+    // Monitor every 2 seconds
+    bandwidthMonitorRef.current = setInterval(monitor, 2000);
+  }, [qualityLevel, bitrateLimits, applyBitrateConstraints, onNotification]);
+
+  // Stop bandwidth monitoring
+  const stopBandwidthMonitoring = useCallback(() => {
+    if (bandwidthMonitorRef.current) {
+      clearInterval(bandwidthMonitorRef.current);
+      bandwidthMonitorRef.current = null;
+    }
+  }, []);
+
   // Generate a random peer ID
   const generatePeerId = useCallback(() => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -78,9 +240,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         setViewerCount(prev => prev + 1);
         onNotification('有观看者加入', 'info');
 
+        // Apply initial bitrate constraints and start monitoring
+        if (call.peerConnection) {
+          applyBitrateConstraints(call.peerConnection, qualityLevel);
+          startBandwidthMonitoring(call);
+        }
+
         call.on('close', () => {
           activeCallsRef.current = activeCallsRef.current.filter(c => c !== call);
           setViewerCount(prev => Math.max(0, prev - 1));
+          if (activeCallsRef.current.length === 0) {
+            stopBandwidthMonitoring();
+          }
         });
 
         call.on('error', (err) => {
@@ -214,8 +385,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         }
       }, 15000);
 
+      // Track if we've already received a stream to avoid duplicate notifications
+      let hasReceivedStream = false;
+
       call.on('stream', (remoteStream) => {
         clearTimeout(connectionTimeout);
+
+        // Prevent duplicate notifications when stream event fires multiple times
+        if (hasReceivedStream) {
+          console.log('Stream event fired again, skipping duplicate handling');
+          return;
+        }
+        hasReceivedStream = true;
 
         // Check audio tracks
         const audioTracks = remoteStream.getAudioTracks();
@@ -385,6 +566,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      // Stop bandwidth monitoring
+      if (bandwidthMonitorRef.current) {
+        clearInterval(bandwidthMonitorRef.current);
+      }
       // Stop all media tracks
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
