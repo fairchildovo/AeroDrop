@@ -1,20 +1,65 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# AeroDrop
 
-# Run and deploy your AI Studio app
+一款基于 WebRTC 的点对点文件传输与屏幕共享工具。数据直接在设备间传输，无需经过云端服务器，安全高效。
 
-This contains everything you need to run your app locally.
+## 功能特性
 
-View your app in AI Studio: https://ai.studio/apps/drive/13bpak0dz3CWloOolIkHq-fQkOjkWj5Lr
+- **文件发送** - 选择文件后生成分享码，对方输入码即可接收
+- **文件接收** - 输入发送方提供的分享码，直接下载文件
+- **屏幕共享** - 实时共享屏幕画面给其他用户观看
 
-## Run Locally
+## 技术亮点
 
-**Prerequisites:**  Node.js
+- **点对点传输** - 基于 WebRTC 技术，数据直接在设备间传输
+- **无需注册** - 打开即用，无需账号登录
+- **隐私安全** - 文件不经过云端存储，传输过程加密
+- **跨平台** - 支持任何现代浏览器，无需安装应用
 
+## 本地运行
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+**环境要求：** Node.js
+
+1. 安装依赖：
+   ```bash
+   npm install
+   ```
+
+2. 启动开发服务器：
+   ```bash
+   npm run dev
+   ```
+
+3. 打开浏览器访问显示的本地地址
+
+## 使用方法
+
+### 发送文件
+1. 点击「发送」标签
+2. 选择要分享的文件
+3. 将生成的分享码发送给接收方
+
+### 接收文件
+1. 点击「接收」标签
+2. 输入发送方提供的分享码
+3. 等待文件传输完成后自动下载
+
+### 屏幕共享
+1. 点击「共享」标签
+2. 选择要共享的屏幕或窗口
+3. 将共享链接发送给观看者
+
+## 技术栈
+
+- React 19 + TypeScript
+- Vite
+- PeerJS (WebRTC)
+- Tailwind CSS
+- StreamSaver.js
+
+## 许可证
+
+MIT License
+
+---
+
+Made with  by @Tianzora
