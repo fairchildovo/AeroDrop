@@ -237,30 +237,38 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (msg.type === 'METADATA') {
         const meta = msg.payload as FileMetadata;
         const previousMeta = metadataRef.current;
-        // 只有文件完全一致才能续传
+        // 只有文件完全一致才能续传（包括 fingerprint 校验）
         let isResumable = false;
-        if (previousMeta && previousMeta.totalSize === meta.totalSize && previousMeta.files.length === meta.files.length) {
-            isResumable = true;
+        if (previousMeta &&
+            previousMeta.totalSize === meta.totalSize &&
+            previousMeta.files.length === meta.files.length) {
+            // 逐个文件校验 fingerprint
+            isResumable = meta.files.every((file, idx) => {
+                const prev = previousMeta.files[idx];
+                // 如果有 fingerprint，必须匹配；否则回退到 name+size 校验
+                if (file.fingerprint && prev.fingerprint) {
+                    return file.fingerprint === prev.fingerprint;
+                }
+                return file.name === prev.name && file.size === prev.size;
+            });
         } else {
             resetStateForNewTransfer();
         }
-        
+
         setMetadata(meta);
         metadataRef.current = meta;
         setTotalFiles(meta.files?.length || 0);
         setState(TransferState.PEER_CONNECTED);
         setCanResume(isResumable);
         isTransferActiveRef.current = false;
-        
+
         if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
       } 
       else if (msg.type === 'FILE_START') {
         isTransferActiveRef.current = true;
         const { fileName, fileSize, fileIndex } = msg.payload;
         
-        // 关键修复：流式传输下 chunksRef 是空的，长度为0。
-        // 如果我们请求了续传 (Resume)，Sender 会发来 index=0 (如果被重置) 或 index=N。
-        // 这里必须严格判断是否真的在续传同一个文件的同一个位置
+  
         const resumingSameFile = currentFileIndexRef.current === fileIndex && chunksRef.current.length > 0;
         
         if (!resumingSameFile) {
@@ -511,31 +519,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       resetStateForNewTransfer();
       isTransferActiveRef.current = true;
 
-      // 尝试初始化第一个文件的写入器 (Native FS)
-      // 注意：iOS Safari 不支持 File System Access API 和 StreamSaver
-      if (metadata && metadata.files.length > 0) {
-          const file = metadata.files[0];
-          const isSingleFile = metadata.files.length === 1;
+      // 直接使用 StreamSaver 自动下载到浏览器下载文件夹
+      // 不再弹出文件选择对话框，提供更流畅的用户体验
+      // StreamSaver 会在 FILE_START 中按需初始化
 
-          // iOS/Safari 只能使用内存模式
-          if (isIOS || isSafari) {
-              isStreamingRef.current = false;
-              if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
-          } else if (isSingleFile && window.showSaveFilePicker) {
-              try {
-                  const handle = await window.showSaveFilePicker({ suggestedName: file.name });
-                  const writable = await handle.createWritable();
-                  nativeWriterRef.current = writable;
-                  isStreamingRef.current = true;
-                  if (onNotification) onNotification("已启用直接磁盘写入模式", 'success');
-              } catch (err: any) {
-                  if (err.name !== 'AbortError') console.warn("Native Save Failed", err);
-                  // 如果取消，不强制流式，回退到内存或 StreamSaver
-              }
-          }
-
-          // 如果 Native 失败或未启用，StreamSaver 将在 FILE_START 中按需初始化
+      // iOS/Safari 只能使用内存模式
+      if (isIOS || isSafari) {
+          isStreamingRef.current = false;
+          if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
       }
+      // 其他浏览器使用 StreamSaver 自动下载（在 FILE_START 中初始化）
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
       setState(TransferState.TRANSFERRING);

@@ -41,6 +41,21 @@ export const readFileAsText = (file: File): Promise<string> => {
   });
 };
 
+/**
+ * Generate a lightweight fingerprint for resume verification.
+ * Uses file name, size, type, and lastModified to create a unique identifier.
+ * This is faster than hashing file content while still providing reliable identification.
+ */
+export const generateFileFingerprint = (file: { name: string; size: number; type: string; lastModified: number }): string => {
+  const str = `${file.name}|${file.size}|${file.type}|${file.lastModified}`;
+  // Simple hash function (djb2)
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36); // Convert to base36 for shorter string
+};
+
 export const generatePreview = async (file: File): Promise<string | undefined> => {
   if (file.type.startsWith('image/')) {
     if (file.size > 2 * 1024 * 1024) return undefined; // Limit preview to 2MB images

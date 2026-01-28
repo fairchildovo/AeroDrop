@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
-import { ChatRoom } from './components/ChatRoom';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Zap, Bell, MessageCircle } from 'lucide-react';
+import { Share, DownloadCloud, Zap, Bell } from 'lucide-react';
 import { AppNotification } from './types';
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'send' | 'receive' | 'chat'>('send');
+  const [mode, setMode] = useState<'send' | 'receive'>('send');
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [initialCode, setInitialCode] = useState<string>('');
 
@@ -32,11 +31,7 @@ const App: React.FC = () => {
   };
 
   const getNavBackgroundStyle = () => {
-      switch(mode) {
-          case 'send': return 'translate-x-0';
-          case 'receive': return 'translate-x-[100%]';
-          case 'chat': return 'translate-x-[200%]';
-      }
+      return mode === 'send' ? 'translate-x-0' : 'translate-x-[100%]';
   };
 
   return (
@@ -72,10 +67,10 @@ const App: React.FC = () => {
         
         {/* Navigation Tabs - Sliding Animation */}
         <div className="w-full max-w-xl mb-6 relative z-10">
-            <div className="bg-white dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm grid grid-cols-3 relative transition-colors duration-300">
+            <div className="bg-white dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm grid grid-cols-2 relative transition-colors duration-300">
               {/* Sliding Background */}
-              <div 
-                  className={`absolute top-1 left-1 bottom-1 w-[calc((100%-0.5rem)/3)] bg-brand-600 rounded-lg shadow-md transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
+              <div
+                  className={`absolute top-1 left-1 bottom-1 w-[calc((100%-0.5rem)/2)] bg-brand-600 rounded-lg shadow-md transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
               ></div>
 
               <button
@@ -96,15 +91,6 @@ const App: React.FC = () => {
                 <DownloadCloud size={16} />
                 接收
               </button>
-              <button
-                onClick={() => setMode('chat')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
-                  mode === 'chat' ? 'text-white' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
-                }`}
-              >
-                <MessageCircle size={16} />
-                聊天
-              </button>
             </div>
         </div>
 
@@ -119,11 +105,6 @@ const App: React.FC = () => {
           <ErrorBoundary>
             <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
               <Receiver initialCode={initialCode} onNotification={addNotification} />
-            </div>
-          </ErrorBoundary>
-          <ErrorBoundary>
-            <div className={`${mode === 'chat' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-              <ChatRoom onNotification={addNotification} />
             </div>
           </ErrorBoundary>
         </div>

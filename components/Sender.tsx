@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
-import { formatFileSize, generatePreview } from '../services/fileUtils';
-import { getIceConfig } from '../services/stunService'; 
+import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
+import { getIceConfig } from '../services/stunService';
+import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
 import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Users, Monitor } from 'lucide-react';
 
 interface SenderProps {
@@ -138,20 +139,24 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   };
 
   // === ✨ Robust Network Type Detection ===
-  const updateConnectionStats = async (conn: DataConnection) => {
-      if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') return;
-      
+  const peerIsLAN = useRef<Map<string, boolean>>(new Map());
+
+  const updateConnectionStats = async (conn: DataConnection): Promise<boolean> => {
+      if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') return false;
+
+      let isLanConnection = false;
+
       try {
           const stats = await conn.peerConnection.getStats();
           let selectedPair: any = null;
-          
+
           // Spec-compliant way to find selected pair
           stats.forEach(report => {
               if (report.type === 'transport' && report.selectedCandidatePairId) {
                   selectedPair = stats.get(report.selectedCandidatePairId);
               }
           });
-          
+
           // Fallback to searching active pair
           if (!selectedPair) {
               stats.forEach(report => {
@@ -163,10 +168,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
           if (selectedPair) {
               const localCandidate = stats.get(selectedPair.localCandidateId);
+              const remoteCandidate = stats.get(selectedPair.remoteCandidateId);
               const protocol = localCandidate?.protocol || 'udp';
 
+              // Check if both endpoints are on private/LAN IPs
+              const localIP = localCandidate?.address || localCandidate?.ip || '';
+              const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
+              isLanConnection = isPrivateIP(localIP) && isPrivateIP(remoteIP);
+
+              // Cache the result for this peer
+              peerIsLAN.current.set(conn.peer, isLanConnection);
+
               if (activeConnections.current.size === 1) {
-                  setConnectionStatus(`已连接 | ${protocol.toUpperCase()}`);
+                  const networkType = isLanConnection ? 'LAN' : 'WAN';
+                  setConnectionStatus(`已连接 | ${protocol.toUpperCase()} | ${networkType}`);
               } else {
                   setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
               }
@@ -174,6 +189,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       } catch (e) {
           // ignore stats error
       }
+
+      return isLanConnection;
   };
 
   // ... (Hooks for unload, wakeLock, timer - unchanged) ...
@@ -270,7 +287,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             size: f.size,
             type: f.type,
             lastModified: f.lastModified,
-            preview
+            preview,
+            fingerprint: generateFileFingerprint(f)
         });
     }
     setMetadata({ files: filesInfo, totalSize: totalSize });
@@ -497,21 +515,21 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
-    
+
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
 
     // Determine network capabilities for this peer
     // Update stats one last time to be sure
-    await updateConnectionStats(conn);
+    const isLAN = await updateConnectionStats(conn);
 
-    // === TUNING PARAMETERS ===
-    const CHUNK_SIZE = 64 * 1024; // 64KB
-    const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer for fewer IO ops
+    // === DYNAMIC TUNING PARAMETERS BASED ON NETWORK TYPE ===
+    const CHUNK_SIZE = isLAN ? TRANSFER_CONFIG.CHUNK_SIZE_LAN : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
+    const READ_BUFFER_SIZE = TRANSFER_CONFIG.READ_BUFFER_SIZE;
 
-    // ✨ Hysteresis Flow Control Settings
-    const HIGH_WATER_MARK = 256 * 1024;
-    const LOW_WATER_MARK = 0; 
+    // ✨ Hysteresis Flow Control Settings - use larger buffers for LAN
+    const HIGH_WATER_MARK = isLAN ? FLOW_CONTROL.HIGH_WATER_MARK_LAN : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
+    const LOW_WATER_MARK = isLAN ? FLOW_CONTROL.LOW_WATER_MARK_LAN : FLOW_CONTROL.LOW_WATER_MARK_WAN; 
 
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;

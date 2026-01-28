@@ -17,14 +17,18 @@ export const TRANSFER_CONFIG = {
 } as const;
 
 // === Flow Control (Hysteresis) ===
+// Hysteresis prevents oscillation: send until HIGH, pause until LOW, repeat
+// The gap between HIGH and LOW determines burst size and smoothness
 export const FLOW_CONTROL = {
-  // LAN: Higher watermarks to utilize high-speed network
-  HIGH_WATER_MARK_LAN: 4 * 1024 * 1024,   // 4MB
-  LOW_WATER_MARK_LAN: 1 * 1024 * 1024,    // 1MB
+  // LAN: Aggressive settings for high-speed local network
+  // Gigabit LAN can easily handle 100+ MB/s, so large buffers are beneficial
+  HIGH_WATER_MARK_LAN: 8 * 1024 * 1024,   // 8MB - allow large bursts
+  LOW_WATER_MARK_LAN: 2 * 1024 * 1024,    // 2MB - resume before empty (75% drain)
 
-  // WAN: Conservative to avoid bufferbloat
-  HIGH_WATER_MARK_WAN: 256 * 1024,        // 256KB
-  LOW_WATER_MARK_WAN: 0,                   // 0KB
+  // WAN: Balanced for variable network conditions
+  // Too aggressive causes bufferbloat; too conservative wastes bandwidth
+  HIGH_WATER_MARK_WAN: 512 * 1024,        // 512KB - moderate buffer
+  LOW_WATER_MARK_WAN: 128 * 1024,         // 128KB - resume at 25% (don't wait for empty!)
 } as const;
 
 // === Timeouts ===
