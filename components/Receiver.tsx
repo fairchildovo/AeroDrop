@@ -87,18 +87,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     }
   }, [code, state]);
 
-  useEffect(() => {
-      const handleFocus = async () => {
-          if (state === TransferState.IDLE && code.length < 4) {
-              try {
-                  const text = await navigator.clipboard.readText();
-                  if (/^\d{4}$/.test(text)) setCode(text);
-              } catch (e) { console.debug("Clipboard read failed", e); }
-          }
-      };
-      window.addEventListener('focus', handleFocus);
-      return () => window.removeEventListener('focus', handleFocus);
-  }, [state, code]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -623,7 +611,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
                    <button key={num} onClick={() => handleDigitClick(num.toString())} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">{num}</button>
                  ))}
-                 <button onClick={() => { navigator.clipboard.readText().then(t => { if(/^\d{4}$/.test(t)) setCode(t) }) }} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"><ClipboardPaste size={20} /></button>
+                 <button onClick={() => { navigator.clipboard.readText().then(t => {
+                   // 直接是4位数字
+                   if(/^\d{4}$/.test(t)) { setCode(t); return; }
+                   // 从 URL 中提取 code 参数 (如 https://aerodrop.pages.dev/?code=5236)
+                   const match = t.match(/[?&]code=(\d{4})(?:&|$)/);
+                   if(match) setCode(match[1]);
+                 }).catch(() => {}) }} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"><ClipboardPaste size={20} /></button>
                  <button onClick={() => handleDigitClick('0')} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">0</button>
                  <button onClick={handleBackspace} onContextMenu={(e) => { e.preventDefault(); handleClear(); }} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600"><Delete size={24} /></button>
              </div>
