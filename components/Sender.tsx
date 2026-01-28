@@ -37,12 +37,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const peerRef = useRef<Peer | null>(null);
   const activeConnections = useRef<Set<DataConnection>>(new Set());
   const isDestroyingRef = useRef(false);
+  const isMountedRef = useRef(true); // 防止卸载后更新状态
   
   const transferSessionId = useRef<number>(0);
   const activeTransfersCount = useRef<number>(0);
-
-  // Track LAN/WAN status per peer to optimize buffer sizes
-  const peerNetworkTypes = useRef<Map<string, 'LAN' | 'WAN' | 'RELAY'>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -164,36 +162,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           }
 
           if (selectedPair) {
-              const remoteCandidate = stats.get(selectedPair.remoteCandidateId);
               const localCandidate = stats.get(selectedPair.localCandidateId);
-              
-              // Get candidate details
-              // Note: 'candidateType' helps, but IP is the ultimate source of truth for "LAN-ness"
-              const candidateType = localCandidate?.candidateType; // host, srflx, prflx, relay
-              const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
               const protocol = localCandidate?.protocol || 'udp';
 
-              let typeDisplay = '连接中...';
-              let networkType: 'LAN' | 'WAN' | 'RELAY' = 'WAN';
-
-              if (candidateType === 'relay') {
-                  typeDisplay = '🐢 中继连接 (Relay/TURN)';
-                  networkType = 'RELAY';
-              } else if (isPrivateIP(remoteIP)) {
-                  // If remote IP is private, we are definitely on a LAN/VPN structure
-                  typeDisplay = '⚡️ 局域网直连 (LAN)';
-                  networkType = 'LAN';
-              } else {
-                  // Public IP
-                  typeDisplay = '🌐 公网 P2P (WAN)';
-                  networkType = 'WAN';
-              }
-
-              // Store for flow control optimization
-              peerNetworkTypes.current.set(conn.peer, networkType);
-
               if (activeConnections.current.size === 1) {
-                  setConnectionStatus(`${typeDisplay} | ${protocol.toUpperCase()}`);
+                  setConnectionStatus(`已连接 | ${protocol.toUpperCase()}`);
               } else {
                   setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
               }
@@ -216,7 +189,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   }, [state]);
 
   useEffect(() => {
-    return () => stopSharing();
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      stopSharing();
+    };
   }, []);
 
   useEffect(() => {
@@ -409,7 +386,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
-    peerNetworkTypes.current.clear();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -501,8 +477,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               peerProgress.current.delete(conn.peer);
               peerRealtimeSpeed.current.delete(conn.peer);
               peerAverageSpeed.current.delete(conn.peer);
-              peerNetworkTypes.current.delete(conn.peer);
-              
+
               updateConnectionStatusUI();
               
               if (isDestroyingRef.current) return;
@@ -525,27 +500,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
-    
+
     // Determine network capabilities for this peer
     // Update stats one last time to be sure
     await updateConnectionStats(conn);
-    
-    const networkType = peerNetworkTypes.current.get(conn.peer) || 'WAN';
-    const isLan = networkType === 'LAN';
-
 
     // === TUNING PARAMETERS ===
-    // 局域网使用更大的 Chunk 以减少协议开销，提高吞吐量
-    const CHUNK_SIZE = isLan ? 256 * 1024 : 64 * 1024; // LAN: 256KB, WAN: 64KB
+    const CHUNK_SIZE = 64 * 1024; // 64KB
     const READ_BUFFER_SIZE = 16 * 1024 * 1024; // 16MB Read Buffer for fewer IO ops
 
     // ✨ Hysteresis Flow Control Settings
-    // LAN: 大幅增加水位线，充分利用高速网络带宽
-    // - High Water Mark 4MB: 允许更多数据在发送缓冲区中排队
-    // - Low Water Mark 1MB: 保持管道充满，避免空转
-    // WAN: 保守设置避免 bufferbloat
-    const HIGH_WATER_MARK = isLan ? 4 * 1024 * 1024 : 256 * 1024;
-    const LOW_WATER_MARK = isLan ? 1 * 1024 * 1024 : 0; 
+    const HIGH_WATER_MARK = 256 * 1024;
+    const LOW_WATER_MARK = 0; 
 
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;
@@ -725,7 +691,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
-    peerNetworkTypes.current.clear();
     setIndividualStats([]);
 
     setConnectionStatus('');

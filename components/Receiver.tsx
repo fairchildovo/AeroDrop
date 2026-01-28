@@ -68,6 +68,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const lastSpeedBytesRef = useRef<number>(0);
 
   const codeRef = useRef<string>('');
+  const isMountedRef = useRef(true); // 防止卸载后更新状态
   useEffect(() => { codeRef.current = code; }, [code]);
 
   useEffect(() => { if (initialCode) setCode(initialCode); }, [initialCode]);
@@ -98,11 +99,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   }, [state, code]);
 
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
-      abortStreams(); 
+      abortStreams();
     };
   }, []);
 
