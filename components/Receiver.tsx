@@ -655,7 +655,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                          <PlayCircle size={18} /> {isStreamingRef.current ? '重新开始' : '继续下载'}
                      </button>
                  )}
-                 <button onClick={acceptTransfer} className={`w-full font-bold py-3 rounded-full transition-all flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200' : 'bg-slate-900 dark:bg-brand-600 text-white'}`}>
+                 <button onClick={acceptTransfer} className={`w-full font-bold py-3 rounded-full transition-all flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200' : 'bg-brand-600 hover:bg-brand-700 text-white shadow-lg shadow-brand-600/25 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5'}`}>
                    <Download size={18} /> {canResume ? '重新下载所有' : '确认并下载'}
                  </button>
              </div>

@@ -834,7 +834,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     </div>
                 </div>
                 {errorMsg && <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 dark:bg-red-900/20 p-2 rounded"><AlertCircle size={14} /> {errorMsg}</div>}
-                <button onClick={startSharing} className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-full hover:bg-brand-700 shadow-lg">创建分享</button>
+                <button onClick={startSharing} className="w-full bg-brand-600 text-white font-bold py-3.5 rounded-full hover:bg-brand-700 shadow-lg shadow-brand-600/25 transition-all duration-200 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5">创建分享</button>
             </div>
          </div>
       )}

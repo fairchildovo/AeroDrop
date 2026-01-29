@@ -77,7 +77,7 @@ export const Auth: React.FC<AuthProps> = ({ onLogin }) => {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-brand-600 text-white font-bold py-3 rounded-lg hover:bg-brand-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+            className="w-full bg-brand-600 text-white font-bold py-3 rounded-lg hover:bg-brand-700 transition-all duration-200 shadow-lg shadow-brand-600/25 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5 flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {loading ? (
               <Loader2 size={20} className="animate-spin" />
