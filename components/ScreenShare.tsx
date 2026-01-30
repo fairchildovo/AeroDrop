@@ -595,7 +595,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      setError('您的浏览器不支持屏幕共享，或需要使用 HTTPS 连接');
+      setError('您的浏览器不支持屏幕共享，请使用桌面端浏览器:Chrome、Edge 或 Firefox');
       onNotification('屏幕共享不可用', 'error');
       return;
     }

@@ -14,10 +14,12 @@ export const PWAInstallPrompt: React.FC = () => {
 
     // Android / Desktop
     const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
+      // 不调用 e.preventDefault()，允许浏览器显示原生的安装提示 (Mini-infobar)
+      // e.preventDefault();
       setDeferredPrompt(e);
-      // Wait a bit before showing to not be intrusive immediately
-      setTimeout(() => setShowPrompt(true), 3000);
+
+      // 不自动弹出自定义 UI，完全依赖浏览器的原生提示
+      // setTimeout(() => setShowPrompt(true), 3000);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
