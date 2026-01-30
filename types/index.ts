@@ -10,7 +10,7 @@ export enum TransferState {
 }
 
 export interface TransferConstraints {
-  expiresAt?: number; // Timestamp
+  expiresAt?: number; 
 }
 
 export interface FileInfo {
@@ -18,8 +18,8 @@ export interface FileInfo {
   size: number;
   type: string;
   lastModified: number;
-  preview?: string; // Base64 thumbnail or text snippet
-  fingerprint?: string; // Unique identifier for resume verification
+  preview?: string; 
+  fingerprint?: string; 
 }
 
 export interface FileMetadata {
@@ -44,7 +44,7 @@ export interface FileStartPayload {
 
 export interface FileCompletePayload {
   fileIndex: number;
-  fileName?: string; // Optional if needed for verification
+  fileName?: string; 
 }
 
 export interface ResumePayload {
@@ -75,7 +75,7 @@ export interface User {
   name?: string;
 }
 
-// === Global Type Declarations ===
+
 
 declare global {
   interface File {
@@ -109,7 +109,7 @@ declare global {
     close(): Promise<void>;
   }
 
-  // Basic FileSystemEntry types for drag-and-drop folder support
+  
   interface FileSystemEntry {
     readonly isFile: boolean;
     readonly isDirectory: boolean;

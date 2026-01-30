@@ -38,8 +38,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const peerRef = useRef<Peer | null>(null);
   const activeConnections = useRef<Set<DataConnection>>(new Set());
   const isDestroyingRef = useRef(false);
-  const isMountedRef = useRef(true); // 防止卸载后更新状态
-  
+  const isMountedRef = useRef(true);
+
   const transferSessionId = useRef<number>(0);
   const activeTransfersCount = useRef<number>(0);
 
@@ -50,7 +50,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileListRef = useRef<File[]>([]);
 
-  // === ✨ UI Updater ===
   const totalProgressRef = useRef(0);
   useEffect(() => {
     totalProgressRef.current = totalProgress;
@@ -90,7 +89,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     setTotalProgress(Math.floor(combinedProgress / count));
                 } else {
                     if (activeTransfersCount.current === 0 && totalProgressRef.current === 100) {
-                        // keep 100
+                        
                     } else {
                         setTotalProgress(0);
                     }
@@ -112,33 +111,27 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     }
   };
 
-  // === ✨ Private IP Detection (RFC 1918 + Localhost) ===
   const isPrivateIP = (ip: string) => {
       if (!ip) return false;
-      // Remove IPv6 brackets and port if present
       const cleanIp = ip.replace(/^\[|\](:[0-9]+)?$/g, '').split(':')[0];
-      
-      // Localhost
+
       if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.toLowerCase() === 'localhost') return true;
 
-      // IPv6 Link-Local
       if (cleanIp.toLowerCase().startsWith('fe80:')) return true;
 
-      // IPv4 Private Ranges
       const parts = cleanIp.split('.');
       if (parts.length === 4) {
           const p0 = parseInt(parts[0], 10);
           const p1 = parseInt(parts[1], 10);
-          
-          if (p0 === 10) return true; // 10.0.0.0/8
-          if (p0 === 172 && p1 >= 16 && p1 <= 31) return true; // 172.16.0.0/12
-          if (p0 === 192 && p1 === 168) return true; // 192.168.0.0/16
+
+          if (p0 === 10) return true; 
+          if (p0 === 172 && p1 >= 16 && p1 <= 31) return true; 
+          if (p0 === 192 && p1 === 168) return true; 
       }
 
       return false;
   };
 
-  // === ✨ Robust Network Type Detection ===
   const peerIsLAN = useRef<Map<string, boolean>>(new Map());
 
   const updateConnectionStats = async (conn: DataConnection): Promise<boolean> => {
@@ -150,14 +143,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           const stats = await conn.peerConnection.getStats();
           let selectedPair: any = null;
 
-          // Spec-compliant way to find selected pair
           stats.forEach(report => {
               if (report.type === 'transport' && report.selectedCandidatePairId) {
                   selectedPair = stats.get(report.selectedCandidatePairId);
               }
           });
 
-          // Fallback to searching active pair
           if (!selectedPair) {
               stats.forEach(report => {
                   if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.selected) {
@@ -171,12 +162,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               const remoteCandidate = stats.get(selectedPair.remoteCandidateId);
               const protocol = localCandidate?.protocol || 'udp';
 
-              // Check if both endpoints are on private/LAN IPs
               const localIP = localCandidate?.address || localCandidate?.ip || '';
               const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
               isLanConnection = isPrivateIP(localIP) && isPrivateIP(remoteIP);
 
-              // Cache the result for this peer
               peerIsLAN.current.set(conn.peer, isLanConnection);
 
               if (activeConnections.current.size === 1) {
@@ -187,13 +176,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               }
           }
       } catch (e) {
-          // ignore stats error
+          
       }
 
       return isLanConnection;
   };
 
-  // ... (Hooks for unload, wakeLock, timer - unchanged) ...
+  
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) {
@@ -267,7 +256,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [state, metadata]);
 
-  // ... (processFiles, traverseFileTree, DnD, Handlers - unchanged) ...
+  
   const processFiles = useCallback(async (files: File[]) => {
     setFileList(files);
     fileListRef.current = files;
@@ -400,7 +389,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     if (!fileList.length || !metadata) return;
     isDestroyingRef.current = false;
     
-    // Clear stats
+    
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
@@ -465,7 +454,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
           conn.on('open', () => {
               updateConnectionStatusUI();
-              // Perform an immediate check to set the network type
+              
               updateConnectionStats(conn);
 
               setState(TransferState.PEER_CONNECTED);
@@ -478,7 +467,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
               const msg = data as P2PMessage;
               if (msg.type === 'ACCEPT_TRANSFER') {
                   setState(TransferState.TRANSFERRING);
-                  // Wait a tick to ensure stats have updated network type
+                  
                   setTimeout(() => sendFileSequence(conn, 0, 0), 100);
               } else if (msg.type === 'RESUME_REQUEST') {
                   const payload = msg.payload as ResumePayload;
@@ -511,7 +500,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       });
   };
 
-  // === ✨ OPTIMIZED SEND LOGIC WITH HYSTERESIS FLOW CONTROL ===
   const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
@@ -519,17 +507,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
 
-    // Determine network capabilities for this peer
-    // Update stats one last time to be sure
     const isLAN = await updateConnectionStats(conn);
 
-    // === DYNAMIC TUNING PARAMETERS BASED ON NETWORK TYPE ===
     const CHUNK_SIZE = isLAN ? TRANSFER_CONFIG.CHUNK_SIZE_LAN : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
     const READ_BUFFER_SIZE = TRANSFER_CONFIG.READ_BUFFER_SIZE;
 
-    // ✨ Hysteresis Flow Control Settings - use larger buffers for LAN
     const HIGH_WATER_MARK = isLAN ? FLOW_CONTROL.HIGH_WATER_MARK_LAN : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
-    const LOW_WATER_MARK = isLAN ? FLOW_CONTROL.LOW_WATER_MARK_LAN : FLOW_CONTROL.LOW_WATER_MARK_WAN; 
+    const LOW_WATER_MARK = isLAN ? FLOW_CONTROL.LOW_WATER_MARK_LAN : FLOW_CONTROL.LOW_WATER_MARK_WAN;
 
     let totalBytesSent = 0;
     let lastBufferedAmount = 0;
@@ -549,20 +533,19 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
     const totalSize = metadata?.totalSize || 0;
 
-    // PeerJS internal: access the underlying RTCDataChannel
     const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
-    
+
     try {
         let chunkStartOffset = startChunkIndex;
 
         for (let i = startFileIndex; i < files.length; i++) {
             if (transferSessionId.current !== currentSessionId) return;
             if (!conn.open) throw new Error("Connection closed");
-            
+
             if (activeConnections.current.size === 1) {
                 setCurrentFileIndex(i);
             }
-            
+
             const file = files[i];
             const fName = file.fullPath || (file as any).webkitRelativePath || file.name;
 
@@ -577,7 +560,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             } catch(e) { throw new Error("Failed to send FILE_START"); }
 
             let fileOffset = chunkStartOffset * CHUNK_SIZE;
-            chunkStartOffset = 0; 
+            chunkStartOffset = 0;
 
             while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId) return;
@@ -591,10 +574,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 while (bufferOffset < readSize) {
                     if (!conn.open) throw new Error("Connection closed");
 
-                    // === ✨ CORE FIX: Hysteresis Loop ===
                     if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
-                        // Set threshold to the Low Water Mark
-                        // The 'bufferedamountlow' event will fire when bufferedAmount drops <= LOW_WATER_MARK
                         dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
 
                         await new Promise<void>(resolve => {
@@ -602,8 +582,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                                 dataChannel.removeEventListener('bufferedamountlow', onLow);
                                 resolve();
                             };
-                            
-                            // Double check before waiting (race condition safety)
+
                             if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
                                 resolve();
                             } else {
@@ -614,13 +593,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
                     const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
                     const chunk = largeBuffer.slice(bufferOffset, chunkEnd);
-                    
+
                     try {
                         conn.send(chunk);
                     } catch (e) {
-                         // Safari sometimes throws if buffer is full despite check
                          if (!conn.open) throw new Error("Connection closed during send");
-                         // Backoff slightly and retry once
                          await new Promise(r => setTimeout(r, 50));
                          try { conn.send(chunk); } catch(err) { throw err; }
                     }
@@ -630,13 +607,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     bytesInLastPeriod += currentChunkSize;
                     bufferOffset += currentChunkSize;
 
-                    // Update stats (every ~500ms)
                     const now = Date.now();
-                    if (now - lastUpdateTime >= 500) { 
+                    if (now - lastUpdateTime >= 500) {
                         const duration = (now - lastUpdateTime) / 1000;
                         const currentBuffered = dataChannel?.bufferedAmount || 0;
-                        
-                        // Calculate effective throughput (excluding what's sitting in buffer)
+
                         const actualBytesTransferred = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
                         
                         if (duration > 0) {
@@ -767,7 +742,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         >
           <input type="file" id="file-upload" className="hidden" multiple onChange={handleFileSelect} />
           <input type="file" id="folder-upload" className="hidden" 
-                 // @ts-ignore
+                 
                  webkitdirectory="" directory="" onChange={handleFolderSelect} 
           />
           

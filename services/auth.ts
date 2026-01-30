@@ -9,7 +9,6 @@ export const getCurrentUser = (): User | null => {
 };
 
 export const loginUser = async (email: string, password: string): Promise<User> => {
-  // Simulate API delay
   await new Promise(resolve => setTimeout(resolve, 800));
 
   const db = JSON.parse(localStorage.getItem(STORAGE_KEY_USERS_DB) || '[]');

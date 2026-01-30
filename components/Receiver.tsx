@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
-// @ts-ignore
+
 import streamSaver from 'streamsaver';
-// 配置使用本地 mitm.html，解决 jimmywarting.github.io 前缀问题
 streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
@@ -16,7 +15,6 @@ interface ReceiverProps {
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification }) => {
   const [state, _setState] = useState<TransferState>(TransferState.IDLE);
-  // 包装 setState 以同步更新 ref（解决闭包问题）
   const setState = (newState: TransferState) => {
     stateRef.current = newState;
     _setState(newState);
@@ -39,9 +37,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const retryCountRef = useRef<number>(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const stateRef = useRef<TransferState>(TransferState.IDLE); // 用于闭包中访问最新状态
+  const stateRef = useRef<TransferState>(TransferState.IDLE);
 
-  // iOS/Safari 检测
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -59,23 +56,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const isStreamingRef = useRef<boolean>(false);
   const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
   const streamSaverWriterRef = useRef<WritableStreamDefaultWriter | null>(null);
-  
-  // 队列用于保证写入顺序
+
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
-  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024; // 16MB 缓冲区 (Sweet Spot for Performance/UI Blocking)
+  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024;
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
 
   const codeRef = useRef<string>('');
-  const isMountedRef = useRef(true); // 防止卸载后更新状态
+  const isMountedRef = useRef(true);
   useEffect(() => { codeRef.current = code; }, [code]);
 
   useEffect(() => { if (initialCode) setCode(initialCode); }, [initialCode]);
 
-  // Auto-connect when code is complete - use ref to avoid stale closure
   const handleConnectRef = useRef<() => void>(() => {});
   useEffect(() => {
     handleConnectRef.current = handleConnect;
@@ -107,7 +102,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       } catch (e) { console.warn("Stream abort warning:", e); }
   };
 
-  // 正常关闭流（用于文件传输完成时）
   const closeStreams = async () => {
       try {
           if (nativeWriterRef.current) { await nativeWriterRef.current.close(); nativeWriterRef.current = null; }
@@ -156,13 +150,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     return () => clearInterval(interval);
   }, [state]);
 
-  // === 核心写入逻辑：合并小块并写入磁盘 ===
   const flushSpecificBatch = async (batch: Uint8Array[], totalLen: number) => {
-      // 卫语句：防止取消后继续写入 (Fix Race Condition)
       if (!isStreamingRef.current) return;
-      
+
       try {
-          // 合并 Buffer 减少系统调用
           const combined = new Uint8Array(totalLen);
           let offset = 0;
           for (const chunk of batch) {
@@ -208,19 +199,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
              receivedSizeRef.current += byteLength;
              
              if (isStreamingRef.current) {
-                 // 创建副本以防 ArrayBuffer 被复用/分离
                  writeBufferRef.current.push(new Uint8Array(chunkData));
                  writeBufferSizeRef.current += byteLength;
-                 
-                 // 缓冲区满，触发写入
+
                  if (writeBufferSizeRef.current >= BUFFER_FLUSH_THRESHOLD) {
                      const batch = writeBufferRef.current;
                      const batchSize = writeBufferSizeRef.current;
-                     
+
                      writeBufferRef.current = [];
                      writeBufferSizeRef.current = 0;
-                     
-                     // 加入队列，保证顺序写入
+
                      writeQueueRef.current = writeQueueRef.current.then(() => flushSpecificBatch(batch, batchSize));
                  }
              } else {
@@ -230,21 +218,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
          return;
       }
 
-      // 处理信令消息
       const msg = data as P2PMessage;
-      
+
       if (msg.type === 'METADATA') {
         const meta = msg.payload as FileMetadata;
         const previousMeta = metadataRef.current;
-        // 只有文件完全一致才能续传（包括 fingerprint 校验）
         let isResumable = false;
         if (previousMeta &&
             previousMeta.totalSize === meta.totalSize &&
             previousMeta.files.length === meta.files.length) {
-            // 逐个文件校验 fingerprint
             isResumable = meta.files.every((file, idx) => {
                 const prev = previousMeta.files[idx];
-                // 如果有 fingerprint，必须匹配；否则回退到 name+size 校验
                 if (file.fingerprint && prev.fingerprint) {
                     return file.fingerprint === prev.fingerprint;
                 }
@@ -269,20 +253,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         
   
         const resumingSameFile = currentFileIndexRef.current === fileIndex && chunksRef.current.length > 0;
-        
+
         if (!resumingSameFile) {
-            // 新文件或重新开始
-            await abortStreams(); // 关闭旧流
+            await abortStreams();
             chunksRef.current = [];
             writeBufferRef.current = [];
             writeBufferSizeRef.current = 0;
             receivedChunksCountRef.current = 0;
             receivedSizeRef.current = 0;
 
-            // 尝试建立流式写入
-            // 注意：iOS Safari 不支持 StreamSaver，需要降级到内存模式
             if (!nativeWriterRef.current) {
-                // iOS/Safari 不支持 StreamSaver，使用内存缓存模式
                 if (isIOS || isSafari) {
                     isStreamingRef.current = false;
                 } else if (streamSaver) {
@@ -293,7 +273,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                      } catch(e) { isStreamingRef.current = false; }
                 }
             } else {
-                // nativeWriter 存在，复用之
                 isStreamingRef.current = true;
             }
         }
@@ -321,19 +300,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
              writeQueueRef.current = writeQueueRef.current.then(async () => {
                  if (finalSize > 0) await flushSpecificBatch(finalBatch, finalSize);
-                 await closeStreams(); // 正常关闭文件句柄，完成保存（不是 abort）
+                 await closeStreams();
 
                  if (isTransferActiveRef.current) {
                     completedFileIndicesRef.current.add(currentFileIndexRef.current);
                     if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
                  }
              }).catch(e => console.error("File Complete Error", e));
-             
+
              await writeQueueRef.current;
          } else {
              saveCurrentFile();
          }
-      } 
+      }
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          if (!isTransferActiveRef.current) return;
          await writeQueueRef.current;
@@ -355,7 +334,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     });
 
     conn.on('close', () => {
-       // 修复：使用 stateRef 而非闭包中的 state，避免过时值
        const currentState = stateRef.current;
        if (currentState === TransferState.TRANSFERRING || currentState === TransferState.WAITING_FOR_PEER) {
            setErrorMsg("连接已断开");
@@ -378,13 +356,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       writeQueueRef.current = Promise.resolve();
   };
 
-  // iOS/Safari 专用保存函数 - 解决 iOS Safari 不支持自动下载的问题
-  // 注意：使用 DOM API 而非 innerHTML 防止 XSS 攻击
   const saveFileForIOS = (blob: Blob, fileName: string) => {
     const url = URL.createObjectURL(blob);
 
-    // iOS Safari 需要用户手动点击链接才能触发下载
-    // 创建一个可见的下载按钮让用户点击
     const downloadModal = document.createElement('div');
     downloadModal.id = 'ios-download-modal';
     downloadModal.style.cssText = `
@@ -394,7 +368,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       padding: 20px;
     `;
 
-    // 使用 DOM API 构建元素，防止 XSS
     const contentDiv = document.createElement('div');
     contentDiv.style.cssText = 'background: white; padding: 24px; border-radius: 16px; max-width: 320px; text-align: center;';
 
@@ -404,7 +377,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
     const fileNameP = document.createElement('p');
     fileNameP.style.cssText = 'margin: 0 0 20px; font-size: 14px; color: #64748b; word-break: break-all;';
-    fileNameP.textContent = fileName; // 安全：textContent 自动转义
+    fileNameP.textContent = fileName;
 
     const downloadLink = document.createElement('a');
     downloadLink.href = url;
@@ -430,7 +403,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     downloadModal.appendChild(contentDiv);
     document.body.appendChild(downloadModal);
 
-    // 30秒后自动清理
     setTimeout(() => {
       downloadModal.remove();
       URL.revokeObjectURL(url);
@@ -450,11 +422,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       try {
           const blob = new Blob(chunksRef.current, { type: finalType });
 
-          // iOS Safari 特殊处理：需要用户手动点击下载
           if (isIOS || isSafari) {
               saveFileForIOS(blob, finalName);
           } else {
-              // 标准浏览器：自动触发下载
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url; a.download = finalName;
@@ -475,9 +445,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     setState(TransferState.WAITING_FOR_PEER);
     setErrorMsg('');
     retryCountRef.current = 0;
-    
+
     if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
-    // 增加超时时间到 15 秒，跨平台 WebRTC 连接需要更长时间（特别是 Android）
     connectionTimeoutRef.current = setTimeout(() => {
         if (peerRef.current) peerRef.current.destroy();
         setErrorMsg("连接超时。请检查口令是否正确。");
@@ -485,18 +454,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     }, 15000);
 
     if (peerRef.current) peerRef.current.destroy();
-    
-    // 使用优化后的配置 (仅 Google/Cloudflare STUN)
+
     const iceConfig = await getIceConfig();
-    const peer = new Peer({ debug: 1, config: iceConfig }); // 移除 iceConfig.secure 类型不匹配问题
-    
+    const peer = new Peer({ debug: 1, config: iceConfig });
+
     peer.on('open', () => {
       const conn = peer.connect(`aerodrop-${code}`, { reliable: true });
       setupConnListeners(conn);
     });
     
     peer.on('error', (err) => {
-       // ... 保持原有重试逻辑 ...
        if (err.type === 'peer-unavailable' && retryCountRef.current < 3) {
           retryCountRef.current++;
           setTimeout(() => {
@@ -518,16 +485,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       resetStateForNewTransfer();
       isTransferActiveRef.current = true;
 
-      // 直接使用 StreamSaver 自动下载到浏览器下载文件夹
-      // 不再弹出文件选择对话框，提供更流畅的用户体验
-      // StreamSaver 会在 FILE_START 中按需初始化
-
-      // iOS/Safari 只能使用内存模式
       if (isIOS || isSafari) {
           isStreamingRef.current = false;
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
       }
-      // 其他浏览器使用 StreamSaver 自动下载（在 FILE_START 中初始化）
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
       setState(TransferState.TRANSFERRING);
@@ -538,18 +499,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (connRef.current) {
           isTransferActiveRef.current = true;
           const currentIdx = currentFileIndexRef.current;
-          
-          // 修复：如果是流式传输，chunksRef 已被清空，length 为 0。
-          // 这意味着必须重新开始传输该文件，不能从中间断点恢复。
-          // 我们发送 chunkIndex: 0 让发送方重置该文件。
+
           const nextChunkIndex = chunksRef.current.length;
-          
-          isStreamingRef.current = false; // FILE_START 会重新检测并开启
-          
+
+          isStreamingRef.current = false;
+
           if (completedFileIndicesRef.current.has(currentIdx)) {
               connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx + 1, chunkIndex: 0 } });
           } else {
-              // 对于流式传输，nextChunkIndex 为 0，实际上是 "Restart File"
               connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx, chunkIndex: nextChunkIndex } });
           }
           setState(TransferState.TRANSFERRING);
@@ -557,9 +514,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   };
 
   const reset = () => {
-    isStreamingRef.current = false; // Fix: Immediate flag to prevent queued writes from executing
+    isStreamingRef.current = false;
     isTransferActiveRef.current = false;
-    // ... 保持原有逻辑 ...
+    
     abortStreams().then(() => {
         if (connRef.current) connRef.current.close();
         if (peerRef.current) peerRef.current.destroy();
@@ -572,33 +529,31 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     });
   };
 
-  // 辅助 UI 函数保持不变
+  
   const handleRetry = () => { if (code.length === 4) handleConnect(); else reset(); };
   const handleDigitClick = (digit: string) => { if (code.length < 4) setCode(prev => prev + digit); };
   const handleBackspace = () => { setCode(prev => prev.slice(0, -1)); };
   const handleClear = () => { setCode(''); };
-  const handlePaste = async () => { /* ... */ };
-  const getFileIcon = (name: string, type: string) => { /* ... */ return <FileIcon size={24} className="text-slate-400" />; };
+  const handlePaste = async () => {  };
+  const getFileIcon = (name: string, type: string) => {  return <FileIcon size={24} className="text-slate-400" />; };
 
   const primaryFile = metadata?.files?.[0];
   const isMultiFile = (metadata?.files?.length || 0) > 1;
 
-  // ... JSX 部分与之前相同，省略以节省空间 ...
-  // 注意：确保 JSX 中的 onClick={handleRetry} 等绑定正确
+  
+  
   return (
     <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
-      {/* 头部标题 */}
+      {}
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-slate-800 dark:text-white">接收文件</h2>
         <p className="text-slate-500 dark:text-slate-400">输入 4 位口令</p>
       </div>
 
-      {/* IDLE 状态输入框 */}
+      {}
       {state === TransferState.IDLE && (
-         /* ... 原有数字键盘 UI ... */
          <div className="flex flex-col items-center">
              <div className="relative mb-8 max-w-[280px] mx-auto group">
-                 {/* ... 显示 4 个数字框 ... */}
                  <div className="flex gap-4 justify-center pointer-events-none">
                    {[0, 1, 2, 3].map((i) => (
                      <div key={i} className={`w-14 h-16 border-2 rounded-xl flex items-center justify-center text-3xl font-bold font-mono transition-all duration-200 ${code[i] ? 'border-brand-500 text-brand-600 dark:text-brand-400 shadow-sm bg-white dark:bg-slate-700' : 'border-slate-200 dark:border-slate-600 text-slate-300 dark:text-slate-600 bg-white dark:bg-slate-700'}`}>{code[i] || ''}</div>
@@ -606,15 +561,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                  </div>
                  <input ref={inputRef} type="text" inputMode="numeric" maxLength={4} value={code} onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" autoFocus />
              </div>
-             {/* ... 数字键盘按钮 ... */}
              <div className="grid grid-cols-3 gap-3 w-full max-w-[280px] mb-8">
                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
                    <button key={num} onClick={() => handleDigitClick(num.toString())} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">{num}</button>
                  ))}
                  <button onClick={() => { navigator.clipboard.readText().then(t => {
-                   // 直接是4位数字
+                   
                    if(/^\d{4}$/.test(t)) { setCode(t); return; }
-                   // 从 URL 中提取 code 参数 (如 https://aerodrop.pages.dev/?code=5236)
+                   
                    const match = t.match(/[?&]code=(\d{4})(?:&|$)/);
                    if(match) setCode(match[1]);
                  }).catch(() => {}) }} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"><ClipboardPaste size={20} /></button>
@@ -624,7 +578,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
          </div>
       )}
 
-      {/* WAITING 状态 */}
+      {}
       {state === TransferState.WAITING_FOR_PEER && (
          <div className="flex flex-col items-center py-10 animate-pop-in">
            <Loader2 size={40} className="animate-spin text-brand-500 mb-4" />
@@ -633,10 +587,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
          </div>
       )}
 
-      {/* CONNECTED / TRANSFERRING 状态 */}
+      {}
       {(state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && metadata && (
         <div className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 animate-slide-up">
-           {/* ... 文件信息显示 ... */}
            <div className="flex items-start gap-4 mb-6">
                <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
                   {isMultiFile ? <Layers size={24} className="text-brand-500" /> : <FileIcon size={24} />}
@@ -646,8 +599,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
                    <p className="text-sm text-slate-500 dark:text-slate-400">{formatFileSize(metadata.totalSize)}</p>
                </div>
            </div>
-           
-           {/* ... 操作按钮 ... */}
+
            {state === TransferState.PEER_CONNECTED && (
              <div className="space-y-3">
                  {canResume && (
@@ -663,7 +615,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
            {state === TransferState.TRANSFERRING && (
              <div className="space-y-3">
-               {/* ... 进度条 ... */}
                <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase">
                   <span>{progress}%</span>
                </div>
@@ -680,7 +631,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         </div>
       )}
 
-      {/* ERROR 状态 */}
+      {}
       {state === TransferState.ERROR && (
         <div className="text-center py-8 animate-pop-in">
            <AlertCircle size={32} className="text-red-500 mx-auto mb-4" />
@@ -693,7 +644,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         </div>
       )}
 
-      {/* COMPLETED 状态 */}
+      {}
       {state === TransferState.COMPLETED && (
         <div className="text-center py-8 animate-pop-in">
           <HardDriveDownload size={36} className="text-green-500 mx-auto mb-6" />

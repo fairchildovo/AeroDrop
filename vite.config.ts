@@ -18,6 +18,21 @@ export default defineConfig(({ mode }) => {
         alias: {
           '@': path.resolve(__dirname, '.'),
         }
+      },
+      build: {
+        target: 'esnext',
+        minify: 'esbuild',
+        cssCodeSplit: true,
+        chunkSizeWarningLimit: 1000,
+        rollupOptions: {
+          output: {
+            manualChunks: {
+              'react-vendor': ['react', 'react-dom'],
+              'peer-vendor': ['peerjs'],
+              'ui-vendor': ['lucide-react']
+            }
+          }
+        }
       }
     };
 });

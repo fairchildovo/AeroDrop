@@ -5,7 +5,9 @@
       "Bash(dir:*)",
       "Bash(npm install:*)",
       "Skill(remotion-best-practices)",
-      "Skill(remotion-best-practices:*)"
+      "Skill(remotion-best-practices:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(node:*)"
     ]
   }
 }

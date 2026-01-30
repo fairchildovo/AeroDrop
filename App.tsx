@@ -1,11 +1,23 @@
-import React, { useState, useEffect } from 'react';
-import { Sender } from './components/Sender';
-import { Receiver } from './components/Receiver';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
+// import { Sender } from './components/Sender';
+// import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Bell, Monitor, Package } from 'lucide-react';
-import { ScreenShare } from './components/ScreenShare';
+import { Share, DownloadCloud, Bell, Monitor, Package, Loader2 } from 'lucide-react';
+// import { ScreenShare } from './components/ScreenShare';
 import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
+
+// Lazy load components with named exports
+const Sender = lazy(() => import('./components/Sender').then(module => ({ default: module.Sender })));
+const Receiver = lazy(() => import('./components/Receiver').then(module => ({ default: module.Receiver })));
+const ScreenShare = lazy(() => import('./components/ScreenShare').then(module => ({ default: module.ScreenShare })));
+
+const LoadingSpinner = () => (
+  <div className="flex flex-col items-center justify-center h-64 w-full">
+    <Loader2 className="w-8 h-8 text-brand-500 animate-spin mb-2" />
+    <p className="text-sm text-slate-400">Loading module...</p>
+  </div>
+);
 
 const App: React.FC = () => {
   const [mode, setMode] = useState<'send' | 'receive' | 'screen'>('send');
@@ -14,7 +26,6 @@ const App: React.FC = () => {
   const [initialViewId, setInitialViewId] = useState<string>('');
 
   useEffect(() => {
-    // Check for code in URL (e.g., ?code=123456 or ?view=AERO-XXXX)
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     const viewId = params.get('view');
@@ -27,13 +38,11 @@ const App: React.FC = () => {
       setInitialViewId(viewId);
     }
 
-    // Clean URL parameters
     if (code || viewId) {
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
 
-  // Mouse tracking for interactive background
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       document.documentElement.style.setProperty('--mouse-x', `${e.clientX}px`);
@@ -47,7 +56,6 @@ const App: React.FC = () => {
     const id = Date.now().toString() + Math.random().toString(36).substring(2, 9);
     setNotifications(prev => [...prev, { id, message, type, timestamp: Date.now() }]);
 
-    // Auto remove
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 4000);
@@ -61,7 +69,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
-      {/* Apple-style Interactive Background */}
       <div
         className="fixed inset-0 pointer-events-none z-0 transition-opacity duration-700"
         style={{
@@ -70,7 +77,6 @@ const App: React.FC = () => {
         }}
       />
 
-      {/* Toast Notifications */}
       <div className="fixed top-20 left-4 right-4 md:left-auto md:right-4 z-50 flex flex-col gap-2 pointer-events-none">
         {notifications.map(n => (
           <div key={n.id} className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border animate-pop-in ${
@@ -84,7 +90,6 @@ const App: React.FC = () => {
         ))}
       </div>
 
-      {/* Header */}
       <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 transition-colors duration-300">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => setMode('send')}>
@@ -105,13 +110,10 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
-        
-        {/* Navigation Tabs - Floating Capsule with Sliding Active State */}
+
         <div className="w-full max-w-xl mb-8 relative z-10">
             <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative transition-all duration-300 shadow-[0_12px_30px_rgba(0,0,0,0.08)] border border-slate-50 dark:border-slate-800">
-              {/* Sliding Background */}
               <div
                   className={`absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)] transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
               ></div>
@@ -152,23 +154,27 @@ const App: React.FC = () => {
             </div>
         </div>
 
-        {/* Component View with 3D Flip Effect */}
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
-          {/* We use hidden/block instead of conditional rendering to keep PeerJS connections alive (Send mode) */}
           <ErrorBoundary>
-            <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-              <Sender onNotification={addNotification} />
-            </div>
+            <Suspense fallback={<LoadingSpinner />}>
+              <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+                <Sender onNotification={addNotification} />
+              </div>
+            </Suspense>
           </ErrorBoundary>
           <ErrorBoundary>
-            <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-              <Receiver initialCode={initialCode} onNotification={addNotification} />
-            </div>
+            <Suspense fallback={<LoadingSpinner />}>
+              <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+                <Receiver initialCode={initialCode} onNotification={addNotification} />
+              </div>
+            </Suspense>
           </ErrorBoundary>
           <ErrorBoundary>
-            <div className={`${mode === 'screen' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-              <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
-            </div>
+            <Suspense fallback={<LoadingSpinner />}>
+              <div className={`${mode === 'screen' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
+                <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
+              </div>
+            </Suspense>
           </ErrorBoundary>
         </div>
         

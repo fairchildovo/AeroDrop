@@ -11,7 +11,7 @@ interface GradientTextProps {
 export const GradientText: React.FC<GradientTextProps> = ({
   children,
   className = "",
-  colors = ["#2563eb", "#60a5fa", "#7c3aed", "#2563eb"], // brand-600, brand-400, violet-600, brand-600
+  colors = ["#2563eb", "#60a5fa", "#7c3aed", "#2563eb"], 
   animationSpeed = 8,
 }) => {
   const gradientStyle = {
