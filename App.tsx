@@ -26,6 +26,11 @@ const App: React.FC = () => {
       setMode('screen');
       setInitialViewId(viewId);
     }
+
+    // Clean URL parameters
+    if (code || viewId) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }, []);
 
   // Mouse tracking for interactive background
@@ -39,9 +44,9 @@ const App: React.FC = () => {
   }, []);
 
   const addNotification = (message: string, type: 'success' | 'info' | 'error') => {
-    const id = Date.now().toString();
+    const id = Date.now().toString() + Math.random().toString(36).substring(2, 9);
     setNotifications(prev => [...prev, { id, message, type, timestamp: Date.now() }]);
-    
+
     // Auto remove
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
