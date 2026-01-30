@@ -12,13 +12,6 @@ const Sender = lazy(() => import('./components/Sender').then(module => ({ defaul
 const Receiver = lazy(() => import('./components/Receiver').then(module => ({ default: module.Receiver })));
 const ScreenShare = lazy(() => import('./components/ScreenShare').then(module => ({ default: module.ScreenShare })));
 
-const LoadingSpinner = () => (
-  <div className="flex flex-col items-center justify-center h-64 w-full">
-    <Loader2 className="w-8 h-8 text-brand-500 animate-spin mb-2" />
-    <p className="text-sm text-slate-400">Loading module...</p>
-  </div>
-);
-
 const App: React.FC = () => {
   const [mode, setMode] = useState<'send' | 'receive' | 'screen'>('send');
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -156,21 +149,21 @@ const App: React.FC = () => {
 
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
           <ErrorBoundary>
-            <Suspense fallback={<LoadingSpinner />}>
+            <Suspense fallback={null}>
               <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
                 <Sender onNotification={addNotification} />
               </div>
             </Suspense>
           </ErrorBoundary>
           <ErrorBoundary>
-            <Suspense fallback={<LoadingSpinner />}>
+            <Suspense fallback={null}>
               <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
                 <Receiver initialCode={initialCode} onNotification={addNotification} />
               </div>
             </Suspense>
           </ErrorBoundary>
           <ErrorBoundary>
-            <Suspense fallback={<LoadingSpinner />}>
+            <Suspense fallback={null}>
               <div className={`${mode === 'screen' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
                 <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
               </div>
