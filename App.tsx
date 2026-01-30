@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Zap, Bell, Monitor } from 'lucide-react';
+import { Share, DownloadCloud, Bell, Monitor, Package } from 'lucide-react';
 import { ScreenShare } from './components/ScreenShare';
+import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 
 const App: React.FC = () => {
@@ -81,11 +82,20 @@ const App: React.FC = () => {
       {/* Header */}
       <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 transition-colors duration-300">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setMode('send')}>
-            <div className="bg-brand-600 p-1.5 md:p-2 rounded-[22.5%] text-white shadow-sm">
-              <Zap size={18} fill="currentColor" className="md:w-5 md:h-5" />
+          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setMode('send')}>
+            <div className="bg-brand-600 p-1.5 md:p-2 rounded-[26.5%] text-white shadow-sm">
+              <Package size={20} className="md:w-6 md:h-6" />
             </div>
-            <h1 className="text-lg md:text-xl font-bold text-slate-900 dark:text-white tracking-tight">AeroDrop</h1>
+            <div className="flex items-baseline gap-2">
+              <h1 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-white tracking-tighter">AeroDrop</h1>
+              <GradientText
+                colors={["#2563eb", "#60a5fa", "#4f46e5", "#2563eb"]}
+                animationSpeed={8}
+                className="text-[10px] md:text-xs font-bold tracking-tight opacity-90 pb-0.5"
+              >
+                @Tianzora
+              </GradientText>
+            </div>
           </div>
         </div>
       </header>
@@ -159,7 +169,7 @@ const App: React.FC = () => {
         
         <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
           <p className="text-[10px] md:text-xs text-slate-400 dark:text-slate-600">
-            Powered by WebRTC. 数据直接在设备间点对点传输，不经过云端存储。 @Tianzora
+            Powered by WebRTC. 数据直接在设备间点对点传输，不经过云端存储。
           </p>
         </div>
       </main>
