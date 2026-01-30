@@ -6,6 +6,7 @@ import { Share, DownloadCloud, Bell, Monitor, Package, Loader2 } from 'lucide-re
 // import { ScreenShare } from './components/ScreenShare';
 import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
+import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 
 // Lazy load components with named exports
 const Sender = lazy(() => import('./components/Sender').then(module => ({ default: module.Sender })));
@@ -177,6 +178,7 @@ const App: React.FC = () => {
           </p>
         </div>
       </main>
+      <PWAInstallPrompt />
     </div>
   );
 };
