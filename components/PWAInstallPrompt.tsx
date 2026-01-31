@@ -14,12 +14,10 @@ export const PWAInstallPrompt: React.FC = () => {
 
     // Android / Desktop
     const handleBeforeInstallPrompt = (e: Event) => {
-      // 不调用 e.preventDefault()，允许浏览器显示原生的安装提示 (Mini-infobar)
-      // e.preventDefault();
+      e.preventDefault();
       setDeferredPrompt(e);
-
-      // 不自动弹出自定义 UI，完全依赖浏览器的原生提示
-      // setTimeout(() => setShowPrompt(true), 3000);
+      // Wait a bit before showing to not be intrusive immediately
+      setTimeout(() => setShowPrompt(true), 1000);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -33,7 +31,7 @@ export const PWAInstallPrompt: React.FC = () => {
     if (isIosDevice && !isStandalone) {
       setIsIOS(true);
       // Show iOS prompt after a delay
-      setTimeout(() => setShowPrompt(true), 3000);
+      setTimeout(() => setShowPrompt(true), 1000);
     }
 
     return () => {
