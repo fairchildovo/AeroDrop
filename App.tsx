@@ -12,6 +12,7 @@ interface NetworkCheckResponse {
   isRisk: boolean;
   reason: 'isp' | 'score' | null;
   details: string;
+  isp: string;
 }
 
 // Lazy load components with named exports

@@ -12,6 +12,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         isRisk: false,
         reason: null,
         details: "Local development or CF object missing",
+        isp: "Local Dev",
       }),
       {
         headers: {
@@ -39,7 +40,8 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     "server",
   ];
 
-  const isp = (cf.asOrganization as string || "").toLowerCase();
+  const originalIsp = (cf.asOrganization as string) || "Unknown";
+  const isp = originalIsp.toLowerCase();
   const threatScore = (cf.threatScore as number) || 0;
 
   let isRisk = false;
@@ -52,7 +54,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   if (isCloudProvider) {
     isRisk = true;
     reason = "isp";
-    details = cf.asOrganization as string;
+    details = originalIsp;
   }
   // Condition B: Threat Score Check
   else if (threatScore > 10) {
@@ -66,6 +68,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       isRisk,
       reason,
       details,
+      isp: originalIsp,
     }),
     {
       headers: {
