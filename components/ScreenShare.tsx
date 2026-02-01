@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Monitor, StopCircle, Play, AlertCircle, Copy, Check, ExternalLink, Eye, Loader2, RefreshCw, X, MonitorUp } from 'lucide-react';
-import Peer, { MediaConnection } from 'peerjs';
+import Peer, { MediaConnection, DataConnection } from 'peerjs';
 import { getIceConfig } from '../services/stunService';
 
 interface ScreenShareProps {
@@ -40,7 +40,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   
   const activeCallsRef = useRef<MediaConnection[]>([]);
 
-  
+  // 存储所有连接的观看者的数据通道（用于广播画质状态）
+  const activeDataConnectionsRef = useRef<DataConnection[]>([]);
+  // 观看者端：存储与分享者的数据通道
+  const dataConnectionRef = useRef<DataConnection | null>(null);
+
+
   const audioContextRef = useRef<AudioContext | null>(null);
 
   
@@ -48,22 +53,24 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   
   const [qualityLevel, setQualityLevel] = useState<'high' | 'medium' | 'low'>('high');
+  // 观看者端：当前的画质状态
+  const [remoteQuality, setRemoteQuality] = useState<'high' | 'medium' | 'low'>('high');
 
-  
+
   const qualityLevelRef = useRef<'high' | 'medium' | 'low'>('high');
 
   
   const qualityLabels = useMemo(() => ({
-    high: '高清',
-    medium: '标清',
+    high: '原画',
+    medium: '高清',
     low: '流畅',
   }), []);
 
-  
+
   const bitrateLimits = useMemo(() => ({
-    high: { min: 2500000, max: 8000000 },    
-    medium: { min: 1000000, max: 2500000 },  
-    low: { min: 300000, max: 1000000 },      
+    high: { min: 1000000, max: 50000000 },    // 原画：最大 50Mbps，最小检测阈值 1Mbps
+    medium: { min: 500000, max: 2500000 },    // 高清：最大 2.5Mbps
+    low: { min: 100000, max: 1000000 },       // 流畅：最大 1Mbps
   }), []);
 
   
@@ -80,16 +87,26 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         params.encodings = [{}];
       }
 
-      const limits = bitrateLimits[level];
-      params.encodings[0].maxBitrate = limits.max;
 
-      
-      if (level === 'low') {
-        params.encodings[0].scaleResolutionDownBy = 2;
-      } else if (level === 'medium') {
-        params.encodings[0].scaleResolutionDownBy = 1.5;
-      } else {
+      if (level === 'high') {
+        // 原画模式：显式设置极高码率 (50Mbps)
+        // 提升至 50Mbps 以彻底消除 1080p60fps 下的动态画面涂抹
+        params.encodings[0].maxBitrate = 50000000;
         params.encodings[0].scaleResolutionDownBy = 1;
+
+        // 尝试设置编码优先级
+        if ('networkPriority' in params.encodings[0]) {
+          (params.encodings[0] as any).networkPriority = 'high';
+        }
+      } else {
+        const limits = bitrateLimits[level];
+        params.encodings[0].maxBitrate = limits.max;
+
+        if (level === 'low') {
+          params.encodings[0].scaleResolutionDownBy = 2;
+        } else if (level === 'medium') {
+          params.encodings[0].scaleResolutionDownBy = 1.5;
+        }
       }
 
       try {
@@ -101,12 +118,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, [bitrateLimits]);
 
-  
+
   useEffect(() => {
     qualityLevelRef.current = qualityLevel;
+
+    // 当画质改变时，广播给所有连接的观看者
+    activeDataConnectionsRef.current.forEach(conn => {
+      if (conn.open) {
+        conn.send({ type: 'quality', value: qualityLevel });
+      }
+    });
   }, [qualityLevel]);
 
-  
+
   const startBandwidthMonitoring = useCallback((call: MediaConnection) => {
     const pc = call.peerConnection;
     if (!pc) return;
@@ -146,8 +170,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         const currentQuality = qualityLevelRef.current;
         const limits = bitrateLimits[currentQuality];
 
-        
-        if (packetLossRate > 0.05 || currentBitrate < limits.min * 0.7) {
+
+
+        // 优化带宽检测逻辑：
+        // 1. 丢包率 > 5% 直接降级
+        // 2. 只有在有丢包发生（> 0.5%）且码率过低时才认为是带宽不足（避免静止画面低码率误判）
+        if (packetLossRate > 0.05 || (packetLossRate > 0.005 && currentBitrate < limits.min * 0.7)) {
           consecutiveLowBandwidth++;
           consecutiveHighBandwidth = 0;
 
@@ -155,17 +183,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             if (currentQuality === 'high') {
               setQualityLevel('medium');
               await applyBitrateConstraints(pc, 'medium');
-              onNotification('网络较慢，已降低画质', 'info');
+              onNotification('网络较差，已自动调整为高清画质', 'info');
             } else if (currentQuality === 'medium') {
               setQualityLevel('low');
               await applyBitrateConstraints(pc, 'low');
-              onNotification('网络不佳，已切换到低画质', 'info');
+              onNotification('网络拥堵，已切换到流畅模式', 'info');
             }
             consecutiveLowBandwidth = 0;
           }
         }
-        
-        else if (packetLossRate < 0.01 && currentBitrate > limits.max * 0.8) {
+
+        else if (packetLossRate < 0.005) { // 只有丢包率极低时才考虑升级
           consecutiveHighBandwidth++;
           consecutiveLowBandwidth = 0;
 
@@ -173,11 +201,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             if (currentQuality === 'low') {
               setQualityLevel('medium');
               await applyBitrateConstraints(pc, 'medium');
-              onNotification('网络恢复，已提升画质', 'info');
+              onNotification('网络好转，已恢复高清画质', 'info');
             } else if (currentQuality === 'medium') {
               setQualityLevel('high');
               await applyBitrateConstraints(pc, 'high');
-              onNotification('网络良好，已切换到高画质', 'info');
+              onNotification('网络良好，已切换回原画模式', 'info');
             }
             consecutiveHighBandwidth = 0;
           }
@@ -234,6 +262,26 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setPeerId(openedId);
       setIsPeerReady(true);
       onNotification(`连接 ID: ${openedId}`, 'info');
+    });
+
+    // 监听传入的数据连接（用于发送画质状态给观看者）
+    peer.on('connection', (conn) => {
+      console.log('Data connection received');
+      activeDataConnectionsRef.current.push(conn);
+
+      conn.on('open', () => {
+        // 连接建立后立即发送当前画质
+        conn.send({ type: 'quality', value: qualityLevelRef.current });
+      });
+
+      conn.on('close', () => {
+        activeDataConnectionsRef.current = activeDataConnectionsRef.current.filter(c => c !== conn);
+      });
+
+      conn.on('error', (err) => {
+        console.error('Data connection error:', err);
+        activeDataConnectionsRef.current = activeDataConnectionsRef.current.filter(c => c !== conn);
+      });
     });
 
     peer.on('call', (call) => {
@@ -348,6 +396,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       mediaConnectionRef.current = null;
     }
 
+    if (dataConnectionRef.current) {
+      dataConnectionRef.current.close();
+      dataConnectionRef.current = null;
+    }
+
     if (peerRef.current) {
       peerRef.current.destroy();
       peerRef.current = null;
@@ -395,7 +448,28 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peer.on('open', () => {
       console.log('Viewer peer opened, calling:', sharerId);
 
-      
+      // 1. 建立数据连接（用于接收画质信息）
+      const dataConn = peer.connect(sharerId);
+
+      dataConn.on('open', () => {
+        console.log('Data connection opened');
+      });
+
+      dataConn.on('data', (data: any) => {
+        console.log('Received data:', data);
+        if (data && data.type === 'quality' && data.value) {
+          setRemoteQuality(data.value as 'high' | 'medium' | 'low');
+        }
+      });
+
+      dataConn.on('error', (err) => {
+        console.error('Data connection error:', err);
+      });
+
+      dataConnectionRef.current = dataConn;
+
+
+      // 2. 建立媒体连接
       const dummyStream = createDummyStream();
 
       
@@ -580,7 +654,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (bandwidthMonitorRef.current) {
         clearInterval(bandwidthMonitorRef.current);
       }
-      
+
+      // 清理数据连接
+      if (dataConnectionRef.current) {
+        dataConnectionRef.current.close();
+      }
+      activeDataConnectionsRef.current.forEach(conn => conn.close());
+      activeDataConnectionsRef.current = [];
+
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -614,17 +695,28 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
 
     try {
-      
+
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always',
           displaySurface: 'monitor',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60 }
         } as MediaTrackConstraints,
-        audio: true, 
+        audio: true,
       });
 
-      
-      
+      // 关键优化：设置 contentHint 为 'detail'
+      // 这告诉 WebRTC 编码器这是“详细内容”（如文字、代码），应优先保证清晰度而不是流畅度
+      // 浏览器会自动降低帧率来保证画面不模糊
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack && 'contentHint' in videoTrack) {
+        (videoTrack as any).contentHint = 'detail';
+      }
+
+
+
       streamRef.current = stream;
 
       
@@ -662,16 +754,24 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   
   const changeScreenSource = async () => {
     try {
-      
+
       const newStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always',
           displaySurface: 'monitor',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60 }
         } as MediaTrackConstraints,
         audio: true,
       });
 
-      
+      const videoTrack = newStream.getVideoTracks()[0];
+      if (videoTrack && 'contentHint' in videoTrack) {
+        (videoTrack as any).contentHint = 'detail';
+      }
+
+
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -722,13 +822,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   
   const stopScreenShare = () => {
-    
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
 
-    
+    // 关闭所有数据连接
+    activeDataConnectionsRef.current.forEach(conn => conn.close());
+    activeDataConnectionsRef.current = [];
+
+
     if (peerRef.current) {
       peerRef.current.destroy();
       peerRef.current = null;
@@ -871,7 +975,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                 <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
               </span>
               <span className="text-sm font-medium text-green-600 dark:text-green-400">
-                正在观看屏幕共享...
+                正在观看屏幕共享 | 画质: {qualityLabels[remoteQuality]}
               </span>
             </div>
           </>
