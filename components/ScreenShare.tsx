@@ -56,12 +56,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const reconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 5;
 
-  // 自动重连相关
-  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const isManualStopRef = useRef(false);
-  const reconnectAttemptsRef = useRef(0);
-  const MAX_RECONNECT_ATTEMPTS = 5;
-
 
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -140,7 +134,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       try {
         await videoSender.setParameters(params);
-        console.log(`Applied ${level} quality bitrate: ${limits.max / 1000000}Mbps`);
+        console.log(`Applied ${level} quality bitrate: ${bitrateLimits[level].max / 1000000}Mbps`);
       } catch (err) {
         console.error('Failed to set bitrate parameters:', err);
       }
