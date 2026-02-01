@@ -13,6 +13,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         reason: null,
         details: "Local development or CF object missing",
         isp: "Local Dev",
+        country: "CN", // Default to CN for local dev to avoid risk flag
       }),
       {
         headers: {
@@ -42,10 +43,11 @@ export const onRequest: PagesFunction<Env> = async (context) => {
 
   const originalIsp = (cf.asOrganization as string) || "Unknown";
   const isp = originalIsp.toLowerCase();
+  const country = (cf.country as string) || "Unknown";
   const threatScore = (cf.threatScore as number) || 0;
 
   let isRisk = false;
-  let reason: "isp" | "score" | null = null;
+  let reason: "isp" | "score" | "location" | null = null;
   let details = "";
 
   // Condition A: ISP Check
@@ -56,7 +58,13 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     reason = "isp";
     details = originalIsp;
   }
-  // Condition B: Threat Score Check
+  // Condition B: Country Check (Non-CN)
+  else if (country !== "CN") {
+    isRisk = true;
+    reason = "location";
+    details = `Non-CN Location: ${country}`;
+  }
+  // Condition C: Threat Score Check
   else if (threatScore > 10) {
     isRisk = true;
     reason = "score";
@@ -69,6 +77,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       reason,
       details,
       isp: originalIsp,
+      country,
     }),
     {
       headers: {

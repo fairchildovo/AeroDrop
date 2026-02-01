@@ -10,9 +10,10 @@ import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 
 interface NetworkCheckResponse {
   isRisk: boolean;
-  reason: 'isp' | 'score' | null;
+  reason: 'isp' | 'score' | 'location' | null;
   details: string;
   isp: string;
+  country: string;
 }
 
 // Lazy load components with named exports
