@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Monitor, StopCircle, Play, AlertCircle, Copy, Check, ExternalLink, Eye, Loader2, RefreshCw, X, MonitorUp } from 'lucide-react';
 import Peer, { MediaConnection } from 'peerjs';
+import { getIceConfig } from '../services/stunService';
 
 interface ScreenShareProps {
   onNotification: (message: string, type: 'success' | 'info' | 'error') => void;
@@ -212,14 +213,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, []);
 
   
-  const initializePeer = useCallback(() => {
+  const initializePeer = useCallback(async () => {
     if (peerRef.current) {
       peerRef.current.destroy();
     }
 
+    const iceConfig = await getIceConfig();
     const id = generatePeerId();
     const peer = new Peer(id, {
       debug: 0,
+      secure: iceConfig.secure,
+      config: {
+        iceServers: iceConfig.iceServers,
+        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize
+      }
     });
 
     peer.on('open', (openedId) => {
@@ -358,8 +365,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, []);
 
   
-  const connectToSharer = useCallback((sharerId: string) => {
-    
+  const connectToSharer = useCallback(async (sharerId: string) => {
+
     if (peerRef.current) {
       peerRef.current.destroy();
       peerRef.current = null;
@@ -373,8 +380,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setIsConnecting(true);
     setTargetSharerId(sharerId);
 
+    const iceConfig = await getIceConfig();
     const peer = new Peer({
       debug: 0,
+      secure: iceConfig.secure,
+      config: {
+        iceServers: iceConfig.iceServers,
+        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize
+      }
     });
 
     peerRef.current = peer;
