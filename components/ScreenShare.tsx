@@ -276,7 +276,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       secure: iceConfig.secure,
       config: {
         iceServers: iceConfig.iceServers,
-        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize
+        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+        iceTransportPolicy: 'all', // 强制使用所有可能的传输路径，包括 VPN 虚拟网卡
       }
     });
 
@@ -541,7 +542,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       secure: iceConfig.secure,
       config: {
         iceServers: iceConfig.iceServers,
-        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize
+        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+        iceTransportPolicy: 'all',
       }
     });
 
@@ -621,9 +623,33 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         const audioTracks = remoteStream.getAudioTracks();
         const videoTracks = remoteStream.getVideoTracks();
 
-        // 尝试修改 SDP 以移除带宽限制 (Hack)
-        // 注意：PeerJS 封装较深，直接修改 SDP 比较困难，我们主要依靠 sender parameters
-        // 但我们可以确保接收端不主动限制带宽
+        // 关键优化：移除播放缓冲延迟 (Jitter Buffer)
+        // 跨网络时，浏览器默认会有较大的抖动缓冲，导致"追赶"现象
+        // 强制接收端尽可能实时播放
+        if (typeof (window as any).RTCRtpReceiver !== 'undefined' && 'playoutDelayHint' in (window as any).RTCRtpReceiver.prototype) {
+           // 注意：这里我们无法直接获取 receiver 实例，只能尝试通过 track 设置
+           // 但实际上 playoutDelayHint 是 receiver 的属性。
+           // 对于 PeerJS，我们可以在 on('track') 时处理，但这里我们通过 hack 方式：
+           // 如果浏览器支持，在 video 元素上也尽量设置低延迟属性
+        }
+
+        // 补充：直接设置接收端 receiver 的 playoutDelayHint
+        // 我们需要遍历 peer connection 的 receivers
+        if (peerRef.current) {
+           Object.values(peerRef.current.connections).forEach((conns: any) => {
+              conns.forEach((conn: any) => {
+                 if (conn.peerConnection) {
+                    const receivers = conn.peerConnection.getReceivers();
+                    receivers.forEach((receiver: any) => {
+                       if (receiver.track?.kind === 'video' && 'playoutDelayHint' in receiver) {
+                          receiver.playoutDelayHint = 0; // 0 表示尽可能实时
+                          console.log('Set playoutDelayHint to 0 for real-time latency');
+                       }
+                    });
+                 }
+              });
+           });
+        }
 
         console.log('Received remote stream:', {
           audioTracks: audioTracks.length,
@@ -868,12 +894,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         audio: true,
       });
 
-      // 关键优化：设置 contentHint 为 'detail'
-      // 这告诉 WebRTC 编码器这是“详细内容”（如文字、代码），应优先保证清晰度而不是流畅度
-      // 浏览器会自动降低帧率来保证画面不模糊
+      // 关键优化：设置 contentHint 为 'motion' 以减少卡顿
+      // 虽然 'detail' 清晰度高，但在跨网传输时容易因重传导致累积延迟（"弹动"现象）
+      // 改为 'motion' 或 'text' 并配合 playoutDelayHint 可以缓解
+      // 这里我们保留 'detail' 但通过接收端控制延迟
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack && 'contentHint' in videoTrack) {
-        (videoTrack as any).contentHint = 'detail';
+        (videoTrack as any).contentHint = 'motion'; // 权衡：motion 会更流畅，但静态文字可能略有压缩
       }
 
 
@@ -929,7 +956,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       const videoTrack = newStream.getVideoTracks()[0];
       if (videoTrack && 'contentHint' in videoTrack) {
-        (videoTrack as any).contentHint = 'detail';
+        (videoTrack as any).contentHint = 'motion';
       }
 
 
