@@ -45,6 +45,23 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 观看者端：存储与分享者的数据通道
   const dataConnectionRef = useRef<DataConnection | null>(null);
 
+  // 存储观看者的心跳时间戳 { peerId: timestamp }
+  const viewerHeartbeatsRef = useRef<Record<string, number>>({});
+  // 观看者端：心跳定时器
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 自动重连相关
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isManualStopRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
+
+  // 自动重连相关
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isManualStopRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
+
 
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -266,21 +283,33 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     // 监听传入的数据连接（用于发送画质状态给观看者）
     peer.on('connection', (conn) => {
-      console.log('Data connection received');
+      console.log('Data connection received from:', conn.peer);
       activeDataConnectionsRef.current.push(conn);
+
+      // 初始化该观看者的心跳时间
+      viewerHeartbeatsRef.current[conn.peer] = Date.now();
 
       conn.on('open', () => {
         // 连接建立后立即发送当前画质
         conn.send({ type: 'quality', value: qualityLevelRef.current });
       });
 
+      conn.on('data', (data: any) => {
+        if (data && data.type === 'heartbeat') {
+          // 更新心跳时间戳
+          viewerHeartbeatsRef.current[conn.peer] = Date.now();
+        }
+      });
+
       conn.on('close', () => {
         activeDataConnectionsRef.current = activeDataConnectionsRef.current.filter(c => c !== conn);
+        delete viewerHeartbeatsRef.current[conn.peer];
       });
 
       conn.on('error', (err) => {
         console.error('Data connection error:', err);
         activeDataConnectionsRef.current = activeDataConnectionsRef.current.filter(c => c !== conn);
+        delete viewerHeartbeatsRef.current[conn.peer];
       });
     });
 
@@ -329,8 +358,45 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     return peer;
   }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, stopBandwidthMonitoring]);
 
-  
-  
+
+  // 分享者端：定期检查观看者心跳，移除断开的连接
+  useEffect(() => {
+    if (!isSharing) return;
+
+    const checkInterval = setInterval(() => {
+      const now = Date.now();
+      const timeoutThreshold = 10000; // 10秒未收到心跳视为断开
+
+      const deadPeers: string[] = [];
+
+      // 检查所有活跃的数据连接
+      activeDataConnectionsRef.current.forEach(conn => {
+        const lastHeartbeat = viewerHeartbeatsRef.current[conn.peer];
+        if (lastHeartbeat && now - lastHeartbeat > timeoutThreshold) {
+          console.log(`Viewer ${conn.peer} timed out, closing connection`);
+          deadPeers.push(conn.peer);
+          conn.close();
+        }
+      });
+
+      if (deadPeers.length > 0) {
+        // 关闭对应的媒体连接
+        activeCallsRef.current.forEach(call => {
+          if (deadPeers.includes(call.peer)) {
+            call.close();
+          }
+        });
+
+        // 注意：call.close() 会触发 'close' 事件监听器，那里会更新 viewerCount
+        // 但为了保险起见，我们也可以在这里做一次清理（虽然事件监听器应该处理了）
+      }
+    }, 5000); // 每5秒检查一次
+
+    return () => clearInterval(checkInterval);
+  }, [isSharing]);
+
+
+
   const createDummyStream = useCallback(() => {
     
     if (audioContextRef.current) {
@@ -390,7 +456,21 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, []);
 
   
-  const stopViewing = useCallback(() => {
+  const stopViewing = useCallback((isManual = true) => {
+    // 标记是否为手动停止
+    isManualStopRef.current = isManual;
+
+    // 清除重连定时器
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+
     if (mediaConnectionRef.current) {
       mediaConnectionRef.current.close();
       mediaConnectionRef.current = null;
@@ -413,12 +493,23 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     streamRef.current = null;
     setIsViewing(false);
     setIsConnecting(false);
-    setTargetSharerId(null);
-    setError(null);
+
+    // 只有手动停止时才清除目标ID，方便重连
+    if (isManual) {
+      setTargetSharerId(null);
+      setError(null);
+      reconnectAttemptsRef.current = 0;
+    }
   }, []);
 
   
-  const connectToSharer = useCallback(async (sharerId: string) => {
+  const connectToSharer = useCallback(async (sharerId: string, isRetry = false) => {
+
+    // 如果是新的连接请求（非重连），重置重连计数
+    if (!isRetry) {
+      reconnectAttemptsRef.current = 0;
+      isManualStopRef.current = false;
+    }
 
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -432,6 +523,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setError(null);
     setIsConnecting(true);
     setTargetSharerId(sharerId);
+
+    // 如果是重连尝试，显示正在重连的状态
+    if (isRetry) {
+      onNotification(`正在尝试重连 (${reconnectAttemptsRef.current + 1}/${MAX_RECONNECT_ATTEMPTS})...`, 'info');
+    }
 
     const iceConfig = await getIceConfig();
     const peer = new Peer({
@@ -447,12 +543,22 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('open', () => {
       console.log('Viewer peer opened, calling:', sharerId);
+      // 连接成功，重置重连计数
+      reconnectAttemptsRef.current = 0;
 
-      // 1. 建立数据连接（用于接收画质信息）
+      // 1. 建立数据连接（用于接收画质信息 和 发送心跳）
       const dataConn = peer.connect(sharerId);
 
       dataConn.on('open', () => {
         console.log('Data connection opened');
+
+        // 启动心跳发送（每3秒一次）
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (dataConn.open) {
+            dataConn.send({ type: 'heartbeat' });
+          }
+        }, 3000);
       });
 
       dataConn.on('data', (data: any) => {
@@ -527,15 +633,43 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       call.on('close', () => {
         clearTimeout(connectionTimeout);
         console.log('Call closed');
-        stopViewing();
-        onNotification('屏幕共享已结束', 'info');
+
+        // 只有非手动停止时，才触发重连逻辑
+        if (!isManualStopRef.current) {
+          console.log('Unexpected disconnection, attempting reconnect...');
+          stopViewing(false); // 不清除 targetId
+
+          if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttemptsRef.current += 1;
+            const delay = Math.min(2000 * reconnectAttemptsRef.current, 10000); // 指数退避
+
+            reconnectTimerRef.current = setTimeout(() => {
+              connectToSharer(sharerId, true);
+            }, delay);
+
+            setError(`连接断开，${delay/1000}秒后尝试重连...`);
+          } else {
+            setError('连接断开，已达到最大重试次数，请手动重试');
+            onNotification('屏幕共享连接断开', 'error');
+          }
+        } else {
+          stopViewing(true);
+          onNotification('屏幕共享已结束', 'info');
+        }
       });
 
       call.on('error', (err) => {
         clearTimeout(connectionTimeout);
         console.error('Call error:', err);
-        setError(`连接失败: ${err.message}`);
-        setIsConnecting(false);
+
+        if (!isManualStopRef.current) {
+           stopViewing(false);
+           // 这里也可以触发重连，逻辑同上
+           setError(`连接发生错误: ${err.message}`);
+        } else {
+           setError(`连接失败: ${err.message}`);
+           setIsConnecting(false);
+        }
       });
 
       mediaConnectionRef.current = call;
@@ -543,6 +677,21 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('error', (err) => {
       console.error('Peer error:', err);
+
+      // 处理特定的 PeerJS 错误，尝试重连
+      if (!isManualStopRef.current && (err.type === 'network' || err.type === 'peer-unavailable' || err.type === 'disconnected')) {
+         if (err.type === 'peer-unavailable' && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+             // 可能是分享者暂时掉线，稍后重试
+             stopViewing(false);
+             reconnectAttemptsRef.current += 1;
+             reconnectTimerRef.current = setTimeout(() => {
+                connectToSharer(sharerId, true);
+             }, 3000);
+             setError('连接中断，正在尝试重新连接...');
+             return;
+         }
+      }
+
       if (err.type === 'peer-unavailable') {
         setError('找不到该分享者，请确认连接 ID 是否正确或分享者仍在共享');
       } else {
@@ -661,6 +810,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       activeDataConnectionsRef.current.forEach(conn => conn.close());
       activeDataConnectionsRef.current = [];
+      viewerHeartbeatsRef.current = {};
 
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
@@ -831,6 +981,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     // 关闭所有数据连接
     activeDataConnectionsRef.current.forEach(conn => conn.close());
     activeDataConnectionsRef.current = [];
+    viewerHeartbeatsRef.current = {};
 
 
     if (peerRef.current) {
@@ -962,7 +1113,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
             <div className="flex justify-center">
               <button
-                onClick={stopViewing}
+                onClick={stopViewing.bind(null, true)}
                 className="flex items-center justify-center gap-3 w-full max-w-xs bg-red-500 hover:bg-red-600 text-white font-bold py-3.5 px-6 rounded-xl shadow-lg shadow-red-500/25 transition-all duration-200 hover:shadow-xl hover:shadow-red-500/30 hover:-translate-y-0.5"
               >
                 <StopCircle size={20} />
