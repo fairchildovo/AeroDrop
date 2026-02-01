@@ -55,6 +55,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const isManualStopRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 5;
+  // 观看者端：连接过程的全局超时定时器
+  const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -152,6 +154,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
     });
   }, [qualityLevel]);
+
+
+  // 监听连接状态，一旦结束连接过程（无论是成功还是失败），就清除超时定时器
+  useEffect(() => {
+    if (!isConnecting && connectingTimeoutRef.current) {
+      clearTimeout(connectingTimeoutRef.current);
+      connectingTimeoutRef.current = null;
+    }
+  }, [isConnecting]);
 
 
   const startBandwidthMonitoring = useCallback((call: MediaConnection) => {
@@ -273,11 +284,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const id = generatePeerId();
     const peer = new Peer(id, {
       debug: 0,
-      secure: iceConfig.secure,
+      secure: false, // 尝试禁用 SSL，避免 VPN 环境下的证书或握手问题
+      pingInterval: 5000, // 缩短心跳间隔以保持 VPN 隧道活跃
       config: {
         iceServers: iceConfig.iceServers,
         iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
-        iceTransportPolicy: 'all', // 强制使用所有可能的传输路径，包括 VPN 虚拟网卡
+        iceTransportPolicy: 'all',
       }
     });
 
@@ -467,7 +479,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     // 标记是否为手动停止
     isManualStopRef.current = isManual;
 
-    // 清除重连定时器
+    if (connectingTimeoutRef.current) {
+      clearTimeout(connectingTimeoutRef.current);
+      connectingTimeoutRef.current = null;
+    }
+
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -531,6 +547,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setIsConnecting(true);
     setTargetSharerId(sharerId);
 
+    // 设置全局连接超时 (8秒)
+    // 如果 8 秒内没有建立连接（没有进入 isViewing 状态），则强制超时
+    if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
+    connectingTimeoutRef.current = setTimeout(() => {
+      // 检查是否还在连接中（如果没有成功进入 viewing，且没有被手动取消）
+      // 注意：这里无法直接访问最新的 state，但可以通过清理函数触发
+      console.log('Global connection timed out');
+      setError('连接超时，无法建立 P2P 通道，请检查网络或防火墙');
+      setIsConnecting(false);
+      // 触发一次清理，但不标记为手动停止，以便允许用户重试
+      stopViewing(false);
+    }, 8000);
+
     // 如果是重连尝试，显示正在重连的状态
     if (isRetry) {
       onNotification(`正在尝试重连 (${reconnectAttemptsRef.current + 1}/${MAX_RECONNECT_ATTEMPTS})...`, 'info');
@@ -539,7 +568,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const iceConfig = await getIceConfig();
     const peer = new Peer({
       debug: 0,
-      secure: iceConfig.secure,
+      secure: false,
+      pingInterval: 5000,
       config: {
         iceServers: iceConfig.iceServers,
         iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
