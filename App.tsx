@@ -2,11 +2,17 @@ import React, { useState, useEffect, lazy, Suspense } from 'react';
 // import { Sender } from './components/Sender';
 // import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Bell, Monitor, Package, Loader2 } from 'lucide-react';
+import { Share, DownloadCloud, Bell, Monitor, Package, Loader2, ShieldAlert, X } from 'lucide-react';
 // import { ScreenShare } from './components/ScreenShare';
 import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
+
+interface NetworkCheckResponse {
+  isRisk: boolean;
+  reason: 'isp' | 'score' | null;
+  details: string;
+}
 
 // Lazy load components with named exports
 const Sender = lazy(() => import('./components/Sender').then(module => ({ default: module.Sender })));
@@ -18,6 +24,38 @@ const App: React.FC = () => {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [initialCode, setInitialCode] = useState<string>('');
   const [initialViewId, setInitialViewId] = useState<string>('');
+  const [showRiskBanner, setShowRiskBanner] = useState(false);
+  const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
+
+  useEffect(() => {
+    const checkNetwork = async () => {
+      try {
+        const res = await fetch('/api/network-check');
+
+        // Check if the response is JSON (Cloudflare Functions return JSON)
+        // In local Vite dev without wrangler, this returns index.html (text/html)
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+            console.log("Network check skipped: API not available in local Vite dev.");
+            // 本地调试强制显示 Banner (模拟高风险环境)
+            if (import.meta.env.DEV) {
+               console.log("Local Dev Mode: Simulating Risk Banner");
+               setShowRiskBanner(true);
+            }
+            return;
+        }
+
+        const data = await res.json() as NetworkCheckResponse;
+        console.log('Network Check Result:', data);
+        if (data.isRisk) {
+          setShowRiskBanner(true);
+        }
+      } catch (error) {
+        console.error('Failed to check network status:', error);
+      }
+    };
+    checkNetwork();
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -101,8 +139,69 @@ const App: React.FC = () => {
               </GradientText>
             </div>
           </div>
+
+          {showRiskBanner && (
+            <>
+              {/* Desktop Badge */}
+              <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
+                <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                  检测到代理网络，点对点传输和屏幕共享可能失效,建议关闭代理
+                </span>
+                <button
+                  onClick={() => setShowRiskBanner(false)}
+                  className="ml-1 p-0.5 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
+                  aria-label="关闭警告"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              {/* Mobile Icon Button */}
+              <button
+                className={`sm:hidden p-2 rounded-full transition-colors relative ${
+                  isRiskBannerExpanded
+                    ? 'bg-amber-100 dark:bg-amber-800/50 text-amber-600 dark:text-amber-400'
+                    : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
+                }`}
+                onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
+                aria-label="查看网络警告"
+              >
+                <ShieldAlert className="w-5 h-5" />
+                {/* 优化后的小红点 */}
+                {!isRiskBannerExpanded && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-slate-900"></span>
+                )}
+              </button>
+            </>
+          )}
         </div>
       </header>
+
+      {/* Mobile only banner - Expandable */}
+      {showRiskBanner && isRiskBannerExpanded && (
+        <div className="sm:hidden bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 dark:border-amber-800 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm">
+          <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <div className="flex-1">
+             <p className="text-xs font-medium text-amber-800 dark:text-amber-200 mb-1">
+                网络环境受限
+             </p>
+             <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
+                检测到代理网络，点对点传输和屏幕共享可能失效,建议关闭代理
+             </p>
+          </div>
+          <button
+            onClick={() => {
+              setIsRiskBannerExpanded(false);
+              // 可选：如果想在手机上点击关闭后彻底不再显示，可以把下面这行解开
+              // setShowRiskBanner(false);
+            }}
+            className="p-1 -mr-1 -mt-1 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
 

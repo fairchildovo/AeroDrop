@@ -16,6 +16,7 @@
     "streamsaver": "^2.0.6"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260131.0",
     "@tailwindcss/vite": "^4.1.18",
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.10",
