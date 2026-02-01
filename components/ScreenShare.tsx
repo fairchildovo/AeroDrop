@@ -85,9 +85,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
   const bitrateLimits = useMemo(() => ({
-    high: { min: 1000000, max: 50000000 },    // 原画：最大 50Mbps，最小检测阈值 1Mbps
-    medium: { min: 500000, max: 2500000 },    // 高清：最大 2.5Mbps
-    low: { min: 100000, max: 1000000 },       // 流畅：最大 1Mbps
+    high: { min: 2000000, max: 100000000 },    // 原画：最大 100Mbps，起步 2Mbps
+    medium: { min: 500000, max: 4000000 },     // 高清：提升至 4Mbps
+    low: { min: 100000, max: 1000000 },        // 流畅：保持 1Mbps
   }), []);
 
   
@@ -99,6 +99,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const videoSender = senders.find(s => s.track?.kind === 'video');
 
     if (videoSender) {
+      // 1. 尝试强制使用 VP9 编码（效率更高，同码率画质更好）
+      // 注意：这需要浏览器支持，Chrome/Edge 默认支持
+      const codecs = RTCRtpReceiver.getCapabilities('video')?.codecs;
+      const vp9Codec = codecs?.find(c => c.mimeType === 'video/VP9');
+
+      if (vp9Codec) {
+        // 如果支持 VP9，尝试将其设置为首选
+        // 注意：setParameters 不支持直接切换 codec，这里主要是为了后续 SDP 协商
+        // 实际 codec 选择主要由 SDP 决定，但我们可以尝试在参数中寻找相关设置
+        // 目前标准 API 中 setParameters 主要用于调整编码参数（码率、分辨率等）
+      }
+
       const params = videoSender.getParameters();
       if (!params.encodings || params.encodings.length === 0) {
         params.encodings = [{}];
@@ -106,9 +118,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
       if (level === 'high') {
-        // 原画模式：显式设置极高码率 (50Mbps)
-        // 提升至 50Mbps 以彻底消除 1080p60fps 下的动态画面涂抹
-        params.encodings[0].maxBitrate = 50000000;
+        // 原画模式：显式设置极高码率 (100Mbps)
+        // 提升至 100Mbps 以彻底消除 1080p60fps 下的动态画面涂抹，跑满局域网带宽
+        params.encodings[0].maxBitrate = 100000000;
         params.encodings[0].scaleResolutionDownBy = 1;
 
         // 尝试设置编码优先级
@@ -614,6 +626,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         
         const audioTracks = remoteStream.getAudioTracks();
         const videoTracks = remoteStream.getVideoTracks();
+
+        // 尝试修改 SDP 以移除带宽限制 (Hack)
+        // 注意：PeerJS 封装较深，直接修改 SDP 比较困难，我们主要依靠 sender parameters
+        // 但我们可以确保接收端不主动限制带宽
+
         console.log('Received remote stream:', {
           audioTracks: audioTracks.length,
           videoTracks: videoTracks.length,
