@@ -31,7 +31,13 @@ export const PWAInstallPrompt: React.FC = () => {
     if (isIosDevice && !isStandalone) {
       setIsIOS(true);
       // Show iOS prompt after a delay
-      setTimeout(() => setShowPrompt(true), 1000);
+      setTimeout(() => {
+        setShowPrompt(true);
+        // Auto close iOS prompt after 5 seconds (giving user enough time to read)
+        // User requested 3 seconds, but strictly following it might be too fast to read instructions.
+        // However, I will follow the user's specific instruction: "三秒后自动关闭"
+        setTimeout(() => setShowPrompt(false), 3000);
+      }, 1000);
     }
 
     return () => {
