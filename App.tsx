@@ -39,7 +39,7 @@ const App: React.FC = () => {
         const contentType = res.headers.get("content-type");
         if (!contentType || !contentType.includes("application/json")) {
             console.log("Network check skipped: API not available in local Vite dev.");
-            // 本地调试强制显示 Banner (模拟高风险环境)
+            // 本地调试强制显示 Banner 
             if (import.meta.env.DEV) {
                console.log("Local Dev Mode: Simulating Risk Banner");
                setShowRiskBanner(true);
@@ -148,7 +148,7 @@ const App: React.FC = () => {
               <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
                 <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                 <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                  检测到代理网络，点对点传输和屏幕共享可能失效,建议关闭代理
+                  检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
                 </span>
                 <button
                   onClick={() => setShowRiskBanner(false)}
@@ -189,13 +189,13 @@ const App: React.FC = () => {
                 网络环境受限
              </p>
              <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
-                检测到代理网络，点对点传输和屏幕共享可能失效,建议关闭代理
+                检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
              </p>
           </div>
           <button
             onClick={() => {
               setIsRiskBannerExpanded(false);
-              // 可选：如果想在手机上点击关闭后彻底不再显示，可以把下面这行解开
+  
               // setShowRiskBanner(false);
             }}
             className="p-1 -mr-1 -mt-1 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
