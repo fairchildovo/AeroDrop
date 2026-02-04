@@ -95,12 +95,6 @@ const App: React.FC = () => {
     }, 4000);
   };
 
-  const getNavBackgroundStyle = () => {
-      if (mode === 'send') return 'translate-x-0';
-      if (mode === 'receive') return 'translate-x-[100%]';
-      return 'translate-x-[200%]';
-  };
-
   return (
     <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
       <div
@@ -210,40 +204,44 @@ const App: React.FC = () => {
         <div className="w-full max-w-xl mb-8 relative z-10">
             <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative transition-all duration-300 shadow-[0_12px_30px_rgba(0,0,0,0.08)] border border-slate-50 dark:border-slate-800">
               <div
-                  className={`absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)] transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${getNavBackgroundStyle()}`}
+                  className="absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
+                  style={{
+                    transform: `translateX(${mode === 'send' ? '0%' : mode === 'receive' ? '100%' : '200%'})`,
+                    transition: 'transform 300ms cubic-bezier(0.25, 0.8, 0.25, 1)'
+                  }}
               ></div>
 
               <button
                 onClick={() => setMode('send')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
                   mode === 'send'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
                 }`}
               >
-                <Share size={18} />
+                <Share size={18} className={`transition-transform duration-300 ${mode === 'send' ? 'scale-110' : ''}`} />
                 发送
               </button>
               <button
                 onClick={() => setMode('receive')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
                   mode === 'receive'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
                 }`}
               >
-                <DownloadCloud size={18} />
+                <DownloadCloud size={18} className={`transition-transform duration-300 ${mode === 'receive' ? 'scale-110' : ''}`} />
                 接收
               </button>
               <button
                 onClick={() => setMode('screen')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-colors duration-200 whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
                   mode === 'screen'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
                 }`}
               >
-                <Monitor size={18} />
+                <Monitor size={18} className={`transition-transform duration-300 ${mode === 'screen' ? 'scale-110' : ''}`} />
                 共享
               </button>
             </div>
