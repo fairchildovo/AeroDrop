@@ -38,6 +38,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const inputRef = useRef<HTMLInputElement>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stateRef = useRef<TransferState>(TransferState.IDLE);
+  const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -71,6 +72,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   useEffect(() => { if (initialCode) setCode(initialCode); }, [initialCode]);
 
+  const clearConnectionTimeout = () => {
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+  };
+
   const handleConnectRef = useRef<() => void>(() => {});
   useEffect(() => {
     handleConnectRef.current = handleConnect;
@@ -87,7 +95,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+      clearConnectionTimeout();
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
       abortStreams();
@@ -177,7 +185,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const setupConnListeners = (conn: DataConnection) => {
     connRef.current = conn;
     conn.on('open', () => {
-      if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+      clearConnectionTimeout();
       retryCountRef.current = 0;
     });
 
@@ -334,6 +342,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     });
 
     conn.on('close', () => {
+       clearConnectionTimeout();
        const currentState = stateRef.current;
        if (currentState === TransferState.TRANSFERRING || currentState === TransferState.WAITING_FOR_PEER) {
            setErrorMsg("连接已断开");
@@ -446,8 +455,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     setErrorMsg('');
     retryCountRef.current = 0;
 
-    if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+    clearConnectionTimeout();
     connectionTimeoutRef.current = setTimeout(() => {
+        connectionTimeoutRef.current = null;
         if (peerRef.current) peerRef.current.destroy();
         setErrorMsg("连接超时。请检查口令是否正确。");
         setState(TransferState.ERROR);
@@ -456,7 +466,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     if (peerRef.current) peerRef.current.destroy();
 
     const iceConfig = await getIceConfig();
-    const peer = new Peer({ debug: 1, config: iceConfig });
+    const peer = new Peer({ debug: peerDebugLevel, config: iceConfig });
 
     peer.on('open', () => {
       const conn = peer.connect(`aerodrop-${code}`, { reliable: true });
@@ -473,6 +483,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
              }
           }, 2000);
        } else {
+           clearConnectionTimeout();
            setErrorMsg(`连接错误: ${err.type}`);
            setState(TransferState.ERROR);
        }
@@ -516,6 +527,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const reset = () => {
     isStreamingRef.current = false;
     isTransferActiveRef.current = false;
+    clearConnectionTimeout();
     
     abortStreams().then(() => {
         if (connRef.current) connRef.current.close();

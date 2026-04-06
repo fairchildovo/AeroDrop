@@ -19,25 +19,25 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [viewerCount, setViewerCount] = useState(0);
   const [targetSharerId, setTargetSharerId] = useState<string | null>(null);
 
-  
+
   const [needsPlayClick, setNeedsPlayClick] = useState(false);
 
-  
+
   const hasInitialConnectedRef = useRef(false);
 
-  
+
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  
+
   const streamRef = useRef<MediaStream | null>(null);
 
-  
+
   const peerRef = useRef<Peer | null>(null);
 
-  
+
   const mediaConnectionRef = useRef<MediaConnection | null>(null);
 
-  
+
   const activeCallsRef = useRef<MediaConnection[]>([]);
 
   // 存储所有连接的观看者的数据通道（用于广播画质状态）
@@ -61,10 +61,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const audioContextRef = useRef<AudioContext | null>(null);
 
-  
+
   const bandwidthMonitorRef = useRef<NodeJS.Timeout | null>(null);
 
-  
+
   const [qualityLevel, setQualityLevel] = useState<'high' | 'medium' | 'low'>('high');
   // 观看者端：当前的画质状态
   const [remoteQuality, setRemoteQuality] = useState<'high' | 'medium' | 'low'>('high');
@@ -72,7 +72,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const qualityLevelRef = useRef<'high' | 'medium' | 'low'>('high');
 
-  
+
   const qualityLabels = useMemo(() => ({
     high: '原画',
     medium: '高清',
@@ -86,7 +86,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     low: { min: 100000, max: 1000000 },        // 流畅：保持 1Mbps
   }), []);
 
-  
+
   const applyBitrateConstraints = useCallback(async (
     peerConnection: RTCPeerConnection,
     level: 'high' | 'medium' | 'low'
@@ -192,15 +192,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         });
 
         const now = Date.now();
-        const timeDiff = (now - lastTimestamp) / 1000; 
+        const timeDiff = (now - lastTimestamp) / 1000;
         const bytesDiff = currentBytesSent - lastBytesSent;
-        const currentBitrate = (bytesDiff * 8) / timeDiff; 
+        const currentBitrate = (bytesDiff * 8) / timeDiff;
         const packetLossRate = packetsSent > 0 ? packetsLost / packetsSent : 0;
 
         lastBytesSent = currentBytesSent;
         lastTimestamp = now;
 
-        
+
         const currentQuality = qualityLevelRef.current;
         const limits = bitrateLimits[currentQuality];
 
@@ -252,11 +252,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
     };
 
-    
+
     bandwidthMonitorRef.current = setInterval(monitor, 2000);
   }, [bitrateLimits, applyBitrateConstraints, onNotification]);
 
-  
+
   const stopBandwidthMonitoring = useCallback(() => {
     if (bandwidthMonitorRef.current) {
       clearInterval(bandwidthMonitorRef.current);
@@ -264,7 +264,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, []);
 
-  
+
   const generatePeerId = useCallback(() => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let id = '';
@@ -274,7 +274,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     return `AERO-${id}`;
   }, []);
 
-  
+
   const initializePeer = useCallback(async () => {
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -333,14 +333,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
 
     peer.on('call', (call) => {
-      
+
       if (streamRef.current) {
         call.answer(streamRef.current);
         activeCallsRef.current.push(call);
         setViewerCount(prev => prev + 1);
         onNotification('有观看者加入', 'info');
 
-        
+
         if (call.peerConnection) {
           applyBitrateConstraints(call.peerConnection, qualityLevel);
           startBandwidthMonitoring(call);
@@ -417,13 +417,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
   const createDummyStream = useCallback(() => {
-    
+
     if (audioContextRef.current) {
       audioContextRef.current.close().catch(console.error);
       audioContextRef.current = null;
     }
 
-    
+
     const canvas = document.createElement('canvas');
     canvas.width = 1;
     canvas.height = 1;
@@ -434,34 +434,34 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
     const videoStream = canvas.captureStream(1);
 
-    
-    
+
+
     const audioContext = new AudioContext();
-    audioContextRef.current = audioContext; 
+    audioContextRef.current = audioContext;
 
     const oscillator = audioContext.createOscillator();
     const gainNode = audioContext.createGain();
 
-    
+
     gainNode.gain.value = 0;
 
-    
+
     const destination = audioContext.createMediaStreamDestination();
     oscillator.connect(gainNode);
     gainNode.connect(destination);
 
-    
+
     oscillator.start();
 
-    
+
     const combinedStream = new MediaStream();
 
-    
+
     videoStream.getVideoTracks().forEach(track => {
       combinedStream.addTrack(track);
     });
 
-    
+
     destination.stream.getAudioTracks().forEach(track => {
       combinedStream.addTrack(track);
     });
@@ -474,7 +474,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     return combinedStream;
   }, []);
 
-  
+
   const stopViewing = useCallback((isManual = true) => {
     // 标记是否为手动停止
     isManualStopRef.current = isManual;
@@ -525,7 +525,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, []);
 
-  
+
   const connectToSharer = useCallback(async (sharerId: string, isRetry = false) => {
 
     // 如果是新的连接请求（非重连），重置重连计数
@@ -616,7 +616,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       // 2. 建立媒体连接
       const dummyStream = createDummyStream();
 
-      
+
       const call = peer.call(sharerId, dummyStream);
 
       if (!call) {
@@ -625,7 +625,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         return;
       }
 
-      
+
       const connectionTimeout = setTimeout(() => {
         if (!streamRef.current) {
           setError('连接超时，请检查分享者是否仍在共享');
@@ -636,20 +636,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         }
       }, 15000);
 
-      
+
       let hasReceivedStream = false;
 
       call.on('stream', (remoteStream) => {
         clearTimeout(connectionTimeout);
 
-        
+
         if (hasReceivedStream) {
           console.log('Stream event fired again, skipping duplicate handling');
           return;
         }
         hasReceivedStream = true;
 
-        
+
         const audioTracks = remoteStream.getAudioTracks();
         const videoTracks = remoteStream.getVideoTracks();
 
@@ -657,28 +657,28 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         // 跨网络时，浏览器默认会有较大的抖动缓冲，导致"追赶"现象
         // 强制接收端尽可能实时播放
         if (typeof (window as any).RTCRtpReceiver !== 'undefined' && 'playoutDelayHint' in (window as any).RTCRtpReceiver.prototype) {
-           // 注意：这里我们无法直接获取 receiver 实例，只能尝试通过 track 设置
-           // 但实际上 playoutDelayHint 是 receiver 的属性。
-           // 对于 PeerJS，我们可以在 on('track') 时处理，但这里我们通过 hack 方式：
-           // 如果浏览器支持，在 video 元素上也尽量设置低延迟属性
+          // 注意：这里我们无法直接获取 receiver 实例，只能尝试通过 track 设置
+          // 但实际上 playoutDelayHint 是 receiver 的属性。
+          // 对于 PeerJS，我们可以在 on('track') 时处理，但这里我们通过 hack 方式：
+          // 如果浏览器支持，在 video 元素上也尽量设置低延迟属性
         }
 
         // 补充：直接设置接收端 receiver 的 playoutDelayHint
         // 我们需要遍历 peer connection 的 receivers
         if (peerRef.current) {
-           Object.values(peerRef.current.connections).forEach((conns: any) => {
-              conns.forEach((conn: any) => {
-                 if (conn.peerConnection) {
-                    const receivers = conn.peerConnection.getReceivers();
-                    receivers.forEach((receiver: any) => {
-                       if (receiver.track?.kind === 'video' && 'playoutDelayHint' in receiver) {
-                          receiver.playoutDelayHint = 0; // 0 表示尽可能实时
-                          console.log('Set playoutDelayHint to 0 for real-time latency');
-                       }
-                    });
-                 }
-              });
-           });
+          Object.values(peerRef.current.connections).forEach((conns: any) => {
+            conns.forEach((conn: any) => {
+              if (conn.peerConnection) {
+                const receivers = conn.peerConnection.getReceivers();
+                receivers.forEach((receiver: any) => {
+                  if (receiver.track?.kind === 'video' && 'playoutDelayHint' in receiver) {
+                    receiver.playoutDelayHint = 0; // 0 表示尽可能实时
+                    console.log('Set playoutDelayHint to 0 for real-time latency');
+                  }
+                });
+              }
+            });
+          });
         }
 
         console.log('Received remote stream:', {
@@ -688,7 +688,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           videoDetails: videoTracks.map(t => ({ label: t.label, enabled: t.enabled }))
         });
 
-        
+
         streamRef.current = remoteStream;
 
         setIsViewing(true);
@@ -714,7 +714,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               connectToSharer(sharerId, true);
             }, delay);
 
-            setError(`连接断开，${delay/1000}秒后尝试重连...`);
+            setError(`连接断开，${delay / 1000}秒后尝试重连...`);
           } else {
             setError('连接断开，已达到最大重试次数，请手动重试');
             onNotification('屏幕共享连接断开', 'error');
@@ -730,12 +730,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         console.error('Call error:', err);
 
         if (!isManualStopRef.current) {
-           stopViewing(false);
-           // 这里也可以触发重连，逻辑同上
-           setError(`连接发生错误: ${err.message}`);
+          stopViewing(false);
+          // 这里也可以触发重连，逻辑同上
+          setError(`连接发生错误: ${err.message}`);
         } else {
-           setError(`连接失败: ${err.message}`);
-           setIsConnecting(false);
+          setError(`连接失败: ${err.message}`);
+          setIsConnecting(false);
         }
       });
 
@@ -747,16 +747,16 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       // 处理特定的 PeerJS 错误，尝试重连
       if (!isManualStopRef.current && (err.type === 'network' || err.type === 'peer-unavailable' || err.type === 'disconnected')) {
-         if (err.type === 'peer-unavailable' && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-             // 可能是分享者暂时掉线，稍后重试
-             stopViewing(false);
-             reconnectAttemptsRef.current += 1;
-             reconnectTimerRef.current = setTimeout(() => {
-                connectToSharer(sharerId, true);
-             }, 3000);
-             setError('连接中断，正在尝试重新连接...');
-             return;
-         }
+        if (err.type === 'peer-unavailable' && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          // 可能是分享者暂时掉线，稍后重试
+          stopViewing(false);
+          reconnectAttemptsRef.current += 1;
+          reconnectTimerRef.current = setTimeout(() => {
+            connectToSharer(sharerId, true);
+          }, 3000);
+          setError('连接中断，正在尝试重新连接...');
+          return;
+        }
       }
 
       if (err.type === 'peer-unavailable') {
@@ -768,20 +768,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
   }, [onNotification, createDummyStream, stopViewing]);
 
-  
+
   const cancelConnecting = useCallback(() => {
     stopViewing();
     onNotification('已取消连接', 'info');
   }, [stopViewing, onNotification]);
 
-  
+
   const retryConnection = useCallback(() => {
     if (targetSharerId) {
       connectToSharer(targetSharerId);
     }
   }, [targetSharerId, connectToSharer]);
 
-  
+
   useEffect(() => {
     if (initialViewId && !hasInitialConnectedRef.current) {
       hasInitialConnectedRef.current = true;
@@ -789,14 +789,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, [initialViewId, connectToSharer]);
 
-  
+
   const shareLink = useMemo(() => {
     if (!peerId) return null;
     const baseUrl = window.location.origin;
     return `${baseUrl}?view=${peerId}`;
   }, [peerId]);
 
-  
+
   const copyShareLink = useCallback(async () => {
     if (!shareLink) return;
     try {
@@ -809,18 +809,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, [shareLink, onNotification]);
 
-  
+
   useEffect(() => {
     if ((isSharing || isViewing) && streamRef.current && videoRef.current) {
       const video = videoRef.current;
       const stream = streamRef.current;
 
-      
+
       if (video.srcObject !== stream) {
         video.srcObject = stream;
       }
 
-      
+
       if (isSharing && !isViewing) {
         video.muted = true;
         video.play().catch(console.error);
@@ -828,11 +828,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, [isSharing, isViewing]);
 
-  
+
   const viewerVideoRef = useCallback((video: HTMLVideoElement | null) => {
     if (!video) return;
 
-    
+
     videoRef.current = video;
 
     const stream = streamRef.current;
@@ -841,7 +841,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       return;
     }
 
-    
+
     if (video.srcObject === stream) return;
 
     console.log('Callback ref: Attaching stream to video element...');
@@ -861,12 +861,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           setNeedsPlayClick(true);
         }
       });
-  }, [isViewing]); 
+  }, [isViewing]);
 
-  
+
   useEffect(() => {
     return () => {
-      
+
       if (bandwidthMonitorRef.current) {
         clearInterval(bandwidthMonitorRef.current);
       }
@@ -882,29 +882,29 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
-      
+
       if (audioContextRef.current) {
         audioContextRef.current.close().catch(console.error);
       }
-      
+
       activeCallsRef.current.forEach(call => call.close());
       activeCallsRef.current = [];
-      
+
       if (peerRef.current) {
         peerRef.current.destroy();
       }
-      
+
       if (mediaConnectionRef.current) {
         mediaConnectionRef.current.close();
       }
     };
   }, []);
 
-  
+
   const startScreenShare = async () => {
     setError(null);
 
-    
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
       setError('您的浏览器不支持屏幕共享，请使用桌面端浏览器:Chrome、Edge 或 Firefox');
       onNotification('屏幕共享不可用', 'error');
@@ -937,22 +937,22 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       streamRef.current = stream;
 
-      
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        
+
         videoRef.current.play().catch(console.error);
       }
 
-      
+
       stream.getVideoTracks()[0].onended = () => {
         stopScreenShare();
       };
 
       setIsSharing(true);
 
-      
-      
+
+
       initializePeer();
 
       const audioInfo = stream.getAudioTracks().length > 0 ? '（含音频）' : '';
@@ -963,13 +963,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (errorMessage.includes('Permission denied') || errorMessage.includes('NotAllowedError')) {
         setError('用户取消了屏幕共享');
       } else {
-        setError(errorMessage);
+        setError('当前浏览器不支持启动屏幕共享，请使用Chrome、Edge等浏览器');
         onNotification('屏幕共享启动失败', 'error');
       }
     }
   };
 
-  
+
   const changeScreenSource = async () => {
     try {
 
@@ -994,33 +994,33 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
 
-      
+
       streamRef.current = newStream;
 
-      
+
       if (videoRef.current) {
         videoRef.current.srcObject = newStream;
         videoRef.current.play().catch(console.error);
       }
 
-      
+
       newStream.getVideoTracks()[0].onended = () => {
         stopScreenShare();
       };
 
-      
+
       activeCallsRef.current.forEach((call) => {
         const senders = call.peerConnection?.getSenders();
         if (!senders) return;
 
-        
+
         const videoTrack = newStream.getVideoTracks()[0];
         const videoSender = senders.find(s => s.track?.kind === 'video');
         if (videoSender && videoTrack) {
           videoSender.replaceTrack(videoTrack);
         }
 
-        
+
         const audioTrack = newStream.getAudioTracks()[0];
         const audioSender = senders.find(s => s.track?.kind === 'audio');
         if (audioSender && audioTrack) {
@@ -1038,7 +1038,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   };
 
-  
+
   const stopScreenShare = () => {
 
     if (streamRef.current) {
@@ -1057,7 +1057,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       peerRef.current = null;
     }
 
-    
+
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -1071,7 +1071,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   return (
     <div className="w-full max-w-xl mx-auto">
       <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 p-6 md:p-8 transition-colors duration-300">
-        {}
+        { }
         <div className="text-center mb-6">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-900/30 rounded-3xl mb-4">
             {isViewing || isConnecting ? (
@@ -1088,7 +1088,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           </p>
         </div>
 
-        {}
+        { }
         {error && !(targetSharerId && !isConnecting && !isViewing && !isSharing) && (
           <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-2xl flex items-center gap-3">
             <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
@@ -1096,7 +1096,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           </div>
         )}
 
-        {}
+        { }
         {isConnecting && (
           <div className="mb-6 flex flex-col items-center justify-center py-12">
             <Loader2 size={48} className="text-brand-600 animate-spin mb-4" />
@@ -1113,7 +1113,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           </div>
         )}
 
-        {}
+        { }
         {error && !isConnecting && !isViewing && !isSharing && targetSharerId && (
           <div className="mb-6">
             <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-2xl flex items-center gap-3 mb-4">
@@ -1142,7 +1142,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           </div>
         )}
 
-        {}
+        { }
         {isViewing && (
           <>
             <div className="mb-4 relative overflow-hidden rounded-2xl">
@@ -1156,7 +1156,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                 />
               </div>
 
-              {}
+              { }
               {needsPlayClick && (
                 <div
                   className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 cursor-pointer"
@@ -1200,10 +1200,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           </>
         )}
 
-        {}
+        { }
         {!isViewing && !isConnecting && (
           <>
-            {}
+            { }
             {isSharing && shareLink && (
               <div className="mb-6 p-4 bg-brand-50 dark:bg-brand-900/20 border border-brand-200 dark:border-brand-800 rounded-2xl">
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-2 text-center">
@@ -1253,7 +1253,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               </div>
             )}
 
-            {}
+            { }
             {isSharing && (
               <div className="mb-6 relative group">
                 <div className="rounded-2xl overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700">
@@ -1265,7 +1265,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                     className="w-full aspect-video object-contain"
                   />
                 </div>
-                {}
+                { }
                 <button
                   onClick={changeScreenSource}
                   className="absolute top-3 right-3 p-2 rounded-lg bg-black/50 hover:bg-black/70 text-white opacity-0 group-hover:opacity-100 transition-opacity duration-200"
@@ -1276,7 +1276,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               </div>
             )}
 
-            {}
+            { }
             <div className="flex justify-center">
               {!isSharing ? (
                 <button
@@ -1297,7 +1297,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               )}
             </div>
 
-            {}
+            { }
             {isSharing && (
               <div className="mt-6 flex items-center justify-center gap-2">
                 <span className="relative flex h-3 w-3">
@@ -1310,7 +1310,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
               </div>
             )}
 
-            {}
+            { }
             <div className="mt-6 pt-6 border-t border-slate-100 dark:border-slate-800">
               <p className="text-xs text-slate-400 dark:text-slate-500 text-center">
                 点击开始后，浏览器将弹出选择窗口，您可以选择共享整个屏幕、某个应用窗口或浏览器标签页。

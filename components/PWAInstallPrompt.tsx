@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Share, PlusSquare, X, Download } from 'lucide-react';
 
 export const PWAInstallPrompt: React.FC = () => {
   const [showPrompt, setShowPrompt] = useState(false);
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isIOS, setIsIOS] = useState(false);
+  const showPromptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // Check if already installed
@@ -13,11 +15,14 @@ export const PWAInstallPrompt: React.FC = () => {
     }
 
     // Android / Desktop
-    const handleBeforeInstallPrompt = (e: Event) => {
+    const handleBeforeInstallPrompt = (e: BeforeInstallPromptEvent) => {
       e.preventDefault();
       setDeferredPrompt(e);
       // Wait a bit before showing to not be intrusive immediately
-      setTimeout(() => setShowPrompt(true), 1000);
+      if (showPromptTimeoutRef.current) {
+        clearTimeout(showPromptTimeoutRef.current);
+      }
+      showPromptTimeoutRef.current = setTimeout(() => setShowPrompt(true), 1000);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -25,23 +30,34 @@ export const PWAInstallPrompt: React.FC = () => {
     // iOS Detection
     const userAgent = window.navigator.userAgent.toLowerCase();
     const isIosDevice = /iphone|ipad|ipod/.test(userAgent);
-    // @ts-ignore
     const isStandalone = window.navigator.standalone === true;
 
     if (isIosDevice && !isStandalone) {
       setIsIOS(true);
       // Show iOS prompt after a delay
-      setTimeout(() => {
+      if (showPromptTimeoutRef.current) {
+        clearTimeout(showPromptTimeoutRef.current);
+      }
+      showPromptTimeoutRef.current = setTimeout(() => {
         setShowPrompt(true);
         // Auto close iOS prompt after 5 seconds (giving user enough time to read)
         // User requested 3 seconds, but strictly following it might be too fast to read instructions.
         // However, I will follow the user's specific instruction: "三秒后自动关闭"
-        setTimeout(() => setShowPrompt(false), 3000);
+        if (autoCloseTimeoutRef.current) {
+          clearTimeout(autoCloseTimeoutRef.current);
+        }
+        autoCloseTimeoutRef.current = setTimeout(() => setShowPrompt(false), 3000);
       }, 1000);
     }
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      if (showPromptTimeoutRef.current) {
+        clearTimeout(showPromptTimeoutRef.current);
+      }
+      if (autoCloseTimeoutRef.current) {
+        clearTimeout(autoCloseTimeoutRef.current);
+      }
     };
   }, []);
 

@@ -36,19 +36,12 @@ const App: React.FC = () => {
 
         // Check if the response is JSON (Cloudflare Functions return JSON)
         // In local Vite dev without wrangler, this returns index.html (text/html)
-        const contentType = res.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-            console.log("Network check skipped: API not available in local Vite dev.");
-            // 本地调试强制显示 Banner 
-            if (import.meta.env.DEV) {
-               console.log("Local Dev Mode: Simulating Risk Banner");
-               setShowRiskBanner(true);
-            }
+        const contentType = res.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
             return;
         }
 
         const data = await res.json() as NetworkCheckResponse;
-        console.log('Network Check Result:', data);
         if (data.isRisk) {
           setShowRiskBanner(true);
         }
@@ -78,12 +71,31 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      document.documentElement.style.setProperty('--mouse-x', `${e.clientX}px`);
-      document.documentElement.style.setProperty('--mouse-y', `${e.clientY}px`);
+    const docEl = document.documentElement;
+    let rafId: number | null = null;
+    let pendingX = 0;
+    let pendingY = 0;
+
+    const flushMousePosition = () => {
+      docEl.style.setProperty('--mouse-x', `${pendingX}px`);
+      docEl.style.setProperty('--mouse-y', `${pendingY}px`);
+      rafId = null;
     };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
+
+    const handleMouseMove = (e: MouseEvent) => {
+      pendingX = e.clientX;
+      pendingY = e.clientY;
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(flushMousePosition);
+      }
+    };
+    window.addEventListener('mousemove', handleMouseMove, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
   }, []);
 
   const addNotification = (message: string, type: 'success' | 'info' | 'error') => {
@@ -94,6 +106,12 @@ const App: React.FC = () => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 4000);
   };
+
+  const suspenseFallback = (
+    <div className="h-full min-h-56 flex items-center justify-center text-slate-400">
+      <Loader2 size={28} className="animate-spin" />
+    </div>
+  );
 
   return (
     <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
@@ -249,21 +267,21 @@ const App: React.FC = () => {
 
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
           <ErrorBoundary>
-            <Suspense fallback={null}>
+            <Suspense fallback={suspenseFallback}>
               <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
                 <Sender onNotification={addNotification} />
               </div>
             </Suspense>
           </ErrorBoundary>
           <ErrorBoundary>
-            <Suspense fallback={null}>
+            <Suspense fallback={suspenseFallback}>
               <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
                 <Receiver initialCode={initialCode} onNotification={addNotification} />
               </div>
             </Suspense>
           </ErrorBoundary>
           <ErrorBoundary>
-            <Suspense fallback={null}>
+            <Suspense fallback={suspenseFallback}>
               <div className={`${mode === 'screen' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
                 <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
               </div>

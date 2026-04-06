@@ -129,4 +129,25 @@ declare global {
   interface FileSystemDirectoryReader {
     readEntries(successCallback: (entries: FileSystemEntry[]) => void, errorCallback?: (error: any) => void): void;
   }
+
+  interface BeforeInstallPromptEvent extends Event {
+    readonly platforms: string[];
+    readonly userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+    prompt(): Promise<void>;
+  }
+
+  interface WindowEventMap {
+    beforeinstallprompt: BeforeInstallPromptEvent;
+  }
+
+  interface Navigator {
+    standalone?: boolean;
+  }
+}
+
+declare module 'react' {
+  interface InputHTMLAttributes<T> {
+    webkitdirectory?: string;
+    directory?: string;
+  }
 }

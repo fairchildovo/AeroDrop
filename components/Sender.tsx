@@ -49,6 +49,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileListRef = useRef<File[]>([]);
+  const lastConnectionStatsPollRef = useRef<number>(0);
+  const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
 
   const totalProgressRef = useRef(0);
   useEffect(() => {
@@ -96,7 +98,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 }
             }
 
-            activeConnections.current.forEach(conn => updateConnectionStats(conn));
+            const now = Date.now();
+            if (
+              activeConnections.current.size > 0 &&
+              now - lastConnectionStatsPollRef.current >= 3000
+            ) {
+              lastConnectionStatsPollRef.current = now;
+              activeConnections.current.forEach(conn => updateConnectionStats(conn));
+            }
         }, 800);
     }
     return () => clearInterval(interval);
@@ -256,7 +265,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [state, metadata]);
 
-  
+  const decodeFileName = useCallback((name: string) => {
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
+  }, []);
+
   const processFiles = useCallback(async (files: File[]) => {
     setFileList(files);
     fileListRef.current = files;
@@ -272,7 +288,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         }
         const name = f.fullPath || (f as any).webkitRelativePath || f.name;
         filesInfo.push({
-            name: decodeURIComponent(name),
+            name: decodeFileName(name),
             size: f.size,
             type: f.type,
             lastModified: f.lastModified,
@@ -281,7 +297,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         });
     }
     setMetadata({ files: filesInfo, totalSize: totalSize });
-  }, []);
+  }, [decodeFileName]);
 
   const traverseFileTree = (item: FileSystemEntry, path: string = ""): Promise<File[]> => {
     return new Promise((resolve, reject) => {
@@ -402,14 +418,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     if (expiryOption === '10m') expiresAt = now + 10 * 60 * 1000;
     if (expiryOption === '1h') expiresAt = now + 60 * 60 * 1000;
     if (expiryOption === '1d') expiresAt = now + 24 * 60 * 60 * 1000;
-    setMetadata({ ...metadata, constraints: { expiresAt } });
+    const metadataWithConstraints: FileMetadata = { ...metadata, constraints: { expiresAt } };
+    setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
-    const peer = new Peer({ debug: 1, config: iceConfig });
+    const peer = new Peer({ debug: peerDebugLevel, config: iceConfig });
     peer.on('open', (id) => {
       let finalCode = customCodeInput.length === 4 ? customCodeInput : Math.floor(1000 + Math.random() * 9000).toString();
       peer.destroy();
-      const customPeer = new Peer(`aerodrop-${finalCode}`, { debug: 1, config: iceConfig });
-      setupPeerListeners(customPeer, finalCode);
+      const customPeer = new Peer(`aerodrop-${finalCode}`, { debug: peerDebugLevel, config: iceConfig });
+      setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
     });
     peer.on('error', (err) => {
         if (err.type === 'network' || err.type === 'server-error') return;
@@ -418,7 +435,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     });
   };
 
-  const setupPeerListeners = (peer: Peer, code: string) => {
+  const setupPeerListeners = (peer: Peer, code: string, sessionMetadata: FileMetadata) => {
       peerRef.current = peer;
       peer.on('open', () => {
           setTransferCode(code);
@@ -441,7 +458,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
           }
       });
       peer.on('connection', (conn) => {
-          if (metadata?.constraints?.expiresAt && Date.now() > metadata.constraints.expiresAt) {
+          if (sessionMetadata.constraints?.expiresAt && Date.now() > sessionMetadata.constraints.expiresAt) {
              conn.on('open', () => {
                  conn.send({ type: 'REJECT_TRANSFER', payload: { reason: '分享已过期' } });
                  setTimeout(() => conn.close(), 1000);
@@ -459,7 +476,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
               setState(TransferState.PEER_CONNECTED);
               try {
-                  conn.send({ type: 'METADATA', payload: metadata });
+                  conn.send({ type: 'METADATA', payload: sessionMetadata });
               } catch(e) { console.error("Failed to send metadata", e); }
           });
           
@@ -551,7 +568,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
             const startPayload: FileStartPayload = {
                 fileIndex: i,
-                fileName: decodeURIComponent(fName),
+                fileName: decodeFileName(fName),
                 fileSize: file.size,
                 fileType: file.type
             };
