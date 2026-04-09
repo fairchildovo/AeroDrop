@@ -61,6 +61,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+  const isMobileDevice = /android|iphone|ipad|ipod/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
   const metadataRef = useRef<FileMetadata | null>(null);
   const currentFileIndexRef = useRef<number>(0); 
@@ -659,7 +661,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                      <div key={i} className={`w-14 h-16 border-2 rounded-xl flex items-center justify-center text-3xl font-bold font-mono transition-all duration-200 ${code[i] ? 'border-brand-500 text-brand-600 dark:text-brand-400 shadow-sm bg-white dark:bg-slate-700' : 'border-slate-200 dark:border-slate-600 text-slate-300 dark:text-slate-600 bg-white dark:bg-slate-700'}`}>{code[i] || ''}</div>
                    ))}
                  </div>
-                 <input ref={inputRef} type="text" inputMode="numeric" maxLength={4} value={code} onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" autoFocus />
+                 <input ref={inputRef} type="text" inputMode="numeric" maxLength={4} value={code} onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" autoFocus={!isMobileDevice} />
              </div>
              <div className="grid grid-cols-3 gap-3 w-full max-w-[280px] mb-8">
                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
