@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "npm run build && wrangler dev",
     "typecheck": "tsc --noEmit",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && wrangler pages deploy dist --project-name aerodrop --functions functions",
+    "deploy:worker": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "lucide-react": "^0.555.0",
