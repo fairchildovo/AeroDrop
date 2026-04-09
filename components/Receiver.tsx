@@ -11,9 +11,23 @@ import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileCod
 interface ReceiverProps {
   initialCode?: string;
   onNotification?: (msg: string, type: 'success' | 'info' | 'error') => void;
+  deviceName: string;
 }
 
-export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification }) => {
+export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
+  const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
+  const getReceiverSessionId = (): string => {
+    try {
+      const existing = sessionStorage.getItem(RECEIVER_SESSION_KEY);
+      if (existing) return existing;
+      const generated = `rcv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem(RECEIVER_SESSION_KEY, generated);
+      return generated;
+    } catch {
+      return `rcv-fallback-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  };
+
   const [state, _setState] = useState<TransferState>(TransferState.IDLE);
   const setState = (newState: TransferState) => {
     stateRef.current = newState;
@@ -31,6 +45,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
   const [downloadSpeed, setDownloadSpeed] = useState<string>('0 KB/s');
   const [eta, setEta] = useState<string>('--');
+  const [senderDeviceName, setSenderDeviceName] = useState<string>('');
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -39,6 +54,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stateRef = useRef<TransferState>(TransferState.IDLE);
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
+  const localDeviceNameRef = useRef<string>(deviceName);
+  const receiverSessionIdRef = useRef<string>(getReceiverSessionId());
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -69,6 +86,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
   const codeRef = useRef<string>('');
   const isMountedRef = useRef(true);
   useEffect(() => { codeRef.current = code; }, [code]);
+  useEffect(() => { localDeviceNameRef.current = deviceName; }, [deviceName]);
 
   useEffect(() => { if (initialCode) setCode(initialCode); }, [initialCode]);
 
@@ -187,6 +205,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
     conn.on('open', () => {
       clearConnectionTimeout();
       retryCountRef.current = 0;
+      conn.send({
+        type: 'DEVICE_INFO',
+        payload: {
+          deviceName: localDeviceNameRef.current,
+          sessionId: receiverSessionIdRef.current
+        }
+      });
     });
 
     conn.on('data', async (data: any) => {
@@ -228,7 +253,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
 
       const msg = data as P2PMessage;
 
-      if (msg.type === 'METADATA') {
+      if (msg.type === 'DEVICE_INFO') {
+        const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName.trim().slice(0, 24) : '';
+        setSenderDeviceName(remoteName || '发送设备');
+      }
+      else if (msg.type === 'METADATA') {
         const meta = msg.payload as FileMetadata;
         const previousMeta = metadataRef.current;
         let isResumable = false;
@@ -510,15 +539,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       if (connRef.current) {
           isTransferActiveRef.current = true;
           const currentIdx = currentFileIndexRef.current;
-
-          const nextChunkIndex = chunksRef.current.length;
+          const byteOffset = Math.max(0, receivedSizeRef.current);
 
           isStreamingRef.current = false;
 
           if (completedFileIndicesRef.current.has(currentIdx)) {
-              connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx + 1, chunkIndex: 0 } });
+              connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx + 1, byteOffset: 0 } });
           } else {
-              connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx, chunkIndex: nextChunkIndex } });
+              connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx, byteOffset } });
           }
           setState(TransferState.TRANSFERRING);
       }
@@ -537,6 +565,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
         setState(TransferState.IDLE);
         setErrorMsg('');
         setProgress(0);
+        setSenderDeviceName('');
         resetStateForNewTransfer();
     });
   };
@@ -602,6 +631,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification 
       {}
       {(state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && metadata && (
         <div className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 animate-slide-up">
+           {senderDeviceName && (
+             <div className="mb-4 text-sm text-slate-600 dark:text-slate-300">
+               发送方设备: <span className="font-semibold text-slate-800 dark:text-slate-100">{senderDeviceName}</span>
+             </div>
+           )}
            <div className="flex items-start gap-4 mb-6">
                <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
                   {isMultiFile ? <Layers size={24} className="text-brand-500" /> : <FileIcon size={24} />}

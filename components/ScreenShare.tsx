@@ -62,7 +62,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const audioContextRef = useRef<AudioContext | null>(null);
 
 
-  const bandwidthMonitorRef = useRef<NodeJS.Timeout | null>(null);
+  const bandwidthMonitorsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
 
   const [qualityLevel, setQualityLevel] = useState<'high' | 'medium' | 'low'>('high');
@@ -168,11 +168,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const startBandwidthMonitoring = useCallback((call: MediaConnection) => {
     const pc = call.peerConnection;
     if (!pc) return;
+    if (bandwidthMonitorsRef.current.has(call.peer)) return;
 
     let lastBytesSent = 0;
     let lastTimestamp = Date.now();
     let consecutiveLowBandwidth = 0;
     let consecutiveHighBandwidth = 0;
+    const monitorStartedAt = Date.now();
+    const BANDWIDTH_WARMUP_MS = 8000;
 
     const monitor = async () => {
       try {
@@ -204,30 +207,44 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         const currentQuality = qualityLevelRef.current;
         const limits = bitrateLimits[currentQuality];
 
+        // 连接初期带宽估计和丢包统计波动很大，先预热避免误降档导致“刚连上先糊”
+        if (now - monitorStartedAt < BANDWIDTH_WARMUP_MS) {
+          return;
+        }
 
 
-        // 优化带宽检测逻辑：
-        // 1. 丢包率 > 5% 直接降级
-        // 2. 只有在有丢包发生（> 0.5%）且码率过低时才认为是带宽不足（避免静止画面低码率误判）
-        if (packetLossRate > 0.05 || (packetLossRate > 0.005 && currentBitrate < limits.min * 0.7)) {
+
+        // 清晰优先策略：
+        // 默认保持高清/原画，只有在“持续且明显卡顿”时才降档。
+        const severeForHigh =
+          packetLossRate > 0.12 || (packetLossRate > 0.03 && currentBitrate < limits.min * 0.45);
+        const severeForMedium =
+          packetLossRate > 0.18 || (packetLossRate > 0.05 && currentBitrate < limits.min * 0.35);
+
+        const shouldDowngrade =
+          currentQuality === 'high' ? severeForHigh : currentQuality === 'medium' ? severeForMedium : false;
+
+        if (shouldDowngrade) {
           consecutiveLowBandwidth++;
           consecutiveHighBandwidth = 0;
 
-          if (consecutiveLowBandwidth >= 3) {
+          // 每 2 秒检测一次：
+          // high -> medium 需要连续 12 秒严重卡顿；
+          // medium -> low 需要连续 16 秒严重卡顿。
+          const lowThreshold = currentQuality === 'high' ? 6 : 8;
+          if (consecutiveLowBandwidth >= lowThreshold) {
             if (currentQuality === 'high') {
               setQualityLevel('medium');
               await applyBitrateConstraints(pc, 'medium');
-              onNotification('网络较差，已自动调整为高清画质', 'info');
+              onNotification('检测到持续严重卡顿，已降至高清模式', 'info');
             } else if (currentQuality === 'medium') {
               setQualityLevel('low');
               await applyBitrateConstraints(pc, 'low');
-              onNotification('网络拥堵，已切换到流畅模式', 'info');
+              onNotification('网络极不稳定，已切换到流畅模式', 'info');
             }
             consecutiveLowBandwidth = 0;
           }
-        }
-
-        else if (packetLossRate < 0.005) { // 只有丢包率极低时才考虑升级
+        } else if (packetLossRate < 0.005) { // 只有丢包率极低时才考虑升级
           consecutiveHighBandwidth++;
           consecutiveLowBandwidth = 0;
 
@@ -253,16 +270,57 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     };
 
 
-    bandwidthMonitorRef.current = setInterval(monitor, 2000);
+    const timer = setInterval(monitor, 2000);
+    bandwidthMonitorsRef.current.set(call.peer, timer);
   }, [bitrateLimits, applyBitrateConstraints, onNotification]);
 
 
-  const stopBandwidthMonitoring = useCallback(() => {
-    if (bandwidthMonitorRef.current) {
-      clearInterval(bandwidthMonitorRef.current);
-      bandwidthMonitorRef.current = null;
+  const stopBandwidthMonitoring = useCallback((peerId?: string) => {
+    if (peerId) {
+      const timer = bandwidthMonitorsRef.current.get(peerId);
+      if (timer) {
+        clearInterval(timer);
+        bandwidthMonitorsRef.current.delete(peerId);
+      }
+      return;
     }
+
+    bandwidthMonitorsRef.current.forEach((timer) => clearInterval(timer));
+    bandwidthMonitorsRef.current.clear();
   }, []);
+
+  const getUniqueViewerCount = useCallback(() => {
+    return new Set(activeCallsRef.current.map((c) => c.peer)).size;
+  }, []);
+
+  const syncViewerCount = useCallback(() => {
+    setViewerCount(getUniqueViewerCount());
+  }, [getUniqueViewerCount]);
+
+  const addActiveCall = useCallback((call: MediaConnection) => {
+    if (activeCallsRef.current.includes(call)) {
+      return false;
+    }
+    const before = getUniqueViewerCount();
+    activeCallsRef.current.push(call);
+    const after = getUniqueViewerCount();
+    setViewerCount(after);
+    return after > before;
+  }, [getUniqueViewerCount]);
+
+  const removeActiveCall = useCallback((call: MediaConnection) => {
+    const beforeLength = activeCallsRef.current.length;
+    activeCallsRef.current = activeCallsRef.current.filter(c => c !== call);
+
+    if (beforeLength !== activeCallsRef.current.length) {
+      syncViewerCount();
+      stopBandwidthMonitoring(call.peer);
+    }
+
+    if (activeCallsRef.current.length === 0) {
+      stopBandwidthMonitoring();
+    }
+  }, [syncViewerCount, stopBandwidthMonitoring]);
 
 
   const generatePeerId = useCallback(() => {
@@ -282,9 +340,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     const iceConfig = await getIceConfig();
     const id = generatePeerId();
+    const useSecurePeerServer = window.location.protocol === 'https:';
     const peer = new Peer(id, {
       debug: 0,
-      secure: false, // 尝试禁用 SSL，避免 VPN 环境下的证书或握手问题
+      secure: useSecurePeerServer,
       pingInterval: 5000, // 缩短心跳间隔以保持 VPN 隧道活跃
       config: {
         iceServers: iceConfig.iceServers,
@@ -336,28 +395,31 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       if (streamRef.current) {
         call.answer(streamRef.current);
-        activeCallsRef.current.push(call);
-        setViewerCount(prev => prev + 1);
-        onNotification('有观看者加入', 'info');
+        const hasNewViewer = addActiveCall(call);
+        if (hasNewViewer) {
+          onNotification('有观看者加入', 'info');
+        }
 
 
         if (call.peerConnection) {
-          applyBitrateConstraints(call.peerConnection, qualityLevel);
+          const currentQuality = qualityLevelRef.current;
+          applyBitrateConstraints(call.peerConnection, currentQuality);
+          // 某些浏览器在初始协商后才完全挂载 sender 参数，短延迟重复应用可减少前几秒模糊
+          setTimeout(() => {
+            if (call.peerConnection && call.open) {
+              applyBitrateConstraints(call.peerConnection, qualityLevelRef.current);
+            }
+          }, 1200);
           startBandwidthMonitoring(call);
         }
 
         call.on('close', () => {
-          activeCallsRef.current = activeCallsRef.current.filter(c => c !== call);
-          setViewerCount(prev => Math.max(0, prev - 1));
-          if (activeCallsRef.current.length === 0) {
-            stopBandwidthMonitoring();
-          }
+          removeActiveCall(call);
         });
 
         call.on('error', (err) => {
           console.error('Call error:', err);
-          activeCallsRef.current = activeCallsRef.current.filter(c => c !== call);
-          setViewerCount(prev => Math.max(0, prev - 1));
+          removeActiveCall(call);
         });
       }
     });
@@ -375,7 +437,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peerRef.current = peer;
     return peer;
-  }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, stopBandwidthMonitoring]);
+  }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, addActiveCall, removeActiveCall]);
 
 
   // 分享者端：定期检查观看者心跳，移除断开的连接
@@ -406,13 +468,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           }
         });
 
-        // 注意：call.close() 会触发 'close' 事件监听器，那里会更新 viewerCount
-        // 但为了保险起见，我们也可以在这里做一次清理（虽然事件监听器应该处理了）
+        // 兜底同步，避免极端情况下 close 事件丢失导致观看人数未更新
+        syncViewerCount();
       }
     }, 5000); // 每5秒检查一次
 
     return () => clearInterval(checkInterval);
-  }, [isSharing]);
+  }, [isSharing, syncViewerCount]);
 
 
 
@@ -566,9 +628,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
 
     const iceConfig = await getIceConfig();
+    const useSecurePeerServer = window.location.protocol === 'https:';
     const peer = new Peer({
       debug: 0,
-      secure: false,
+      secure: useSecurePeerServer,
       pingInterval: 5000,
       config: {
         iceServers: iceConfig.iceServers,
@@ -867,9 +930,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   useEffect(() => {
     return () => {
 
-      if (bandwidthMonitorRef.current) {
-        clearInterval(bandwidthMonitorRef.current);
-      }
+      bandwidthMonitorsRef.current.forEach((timer) => clearInterval(timer));
+      bandwidthMonitorsRef.current.clear();
 
       // 清理数据连接
       if (dataConnectionRef.current) {
@@ -889,6 +951,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       activeCallsRef.current.forEach(call => call.close());
       activeCallsRef.current = [];
+      setViewerCount(0);
 
       if (peerRef.current) {
         peerRef.current.destroy();
@@ -924,13 +987,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         audio: true,
       });
 
-      // 关键优化：设置 contentHint 为 'motion' 以减少卡顿
-      // 虽然 'detail' 清晰度高，但在跨网传输时容易因重传导致累积延迟（"弹动"现象）
-      // 改为 'motion' 或 'text' 并配合 playoutDelayHint 可以缓解
-      // 这里我们保留 'detail' 但通过接收端控制延迟
+      // 屏幕共享以文字和细节为主，优先保证清晰度
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack && 'contentHint' in videoTrack) {
-        (videoTrack as any).contentHint = 'motion'; // 权衡：motion 会更流畅，但静态文字可能略有压缩
+        (videoTrack as any).contentHint = 'detail';
       }
 
 
@@ -986,7 +1046,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       const videoTrack = newStream.getVideoTracks()[0];
       if (videoTrack && 'contentHint' in videoTrack) {
-        (videoTrack as any).contentHint = 'motion';
+        (videoTrack as any).contentHint = 'detail';
       }
 
 
@@ -1050,6 +1110,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     activeDataConnectionsRef.current.forEach(conn => conn.close());
     activeDataConnectionsRef.current = [];
     viewerHeartbeatsRef.current = {};
+
+    // 关闭所有媒体连接并重置人数
+    activeCallsRef.current.forEach(call => call.close());
+    activeCallsRef.current = [];
+    setViewerCount(0);
+    stopBandwidthMonitoring();
 
 
     if (peerRef.current) {

@@ -8,9 +8,18 @@ import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, Chevr
 
 interface SenderProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
+  deviceName: string;
 }
 
-export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
+type PeerTransferStat = {
+  peerId: string;
+  deviceName: string;
+  speed: string;
+  progress: number;
+  status: 'waiting' | 'transferring' | 'completed';
+};
+
+export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [fileList, setFileList] = useState<File[]>([]);
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
@@ -23,11 +32,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const [currentSpeed, setCurrentSpeed] = useState<string>('0 KB/s');
   const [avgSpeed, setAvgSpeed] = useState<string>('0 KB/s');
   
-  const [individualStats, setIndividualStats] = useState<{peerId: string, speed: string, progress: number}[]>([]);
+  const [individualStats, setIndividualStats] = useState<PeerTransferStat[]>([]);
 
   const [isDragOver, setIsDragOver] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('');
   const [showFileList, setShowFileList] = useState(false);
+  const [peerNames, setPeerNames] = useState<Record<string, string>>({});
 
   const [expiryOption, setExpiryOption] = useState<string>('1h');
   const [remainingTime, setRemainingTime] = useState<string>('');
@@ -42,6 +52,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
   const transferSessionId = useRef<number>(0);
   const activeTransfersCount = useRef<number>(0);
+  const activeSendingPeersRef = useRef<Set<string>>(new Set());
+  const peerSessionIdsRef = useRef<Map<string, string>>(new Map());
+  const sessionToPeerRef = useRef<Map<string, string>>(new Map());
+  const ghostCandidateSinceRef = useRef<Map<string, number>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -51,11 +65,23 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
   const fileListRef = useRef<File[]>([]);
   const lastConnectionStatsPollRef = useRef<number>(0);
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
+  const localDeviceNameRef = useRef<string>(deviceName);
+  const peerNamesRef = useRef<Record<string, string>>(peerNames);
+  const GHOST_SWEEP_INTERVAL_MS = 4000;
+  const GHOST_GRACE_MS = 4000;
 
   const totalProgressRef = useRef(0);
   useEffect(() => {
     totalProgressRef.current = totalProgress;
   }, [totalProgress]);
+
+  useEffect(() => {
+    localDeviceNameRef.current = deviceName;
+  }, [deviceName]);
+
+  useEffect(() => {
+    peerNamesRef.current = peerNames;
+  }, [peerNames]);
 
   useEffect(() => {
     let interval: number;
@@ -64,31 +90,48 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
             let totalSpeed = 0;
             let totalAvgSpeed = 0;
             let combinedProgress = 0;
-            const count = peerProgress.current.size;
 
-            const stats: {peerId: string, speed: string, progress: number}[] = [];
-
-            peerProgress.current.forEach((p, peerId) => {
-                combinedProgress += p;
-                const s = peerRealtimeSpeed.current.get(peerId) || 0;
-                totalSpeed += s;
+            const stats: PeerTransferStat[] = Array.from(activeConnections.current).map((conn) => {
+                const peerId = conn.peer;
+                const progress = peerProgress.current.get(peerId) || 0;
+                const realtimeSpeed = peerRealtimeSpeed.current.get(peerId) || 0;
                 const avg = peerAverageSpeed.current.get(peerId) || 0;
-                totalAvgSpeed += avg;
+                const hasTransferStarted = peerProgress.current.has(peerId) || activeSendingPeersRef.current.has(peerId);
 
-                stats.push({
+                const status: PeerTransferStat['status'] =
+                    progress >= 100 ? 'completed' : hasTransferStarted && state === TransferState.TRANSFERRING ? 'transferring' : 'waiting';
+
+                if (status === 'transferring' || status === 'completed') {
+                    combinedProgress += progress;
+                    totalSpeed += realtimeSpeed;
+                    totalAvgSpeed += avg;
+                }
+
+                return {
                     peerId,
-                    speed: formatFileSize(s) + '/s',
-                    progress: p
-                });
+                    speed: status === 'transferring' ? `${formatFileSize(realtimeSpeed)}/s` : status === 'completed' ? '完成' : '--',
+                    progress,
+                    deviceName: peerNamesRef.current[peerId] || `设备 ...${peerId.slice(-4)}`,
+                    status
+                };
             });
+
+            stats.sort((a, b) => {
+                const order = { transferring: 0, waiting: 1, completed: 2 };
+                const statusDiff = order[a.status] - order[b.status];
+                if (statusDiff !== 0) return statusDiff;
+                return a.deviceName.localeCompare(b.deviceName);
+            });
+
+            setIndividualStats(stats);
 
             if (state === TransferState.TRANSFERRING) {
                 setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
                 setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
-                setIndividualStats(stats);
+                const activeProgressCount = stats.filter((s) => s.status !== 'waiting').length;
 
-                if (count > 0) {
-                    setTotalProgress(Math.floor(combinedProgress / count));
+                if (activeProgressCount > 0) {
+                    setTotalProgress(Math.floor(combinedProgress / activeProgressCount));
                 } else {
                     if (activeTransfersCount.current === 0 && totalProgressRef.current === 100) {
                         
@@ -110,6 +153,28 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     }
     return () => clearInterval(interval);
   }, [state]);
+
+  const updatePeerName = (peerId: string, name: string) => {
+    const cleaned = name.trim().slice(0, 24);
+    const finalName = cleaned || `设备 ...${peerId.slice(-4)}`;
+    setPeerNames(prev => {
+      if (prev[peerId] === finalName) {
+        return prev;
+      }
+      return { ...prev, [peerId]: finalName };
+    });
+  };
+
+  const removePeerName = (peerId: string) => {
+    setPeerNames(prev => {
+      if (!prev[peerId]) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[peerId];
+      return next;
+    });
+  };
 
   const updateConnectionStatusUI = () => {
     const count = activeConnections.current.size;
@@ -429,10 +494,94 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
     });
     peer.on('error', (err) => {
-        if (err.type === 'network' || err.type === 'server-error') return;
+        if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+            setErrorMsg('网络初始化失败，请检查网络后重试');
+            setState(TransferState.ERROR);
+            return;
+        }
         setErrorMsg('网络初始化失败，请重试');
         setState(TransferState.ERROR);
     });
+  };
+
+  const cleanupConnectionState = (conn: DataConnection) => {
+      activeConnections.current.delete(conn);
+      peerProgress.current.delete(conn.peer);
+      peerRealtimeSpeed.current.delete(conn.peer);
+      peerAverageSpeed.current.delete(conn.peer);
+      activeSendingPeersRef.current.delete(conn.peer);
+      ghostCandidateSinceRef.current.delete(conn.peer);
+      removePeerName(conn.peer);
+
+      const removedSessionId = peerSessionIdsRef.current.get(conn.peer);
+      if (removedSessionId && sessionToPeerRef.current.get(removedSessionId) === conn.peer) {
+          sessionToPeerRef.current.delete(removedSessionId);
+      }
+      peerSessionIdsRef.current.delete(conn.peer);
+
+      updateConnectionStatusUI();
+
+      if (isDestroyingRef.current) return;
+      if (activeConnections.current.size === 0 && activeTransfersCount.current === 0) {
+          setConnectionStatus('');
+          setState(TransferState.WAITING_FOR_PEER);
+      }
+  };
+
+  useEffect(() => {
+      const sweep = () => {
+          const now = Date.now();
+          const conns = Array.from(activeConnections.current);
+
+          conns.forEach((conn) => {
+              const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
+              const pc = conn.peerConnection;
+
+              const dcState = dataChannel?.readyState;
+              const pcState = pc?.connectionState;
+              const closedByState =
+                  !conn.open ||
+                  dcState === 'closed' ||
+                  pcState === 'closed' ||
+                  pcState === 'failed';
+
+              const unstableByState =
+                  dcState === 'closing' ||
+                  pcState === 'disconnected';
+
+              if (closedByState) {
+                  try { if (conn.open) conn.close(); } catch {}
+                  cleanupConnectionState(conn);
+                  return;
+              }
+
+              if (unstableByState) {
+                  const firstSeen = ghostCandidateSinceRef.current.get(conn.peer) ?? now;
+                  ghostCandidateSinceRef.current.set(conn.peer, firstSeen);
+                  if (now - firstSeen >= GHOST_GRACE_MS) {
+                      try { if (conn.open) conn.close(); } catch {}
+                      cleanupConnectionState(conn);
+                  }
+                  return;
+              }
+
+              ghostCandidateSinceRef.current.delete(conn.peer);
+          });
+      };
+
+      const timer = window.setInterval(sweep, GHOST_SWEEP_INTERVAL_MS);
+      return () => clearInterval(timer);
+  }, []);
+
+  const scheduleSendFileSequence = (conn: DataConnection, startFileIndex: number, startByteOffset: number) => {
+      if (activeSendingPeersRef.current.has(conn.peer)) {
+          return;
+      }
+
+      activeSendingPeersRef.current.add(conn.peer);
+      setTimeout(() => {
+          sendFileSequence(conn, startFileIndex, startByteOffset);
+      }, 100);
   };
 
   const setupPeerListeners = (peer: Peer, code: string, sessionMetadata: FileMetadata) => {
@@ -466,49 +615,58 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
              return;
           }
           
-          activeConnections.current.add(conn);
-          updateConnectionStatusUI();
-
           conn.on('open', () => {
+              activeConnections.current.add(conn);
+              peerProgress.current.set(conn.peer, peerProgress.current.get(conn.peer) || 0);
+              peerRealtimeSpeed.current.set(conn.peer, peerRealtimeSpeed.current.get(conn.peer) || 0);
+              peerAverageSpeed.current.set(conn.peer, peerAverageSpeed.current.get(conn.peer) || 0);
               updateConnectionStatusUI();
               
               updateConnectionStats(conn);
 
               setState(TransferState.PEER_CONNECTED);
               try {
+                  conn.send({ type: 'DEVICE_INFO', payload: { deviceName: localDeviceNameRef.current } });
                   conn.send({ type: 'METADATA', payload: sessionMetadata });
               } catch(e) { console.error("Failed to send metadata", e); }
           });
           
           conn.on('data', (data: any) => {
               const msg = data as P2PMessage;
-              if (msg.type === 'ACCEPT_TRANSFER') {
+              if (msg.type === 'DEVICE_INFO') {
+                  const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName : '';
+                  updatePeerName(conn.peer, remoteName);
+
+                  const remoteSessionId = typeof msg.payload?.sessionId === 'string' ? msg.payload.sessionId : '';
+                  if (remoteSessionId) {
+                      const existingPeerId = sessionToPeerRef.current.get(remoteSessionId);
+                      if (existingPeerId && existingPeerId !== conn.peer) {
+                          const oldConn = Array.from(activeConnections.current).find(c => c.peer === existingPeerId);
+                          if (oldConn) {
+                              oldConn.close();
+                          }
+                      }
+                      peerSessionIdsRef.current.set(conn.peer, remoteSessionId);
+                      sessionToPeerRef.current.set(remoteSessionId, conn.peer);
+                  }
+              } else if (msg.type === 'ACCEPT_TRANSFER') {
                   setState(TransferState.TRANSFERRING);
-                  
-                  setTimeout(() => sendFileSequence(conn, 0, 0), 100);
+                  scheduleSendFileSequence(conn, 0, 0);
               } else if (msg.type === 'RESUME_REQUEST') {
                   const payload = msg.payload as ResumePayload;
+                  const legacyChunkIndex = typeof payload.chunkIndex === 'number' ? Math.max(0, payload.chunkIndex) : 0;
+                  const resumedByteOffset = typeof payload.byteOffset === 'number' ? Math.max(0, payload.byteOffset) : legacyChunkIndex * TRANSFER_CONFIG.CHUNK_SIZE_WAN;
                   onNotification(`检测到断点，正在从第 ${payload.fileIndex + 1} 个文件恢复...`, 'info');
                   setState(TransferState.TRANSFERRING);
-                  setTimeout(() => sendFileSequence(conn, payload.fileIndex, payload.chunkIndex), 100);
+                  scheduleSendFileSequence(conn, payload.fileIndex, resumedByteOffset);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
-                  onNotification(`设备 ${conn.peer.slice(0,5)}... 取消了下载`, 'info');
+                  const remoteName = peerNamesRef.current[conn.peer] || `设备 ${conn.peer.slice(0, 5)}...`;
+                  onNotification(`${remoteName} 取消了下载`, 'info');
               }
           });
           
           conn.on('close', () => {
-              activeConnections.current.delete(conn);
-              peerProgress.current.delete(conn.peer);
-              peerRealtimeSpeed.current.delete(conn.peer);
-              peerAverageSpeed.current.delete(conn.peer);
-
-              updateConnectionStatusUI();
-              
-              if (isDestroyingRef.current) return;
-              if (activeConnections.current.size === 0 && activeTransfersCount.current === 0) {
-                  setConnectionStatus('');
-                  setState(TransferState.WAITING_FOR_PEER);
-              }
+              cleanupConnectionState(conn);
           });
           
           conn.on('error', (err) => {
@@ -517,7 +675,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
       });
   };
 
-  const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startChunkIndex: number = 0) => {
+  const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startByteOffset: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
 
@@ -533,6 +691,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const LOW_WATER_MARK = isLAN ? FLOW_CONTROL.LOW_WATER_MARK_LAN : FLOW_CONTROL.LOW_WATER_MARK_WAN;
 
     let totalBytesSent = 0;
+    let transferSucceeded = false;
     let lastBufferedAmount = 0;
     let lastUpdateTime = Date.now();
     let bytesInLastPeriod = 0;
@@ -544,8 +703,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     for(let i = 0; i < startFileIndex; i++) {
         totalBytesSent += files[i].size;
     }
-    if (startChunkIndex > 0) {
-        totalBytesSent += startChunkIndex * CHUNK_SIZE;
+    if (startByteOffset > 0) {
+        totalBytesSent += startByteOffset;
     }
 
     const totalSize = metadata?.totalSize || 0;
@@ -553,7 +712,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
 
     try {
-        let chunkStartOffset = startChunkIndex;
+        let fileStartByteOffset = startByteOffset;
 
         for (let i = startFileIndex; i < files.length; i++) {
             if (transferSessionId.current !== currentSessionId) return;
@@ -576,8 +735,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                 conn.send({ type: 'FILE_START', payload: startPayload });
             } catch(e) { throw new Error("Failed to send FILE_START"); }
 
-            let fileOffset = chunkStartOffset * CHUNK_SIZE;
-            chunkStartOffset = 0;
+            let fileOffset = i === startFileIndex ? Math.min(Math.max(0, fileStartByteOffset), file.size) : 0;
+            fileStartByteOffset = 0;
 
             while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId) return;
@@ -594,17 +753,59 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                     if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
                         dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
 
-                        await new Promise<void>(resolve => {
-                            const onLow = () => {
+                        await new Promise<void>((resolve, reject) => {
+                            let settled = false;
+
+                            const done = (err?: Error) => {
+                                if (settled) return;
+                                settled = true;
+                                clearTimeout(timeoutId);
                                 dataChannel.removeEventListener('bufferedamountlow', onLow);
-                                resolve();
+                                dataChannel.removeEventListener('close', onClose);
+                                if (err) {
+                                    reject(err);
+                                } else {
+                                    resolve();
+                                }
                             };
 
-                            if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
-                                resolve();
-                            } else {
-                                dataChannel.addEventListener('bufferedamountlow', onLow);
+                            const onLow = () => {
+                                if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
+                                    done();
+                                }
+                            };
+
+                            const onClose = () => {
+                                done(new Error("Data channel closed while waiting for buffer drain"));
+                            };
+
+                            const timeoutId = setTimeout(() => {
+                                if (dataChannel.readyState !== 'open') {
+                                    done(new Error("Data channel closed while waiting for buffer drain"));
+                                    return;
+                                }
+
+                                if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
+                                    done();
+                                    return;
+                                }
+
+                                // 在极端网络下 bufferedamountlow 可能不会触发，超时后继续发送，避免死等。
+                                done();
+                            }, 5000);
+
+                            if (dataChannel.readyState !== 'open') {
+                                done(new Error("Data channel is not open"));
+                                return;
                             }
+
+                            if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
+                                done();
+                                return;
+                            }
+
+                            dataChannel.addEventListener('bufferedamountlow', onLow);
+                            dataChannel.addEventListener('close', onClose);
                         });
                     }
 
@@ -658,6 +859,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
 
         try { conn.send({ type: 'ALL_FILES_COMPLETE' }); } catch(e) {}
         
+        transferSucceeded = true;
         peerProgress.current.set(peerId, 100);
         peerRealtimeSpeed.current.set(peerId, 0);
 
@@ -668,11 +870,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     } catch (err) {
         if (transferSessionId.current === currentSessionId) {
             console.warn(`Transfer to ${peerId} interrupted/failed:`, err);
+            const remoteName = peerNamesRef.current[conn.peer] || `设备 ...${conn.peer.slice(-4)}`;
+            onNotification(`${remoteName} 传输中断，等待重连后可继续`, 'error');
+
+            if (conn.open) {
+                conn.close();
+            }
         }
     } finally {
+        activeSendingPeersRef.current.delete(peerId);
         if (transferSessionId.current === currentSessionId) {
             activeTransfersCount.current -= 1;
-            if (activeTransfersCount.current === 0) {
+            if (transferSucceeded && activeTransfersCount.current === 0) {
                 setTotalProgress(100);
                 setCurrentFileIndex(0);
             }
@@ -691,6 +900,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
         }
     });
     activeConnections.current.clear();
+    activeSendingPeersRef.current.clear();
+    peerSessionIdsRef.current.clear();
+    sessionToPeerRef.current.clear();
+    ghostCandidateSinceRef.current.clear();
 
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
@@ -702,6 +915,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
     setIndividualStats([]);
+    setPeerNames({});
 
     setConnectionStatus('');
     setState(TransferState.IDLE);
@@ -859,6 +1073,36 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                <span>状态: <span className="font-bold text-brand-600">{connectionStatus || (state === TransferState.TRANSFERRING ? '传输中' : '等待连接')}</span></span>
            </div>
 
+           {individualStats.length > 0 && (
+              <div className="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700 overflow-hidden mt-2 animate-slide-up text-left">
+                <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-500 dark:text-slate-400 flex justify-between items-center">
+                    <span>设备传输列表 ({individualStats.length})</span>
+                    <Monitor size={14} />
+                </div>
+                <div className="divide-y divide-slate-100 dark:divide-slate-700 max-h-52 overflow-y-auto">
+                    {individualStats.map((stat) => (
+                        <div key={stat.peerId} className="px-4 py-2.5">
+                            <div className="flex items-center justify-between text-xs">
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <div className={`w-2 h-2 rounded-full ${stat.status === 'completed' ? 'bg-green-500' : stat.status === 'transferring' ? 'bg-brand-500 animate-pulse' : 'bg-slate-400'}`}></div>
+                                    <span className="text-slate-700 dark:text-slate-200 truncate" title={stat.peerId}>{stat.deviceName}</span>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <span className={`font-medium ${stat.status === 'completed' ? 'text-green-600' : stat.status === 'transferring' ? 'text-brand-600' : 'text-slate-500'}`}>
+                                        {stat.status === 'completed' ? '已完成' : stat.status === 'transferring' ? `${stat.progress}%` : '等待接收'}
+                                    </span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-mono w-16 text-right tabular-nums">{stat.speed}</span>
+                                </div>
+                            </div>
+                            <div className="mt-2 w-full bg-slate-200 dark:bg-slate-700 rounded-full h-1.5 overflow-hidden">
+                                <div className={`h-full transition-all duration-300 ${stat.status === 'completed' ? 'bg-green-500' : 'bg-brand-500'}`} style={{ width: `${Math.max(0, Math.min(100, stat.progress))}%` }} />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+              </div>
+           )}
+
            {state === TransferState.TRANSFERRING && (
                <div className="w-full space-y-5">
                    <div className="flex flex-col items-center gap-2">
@@ -909,36 +1153,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification }) => {
                        </div>
                    </div>
 
-                   {individualStats.length > 1 && (
-                       <div className="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700 overflow-hidden mt-4 animate-slide-up">
-                           <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-500 dark:text-slate-400 flex justify-between items-center">
-                               <span>设备列表 ({individualStats.length})</span>
-                               <Monitor size={14} />
-                           </div>
-                           <div className="divide-y divide-slate-100 dark:divide-slate-700 max-h-40 overflow-y-auto">
-                               {individualStats.map((stat) => (
-                                   <div key={stat.peerId} className="px-4 py-2 flex items-center justify-between text-xs">
-                                       <div className="flex items-center gap-2">
-                                           <div className={`w-2 h-2 rounded-full ${stat.progress === 100 ? 'bg-green-500' : 'bg-brand-500 animate-pulse'}`}></div>
-                                           <span className="text-slate-600 dark:text-slate-300 font-mono" title={stat.peerId}>
-                                               设备 ...{stat.peerId.slice(-4)}
-                                           </span>
-                                       </div>
-                                       <div className="flex items-center gap-3">
-                                            {stat.progress === 100 ? (
-                                                <span className="text-green-600 font-bold flex items-center gap-1"><Check size={12} /> 完成</span>
-                                            ) : (
-                                                <span className="text-slate-500">{stat.progress}%</span>
-                                            )}
-                                            <span className="text-slate-700 dark:text-slate-300 font-mono w-16 text-right tabular-nums">{stat.speed}</span>
-                                       </div>
-                                   </div>
-                               ))}
-                           </div>
-                       </div>
-                   )}
-               </div>
-           )}
+                </div>
+            )}
 
            <button onClick={stopSharing} className="w-full bg-red-50 text-red-600 font-bold py-3.5 rounded-full hover:bg-red-100 transition-colors border border-red-100 flex items-center justify-center gap-2">
              <X size={18} /> 停止分享

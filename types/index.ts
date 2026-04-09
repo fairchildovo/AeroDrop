@@ -49,11 +49,13 @@ export interface FileCompletePayload {
 
 export interface ResumePayload {
   fileIndex: number;
-  chunkIndex: number;
+  byteOffset?: number;
+  // Backward compatibility for older clients.
+  chunkIndex?: number;
 }
 
 export interface P2PMessage {
-  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'TRANSFER_CANCELLED';
+  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'TRANSFER_CANCELLED' | 'DEVICE_INFO';
   payload?: any;
 }
 

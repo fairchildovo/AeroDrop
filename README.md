@@ -31,6 +31,14 @@
 
 3. 打开浏览器访问显示的本地地址
 
+### TURN（可选但推荐）
+
+为提升跨网络连接成功率，建议在 Cloudflare Pages/Workers 环境变量中配置：
+
+- `TURN_URLS`：逗号分隔，例如 `turn:free.expressturn.com:3478?transport=udp,turn:free.expressturn.com:3478?transport=tcp`
+- `TURN_USERNAME`
+- `TURN_CREDENTIAL`
+
 ## 使用方法
 
 ### 发送文件

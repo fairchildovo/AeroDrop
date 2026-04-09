@@ -7,6 +7,7 @@ import { Share, DownloadCloud, Bell, Monitor, Package, Loader2, ShieldAlert, X }
 import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
+import { getInitialDeviceName } from './services/deviceName';
 
 interface NetworkCheckResponse {
   isRisk: boolean;
@@ -28,6 +29,7 @@ const App: React.FC = () => {
   const [initialViewId, setInitialViewId] = useState<string>('');
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
+  const [deviceName] = useState<string>(() => getInitialDeviceName());
 
   useEffect(() => {
     const checkNetwork = async () => {
@@ -50,6 +52,66 @@ const App: React.FC = () => {
       }
     };
     checkNetwork();
+  }, []);
+
+  useEffect(() => {
+    let isUnmounted = false;
+
+    const sendHeartbeat = async () => {
+      try {
+        const res = await fetch('/api/ping', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/plain;charset=UTF-8',
+          },
+          body: 'ping',
+          cache: 'no-store',
+          keepalive: true,
+        });
+
+        if (!isUnmounted && res.ok) {
+          const text = await res.text();
+          if (text !== 'pong') {
+            console.warn('Unexpected heartbeat response:', text);
+          }
+        }
+      } catch {
+        // Keep heartbeat silent to avoid noisy user-facing errors.
+      }
+    };
+
+    sendHeartbeat();
+    const timer = window.setInterval(sendHeartbeat, 30_000);
+
+    return () => {
+      isUnmounted = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const preloadViews = () => {
+      import('./components/Sender');
+      import('./components/Receiver');
+      import('./components/ScreenShare');
+    };
+
+    const win = window as Window & {
+      requestIdleCallback?: (cb: IdleRequestCallback, opts?: IdleRequestOptions) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+
+    if (typeof win.requestIdleCallback === 'function') {
+      const id = win.requestIdleCallback(() => preloadViews(), { timeout: 1200 });
+      return () => {
+        if (typeof win.cancelIdleCallback === 'function') {
+          win.cancelIdleCallback(id);
+        }
+      };
+    }
+
+    const timer = globalThis.setTimeout(preloadViews, 200);
+    return () => globalThis.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -108,8 +170,12 @@ const App: React.FC = () => {
   };
 
   const suspenseFallback = (
-    <div className="h-full min-h-56 flex items-center justify-center text-slate-400">
-      <Loader2 size={28} className="animate-spin" />
+    <div className="w-full h-full flex">
+      <div className="w-full max-w-xl mx-auto p-4 md:p-6">
+        <div className="h-full min-h-[540px] flex items-center justify-center">
+          <Loader2 size={48} className="animate-spin text-brand-500 dark:text-brand-400" />
+        </div>
+      </div>
     </div>
   );
 
@@ -154,41 +220,42 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {showRiskBanner && (
-            <>
-              {/* Desktop Badge */}
-              <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
-                <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                  检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
-                </span>
-                <button
-                  onClick={() => setShowRiskBanner(false)}
-                  className="ml-1 p-0.5 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
-                  aria-label="关闭警告"
-                >
-                  <X size={14} />
-                </button>
-              </div>
+          <div className="flex items-center gap-2">
+            {showRiskBanner && (
+              <>
+                {/* Desktop Badge */}
+                <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
+                  <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                  <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                    检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
+                  </span>
+                  <button
+                    onClick={() => setShowRiskBanner(false)}
+                    className="ml-1 p-0.5 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
+                    aria-label="关闭警告"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
 
-              {/* Mobile Icon Button */}
-              <button
-                className={`sm:hidden p-2 rounded-full transition-colors relative ${
-                  isRiskBannerExpanded
-                    ? 'bg-amber-100 dark:bg-amber-800/50 text-amber-600 dark:text-amber-400'
-                    : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
-                }`}
-                onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
-                aria-label="查看网络警告"
-              >
-                <ShieldAlert className="w-5 h-5" />
-                {/* 优化后的小红点 */}
-                {!isRiskBannerExpanded && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-slate-900"></span>
-                )}
-              </button>
-            </>
-          )}
+                {/* Mobile Icon Button */}
+                <button
+                  className={`sm:hidden p-2 rounded-full transition-colors relative ${
+                    isRiskBannerExpanded
+                      ? 'bg-amber-100 dark:bg-amber-800/50 text-amber-600 dark:text-amber-400'
+                      : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
+                  }`}
+                  onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
+                  aria-label="查看网络警告"
+                >
+                  <ShieldAlert className="w-5 h-5" />
+                  {!isRiskBannerExpanded && (
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-slate-900"></span>
+                  )}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
@@ -268,23 +335,21 @@ const App: React.FC = () => {
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
           <ErrorBoundary>
             <Suspense fallback={suspenseFallback}>
-              <div className={`${mode === 'send' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-                <Sender onNotification={addNotification} />
-              </div>
-            </Suspense>
-          </ErrorBoundary>
-          <ErrorBoundary>
-            <Suspense fallback={suspenseFallback}>
-              <div className={`${mode === 'receive' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-                <Receiver initialCode={initialCode} onNotification={addNotification} />
-              </div>
-            </Suspense>
-          </ErrorBoundary>
-          <ErrorBoundary>
-            <Suspense fallback={suspenseFallback}>
-              <div className={`${mode === 'screen' ? 'block animate-flip-in' : 'hidden'} h-full transform-style-3d`}>
-                <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
-              </div>
+              {mode === 'send' && (
+                <div className="block animate-flip-in h-full transform-style-3d">
+                  <Sender onNotification={addNotification} deviceName={deviceName} />
+                </div>
+              )}
+              {mode === 'receive' && (
+                <div className="block animate-flip-in h-full transform-style-3d">
+                  <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
+                </div>
+              )}
+              {mode === 'screen' && (
+                <div className="block animate-flip-in h-full transform-style-3d">
+                  <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
+                </div>
+              )}
             </Suspense>
           </ErrorBoundary>
         </div>
