@@ -6,7 +6,7 @@ streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService';
-import { Download, HardDriveDownload, Loader2, AlertCircle, Eye, Delete, FileCode, FileImage, FileAudio, FileVideo, FileArchive, File as FileIcon, ClipboardPaste, Layers, PlayCircle, X } from 'lucide-react';
+import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
 
 interface ReceiverProps {
   initialCode?: string;
@@ -44,6 +44,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const [totalFiles, setTotalFiles] = useState<number>(0);
 
   const [downloadSpeed, setDownloadSpeed] = useState<string>('0 KB/s');
+  const [downloadSpeedBytes, setDownloadSpeedBytes] = useState(0);
   const [eta, setEta] = useState<string>('--');
   const [senderDeviceName, setSenderDeviceName] = useState<string>('');
 
@@ -163,6 +164,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                 const speed = (bytesDiff / timeDiff) * 1000;
                 const safeSpeed = Math.max(0, speed);
                 setDownloadSpeed(formatFileSize(safeSpeed) + '/s');
+                setDownloadSpeedBytes(safeSpeed);
                 if (safeSpeed > 0 && total > received) {
                     const remainingBytes = total - received;
                     const seconds = remainingBytes / safeSpeed;
@@ -215,6 +217,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('data', async (data: any) => {
+      if (data == null) return;
+
       if (!isTransferActiveRef.current && state !== TransferState.IDLE && state !== TransferState.WAITING_FOR_PEER && state !== TransferState.PEER_CONNECTED) {
           return;
       }
@@ -224,7 +228,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (isBinary) {
          if (!isTransferActiveRef.current) return;
 
-         const chunkData = (ArrayBuffer.isView(data) ? data.buffer : data) as ArrayBuffer;
+         const chunkData = ((): ArrayBuffer => {
+             if (ArrayBuffer.isView(data)) {
+                 const view = data as ArrayBufferView;
+                 return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+             }
+             return data as ArrayBuffer;
+         })();
          const byteLength = chunkData.byteLength;
 
          if (byteLength > 0) {
@@ -373,7 +383,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     conn.on('close', () => {
        clearConnectionTimeout();
        const currentState = stateRef.current;
-       if (currentState === TransferState.TRANSFERRING || currentState === TransferState.WAITING_FOR_PEER) {
+       if (
+         currentState === TransferState.TRANSFERRING ||
+         currentState === TransferState.WAITING_FOR_PEER ||
+         currentState === TransferState.PEER_CONNECTED
+       ) {
            setErrorMsg("连接已断开");
            setState(TransferState.ERROR);
        }
@@ -389,6 +403,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       completedFileIndicesRef.current.clear();
       currentFileIndexRef.current = 0;
       setDownloadSpeed('0 KB/s');
+      setDownloadSpeedBytes(0);
       setEta('--');
       abortStreams();
       writeQueueRef.current = Promise.resolve();
@@ -521,7 +536,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const acceptTransfer = async () => {
-    if (connRef.current) {
+    if (connRef.current?.open) {
       resetStateForNewTransfer();
       isTransferActiveRef.current = true;
 
@@ -532,11 +547,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
       setState(TransferState.TRANSFERRING);
+    } else {
+      setErrorMsg("连接已断开，请重新连接发送方。");
+      setState(TransferState.ERROR);
+      if (onNotification) onNotification("连接已断开，请重试", 'error');
     }
   };
 
   const resumeTransfer = () => {
-      if (connRef.current) {
+      if (connRef.current?.open) {
           isTransferActiveRef.current = true;
           const currentIdx = currentFileIndexRef.current;
           const byteOffset = Math.max(0, receivedSizeRef.current);
@@ -549,6 +568,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx, byteOffset } });
           }
           setState(TransferState.TRANSFERRING);
+      } else {
+          setErrorMsg("连接已断开，请重新连接发送方。");
+          setState(TransferState.ERROR);
+          if (onNotification) onNotification("连接已断开，请重试", 'error');
       }
   };
 
@@ -565,6 +588,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setState(TransferState.IDLE);
         setErrorMsg('');
         setProgress(0);
+        setDownloadSpeedBytes(0);
         setSenderDeviceName('');
         resetStateForNewTransfer();
     });
@@ -575,11 +599,46 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const handleDigitClick = (digit: string) => { if (code.length < 4) setCode(prev => prev + digit); };
   const handleBackspace = () => { setCode(prev => prev.slice(0, -1)); };
   const handleClear = () => { setCode(''); };
-  const handlePaste = async () => {  };
-  const getFileIcon = (name: string, type: string) => {  return <FileIcon size={24} className="text-slate-400" />; };
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (/^\d{4}$/.test(text)) {
+        setCode(text);
+        return;
+      }
+      const match = text.match(/[?&]code=(\d{4})(?:&|$)/);
+      if (match) {
+        setCode(match[1]);
+        return;
+      }
+      if (onNotification) onNotification("剪贴板中未找到 4 位口令", 'info');
+    } catch {
+      if (onNotification) onNotification("无法读取剪贴板，请手动输入口令", 'info');
+    }
+  };
 
   const primaryFile = metadata?.files?.[0];
   const isMultiFile = (metadata?.files?.length || 0) > 1;
+  const formatEta = (seconds: number): string => {
+    if (!Number.isFinite(seconds) || seconds <= 0) return '--';
+    if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
+    if (seconds < 3600) return `${Math.ceil(seconds / 60)} 分钟`;
+    return `${Math.ceil(seconds / 3600)} 小时`;
+  };
+  const totalBytes = metadata?.totalSize ?? 0;
+  const completedBytes = metadata?.files.reduce((acc, file, idx) => {
+    return acc + (completedFileIndicesRef.current.has(idx) ? file.size : 0);
+  }, 0) ?? 0;
+  const currentFileBytes = (() => {
+    if (!metadata) return 0;
+    const idx = currentFileIndexRef.current;
+    if (idx < 0 || idx >= metadata.files.length) return 0;
+    if (completedFileIndicesRef.current.has(idx)) return 0;
+    return Math.min(receivedSizeRef.current, metadata.files[idx].size);
+  })();
+  const overallTransferredBytes = Math.min(totalBytes, completedBytes + currentFileBytes);
+  const overallRemainingBytes = Math.max(0, totalBytes - overallTransferredBytes);
+  const overallEta = downloadSpeedBytes > 0 ? formatEta(overallRemainingBytes / downloadSpeedBytes) : '--';
 
   
   
@@ -606,13 +665,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
                    <button key={num} onClick={() => handleDigitClick(num.toString())} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">{num}</button>
                  ))}
-                 <button onClick={() => { navigator.clipboard.readText().then(t => {
-                   
-                   if(/^\d{4}$/.test(t)) { setCode(t); return; }
-                   
-                   const match = t.match(/[?&]code=(\d{4})(?:&|$)/);
-                   if(match) setCode(match[1]);
-                 }).catch(() => {}) }} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"><ClipboardPaste size={20} /></button>
+                 <button onClick={handlePasteFromClipboard} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"><ClipboardPaste size={20} /></button>
                  <button onClick={() => handleDigitClick('0')} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">0</button>
                  <button onClick={handleBackspace} onContextMenu={(e) => { e.preventDefault(); handleClear(); }} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600"><Delete size={24} /></button>
              </div>
@@ -670,6 +723,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                <div className="flex justify-between items-center text-xs text-slate-500 pt-1">
                   <span>{downloadSpeed}</span>
                   <span>{eta}</span>
+               </div>
+               <div className="flex justify-between items-center text-[11px] text-slate-500 pt-1">
+                  <span>{formatFileSize(overallTransferredBytes)} / {formatFileSize(totalBytes)}</span>
+                  <span>预计剩余 {overallEta}</span>
                </div>
                <button onClick={reset} className="w-full py-2.5 mt-2 bg-red-50 text-red-600 rounded-full text-sm font-medium">取消</button>
              </div>

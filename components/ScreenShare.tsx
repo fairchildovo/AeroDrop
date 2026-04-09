@@ -609,8 +609,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setIsConnecting(true);
     setTargetSharerId(sharerId);
 
-    // 设置全局连接超时 (8秒)
-    // 如果 8 秒内没有建立连接（没有进入 isViewing 状态），则强制超时
+    // 设置全局连接超时（弱网场景下放宽）
+    // 如果超时内没有建立连接（没有进入 isViewing 状态），则判定失败
     if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
     connectingTimeoutRef.current = setTimeout(() => {
       // 检查是否还在连接中（如果没有成功进入 viewing，且没有被手动取消）
@@ -620,7 +620,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setIsConnecting(false);
       // 触发一次清理，但不标记为手动停止，以便允许用户重试
       stopViewing(false);
-    }, 8000);
+    }, 20000);
 
     // 如果是重连尝试，显示正在重连的状态
     if (isRetry) {
@@ -688,24 +688,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         return;
       }
 
-
-      const connectionTimeout = setTimeout(() => {
-        if (!streamRef.current) {
-          setError('连接超时，请检查分享者是否仍在共享');
-          setIsConnecting(false);
-          if (call) {
-            call.close();
-          }
-        }
-      }, 15000);
-
-
       let hasReceivedStream = false;
 
       call.on('stream', (remoteStream) => {
-        clearTimeout(connectionTimeout);
-
-
         if (hasReceivedStream) {
           console.log('Stream event fired again, skipping duplicate handling');
           return;
@@ -761,7 +746,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       });
 
       call.on('close', () => {
-        clearTimeout(connectionTimeout);
         console.log('Call closed');
 
         // 只有非手动停止时，才触发重连逻辑
@@ -789,7 +773,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       });
 
       call.on('error', (err) => {
-        clearTimeout(connectionTimeout);
         console.error('Call error:', err);
 
         if (!isManualStopRef.current) {
@@ -855,7 +838,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const shareLink = useMemo(() => {
     if (!peerId) return null;
-    const baseUrl = window.location.origin;
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
     return `${baseUrl}?view=${peerId}`;
   }, [peerId]);
 

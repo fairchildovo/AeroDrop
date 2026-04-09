@@ -31,6 +31,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const [totalProgress, setTotalProgress] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState<string>('0 KB/s');
   const [avgSpeed, setAvgSpeed] = useState<string>('0 KB/s');
+  const [currentSpeedBytes, setCurrentSpeedBytes] = useState(0);
+  const [avgSpeedBytes, setAvgSpeedBytes] = useState(0);
   
   const [individualStats, setIndividualStats] = useState<PeerTransferStat[]>([]);
 
@@ -128,6 +130,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             if (state === TransferState.TRANSFERRING) {
                 setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
                 setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
+                setCurrentSpeedBytes(totalSpeed);
+                setAvgSpeedBytes(totalAvgSpeed);
                 const activeProgressCount = stats.filter((s) => s.status !== 'waiting').length;
 
                 if (activeProgressCount > 0) {
@@ -926,6 +930,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setTotalProgress(0);
     setCurrentSpeed('0 KB/s');
     setAvgSpeed('0 KB/s');
+    setCurrentSpeedBytes(0);
+    setAvgSpeedBytes(0);
     fileListRef.current = [];
     if (timerRef.current) clearInterval(timerRef.current);
   };
@@ -944,6 +950,38 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const shareLink = `${window.location.origin}${window.location.pathname}?code=${transferCode}`;
+  const formatEta = (seconds: number): string => {
+      if (!Number.isFinite(seconds) || seconds <= 0) return '--';
+      if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
+      if (seconds < 3600) return `${Math.ceil(seconds / 60)} 分钟`;
+      return `${Math.ceil(seconds / 3600)} 小时`;
+  };
+  const parseSpeedToBytesPerSec = (speedLabel: string): number => {
+      const normalized = speedLabel.trim().toLowerCase();
+      if (!normalized || normalized === '--' || normalized === '完成') return 0;
+      const numeric = parseFloat(normalized);
+      if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+      if (normalized.includes('gb')) return numeric * 1024 * 1024 * 1024;
+      if (normalized.includes('mb')) return numeric * 1024 * 1024;
+      if (normalized.includes('kb')) return numeric * 1024;
+      if (normalized.includes('byte') || normalized.endsWith('b')) return numeric;
+      return 0;
+  };
+  const totalBytes = metadata?.totalSize ?? 0;
+  const transferredBytes = totalBytes > 0
+    ? Math.floor((Math.max(0, Math.min(100, totalProgress)) / 100) * totalBytes)
+    : 0;
+  const remainingBytes = Math.max(0, totalBytes - transferredBytes);
+  const peerRealtimeSpeeds = individualStats
+    .filter((s) => s.status === 'transferring')
+    .map((s) => parseSpeedToBytesPerSec(s.speed))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const slowestSpeedBytes = peerRealtimeSpeeds.length > 0 ? Math.min(...peerRealtimeSpeeds) : 0;
+  const etaSpeedBytes = activeConnections.current.size > 1
+    ? slowestSpeedBytes
+    : (currentSpeedBytes > 0 ? currentSpeedBytes : avgSpeedBytes);
+  const overallEta = etaSpeedBytes > 0 ? formatEta(remainingBytes / etaSpeedBytes) : '--';
+
   const handleCopyLink = async () => {
       try {
           await navigator.clipboard.writeText(shareLink);
@@ -1139,6 +1177,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                            >
                                <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
                            </div>
+                       </div>
+                       <div className="flex justify-between text-[11px] text-slate-500 dark:text-slate-400 px-1">
+                           <span>{formatFileSize(transferredBytes)} / {formatFileSize(totalBytes)}</span>
+                           <span>预计剩余 {overallEta}</span>
                        </div>
                    </div>
 

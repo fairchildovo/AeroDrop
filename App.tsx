@@ -21,6 +21,7 @@ interface NetworkCheckResponse {
 const Sender = lazy(() => import('./components/Sender').then(module => ({ default: module.Sender })));
 const Receiver = lazy(() => import('./components/Receiver').then(module => ({ default: module.Receiver })));
 const ScreenShare = lazy(() => import('./components/ScreenShare').then(module => ({ default: module.ScreenShare })));
+const RISK_BANNER_DISMISS_UNTIL_KEY = 'aerodrop-risk-banner-dismiss-until';
 
 const App: React.FC = () => {
   const [mode, setMode] = useState<'send' | 'receive' | 'screen'>('send');
@@ -30,6 +31,28 @@ const App: React.FC = () => {
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
   const [deviceName] = useState<string>(() => getInitialDeviceName());
+
+  const isRiskBannerDismissed = () => {
+    try {
+      const raw = window.localStorage.getItem(RISK_BANNER_DISMISS_UNTIL_KEY);
+      if (!raw) return false;
+      const dismissUntil = Number(raw);
+      return Number.isFinite(dismissUntil) && dismissUntil > Date.now();
+    } catch {
+      return false;
+    }
+  };
+
+  const dismissRiskBanner = () => {
+    setShowRiskBanner(false);
+    setIsRiskBannerExpanded(false);
+    try {
+      const dismissUntil = Date.now() + 24 * 60 * 60 * 1000;
+      window.localStorage.setItem(RISK_BANNER_DISMISS_UNTIL_KEY, String(dismissUntil));
+    } catch {
+      // Ignore persistence errors and still hide for current session.
+    }
+  };
 
   useEffect(() => {
     const checkNetwork = async () => {
@@ -44,7 +67,7 @@ const App: React.FC = () => {
         }
 
         const data = await res.json() as NetworkCheckResponse;
-        if (data.isRisk) {
+        if (data.isRisk && !isRiskBannerDismissed()) {
           setShowRiskBanner(true);
         }
       } catch (error) {
@@ -230,7 +253,7 @@ const App: React.FC = () => {
                     检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
                   </span>
                   <button
-                    onClick={() => setShowRiskBanner(false)}
+                    onClick={dismissRiskBanner}
                     className="ml-1 p-0.5 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
                     aria-label="关闭警告"
                   >
@@ -273,9 +296,7 @@ const App: React.FC = () => {
           </div>
           <button
             onClick={() => {
-              setIsRiskBannerExpanded(false);
-  
-              // setShowRiskBanner(false);
+              dismissRiskBanner();
             }}
             className="p-1 -mr-1 -mt-1 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
           >

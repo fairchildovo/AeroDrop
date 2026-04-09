@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Share, PlusSquare, X, Download } from 'lucide-react';
 
+const PWA_PROMPT_DISMISS_UNTIL_KEY = 'aerodrop-pwa-prompt-dismiss-until';
+const PWA_PROMPT_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+
 export const PWAInstallPrompt: React.FC = () => {
   const [showPrompt, setShowPrompt] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -8,9 +11,37 @@ export const PWAInstallPrompt: React.FC = () => {
   const showPromptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const isPromptDismissed = () => {
+    try {
+      const raw = window.localStorage.getItem(PWA_PROMPT_DISMISS_UNTIL_KEY);
+      if (!raw) return false;
+      const dismissUntil = Number(raw);
+      return Number.isFinite(dismissUntil) && dismissUntil > Date.now();
+    } catch {
+      return false;
+    }
+  };
+
+  const setPromptDismissed = () => {
+    try {
+      const dismissUntil = Date.now() + PWA_PROMPT_COOLDOWN_MS;
+      window.localStorage.setItem(PWA_PROMPT_DISMISS_UNTIL_KEY, String(dismissUntil));
+    } catch {
+      // Ignore storage errors.
+    }
+  };
+
+  const dismissPrompt = () => {
+    setShowPrompt(false);
+    setPromptDismissed();
+  };
+
   useEffect(() => {
     // Check if already installed
     if (window.matchMedia('(display-mode: standalone)').matches) {
+      return;
+    }
+    if (isPromptDismissed()) {
       return;
     }
 
@@ -34,19 +65,19 @@ export const PWAInstallPrompt: React.FC = () => {
 
     if (isIosDevice && !isStandalone) {
       setIsIOS(true);
-      // Show iOS prompt after a delay
+      // Show iOS prompt after a delay, then auto close after 6s.
       if (showPromptTimeoutRef.current) {
         clearTimeout(showPromptTimeoutRef.current);
       }
       showPromptTimeoutRef.current = setTimeout(() => {
         setShowPrompt(true);
-        // Auto close iOS prompt after 5 seconds (giving user enough time to read)
-        // User requested 3 seconds, but strictly following it might be too fast to read instructions.
-        // However, I will follow the user's specific instruction: "三秒后自动关闭"
         if (autoCloseTimeoutRef.current) {
           clearTimeout(autoCloseTimeoutRef.current);
         }
-        autoCloseTimeoutRef.current = setTimeout(() => setShowPrompt(false), 3000);
+        autoCloseTimeoutRef.current = setTimeout(() => {
+          setShowPrompt(false);
+          setPromptDismissed();
+        }, 6000);
       }, 1000);
     }
 
@@ -69,6 +100,8 @@ export const PWAInstallPrompt: React.FC = () => {
 
     if (outcome === 'accepted') {
       setShowPrompt(false);
+    } else {
+      setPromptDismissed();
     }
     setDeferredPrompt(null);
   };
@@ -80,7 +113,7 @@ export const PWAInstallPrompt: React.FC = () => {
       <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-4 relative overflow-hidden">
 
         <button
-          onClick={() => setShowPrompt(false)}
+          onClick={dismissPrompt}
           className="absolute top-2 right-2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
         >
           <X size={16} />

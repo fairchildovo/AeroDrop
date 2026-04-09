@@ -58,17 +58,17 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     reason = "isp";
     details = originalIsp;
   }
-  // Condition B: Country Check (Non-CN)
-  else if (country !== "CN") {
-    isRisk = true;
-    reason = "location";
-    details = `Non-CN Location: ${country}`;
-  }
-  // Condition C: Threat Score Check
+  // Condition B: Threat Score Check
   else if (threatScore > 10) {
     isRisk = true;
     reason = "score";
     details = `Threat Score: ${threatScore}`;
+  }
+  // Location is kept as advisory only (not a hard-risk flag).
+  else if (country !== "CN") {
+    isRisk = false;
+    reason = null;
+    details = `Location: ${country}`;
   }
 
   return new Response(
