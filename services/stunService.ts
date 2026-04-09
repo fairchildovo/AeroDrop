@@ -9,17 +9,27 @@ type IceConfigResponse = {
   iceServers?: IceServerConfig[];
   secure?: boolean;
   iceCandidatePoolSize?: number;
+  iceTransportPolicy?: RTCIceTransportPolicy;
+  hasTurn?: boolean;
 };
 
-export const getIceConfig = async (): Promise<{ iceServers: IceServerConfig[], secure: boolean, iceCandidatePoolSize: number }> => {
-  const fallback: { iceServers: IceServerConfig[], secure: boolean, iceCandidatePoolSize: number } = {
+export const getIceConfig = async (): Promise<{
+  iceServers: IceServerConfig[];
+  secure: boolean;
+  iceCandidatePoolSize: number;
+  iceTransportPolicy: RTCIceTransportPolicy;
+  hasTurn: boolean;
+}> => {
+  const fallback = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun.cloudflare.com:3478' }
     ],
     secure: true,
-    iceCandidatePoolSize: 10
+    iceCandidatePoolSize: 20,
+    iceTransportPolicy: 'all' as RTCIceTransportPolicy,
+    hasTurn: false
   };
 
   try {
@@ -34,7 +44,14 @@ export const getIceConfig = async (): Promise<{ iceServers: IceServerConfig[], s
     return {
       iceServers: data.iceServers,
       secure: typeof data.secure === 'boolean' ? data.secure : fallback.secure,
-      iceCandidatePoolSize: typeof data.iceCandidatePoolSize === 'number' ? data.iceCandidatePoolSize : fallback.iceCandidatePoolSize
+      iceCandidatePoolSize: typeof data.iceCandidatePoolSize === 'number' ? data.iceCandidatePoolSize : fallback.iceCandidatePoolSize,
+      iceTransportPolicy: data.iceTransportPolicy === 'relay' ? 'relay' : 'all',
+      hasTurn: typeof data.hasTurn === 'boolean'
+        ? data.hasTurn
+        : data.iceServers.some(server => {
+            const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+            return urls.some(url => url.startsWith('turn:') || url.startsWith('turns:'));
+          })
     };
   } catch {
     return fallback;

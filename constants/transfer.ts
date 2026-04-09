@@ -4,7 +4,8 @@
 export const TRANSFER_CONFIG = {
   
   CHUNK_SIZE_LAN: 256 * 1024,    
-  CHUNK_SIZE_WAN: 64 * 1024,     
+  CHUNK_SIZE_WAN: 128 * 1024,    
+  CHUNK_SIZE_RELAY: 64 * 1024,   
 
   
   READ_BUFFER_SIZE: 16 * 1024 * 1024,  
@@ -24,8 +25,11 @@ export const FLOW_CONTROL = {
 
   
   
-  HIGH_WATER_MARK_WAN: 512 * 1024,        
-  LOW_WATER_MARK_WAN: 128 * 1024,         
+  // WAN 里 RTT 更高，适当提高在途缓冲可以显著提升吞吐
+  HIGH_WATER_MARK_WAN: 4 * 1024 * 1024,   
+  LOW_WATER_MARK_WAN: 1 * 1024 * 1024,    
+  HIGH_WATER_MARK_RELAY: 1 * 1024 * 1024,
+  LOW_WATER_MARK_RELAY: 256 * 1024,
 } as const;
 
 

@@ -32,8 +32,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   const turnCredential = context.env.TURN_CREDENTIAL?.trim();
 
   const iceServers: IceServerConfig[] = [...STUN_SERVERS];
+  const hasTurn = turnUrls.length > 0 && !!turnUsername && !!turnCredential;
 
-  if (turnUrls.length > 0 && turnUsername && turnCredential) {
+  if (hasTurn) {
     iceServers.push({
       urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls,
       username: turnUsername,
@@ -45,7 +46,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     JSON.stringify({
       iceServers,
       secure: true,
-      iceCandidatePoolSize: 10
+      iceCandidatePoolSize: 20,
+      iceTransportPolicy: 'all',
+      hasTurn
     }),
     {
       headers: {
@@ -55,4 +58,3 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     }
   );
 };
-

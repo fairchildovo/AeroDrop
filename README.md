@@ -39,6 +39,9 @@
 - `TURN_USERNAME`
 - `TURN_CREDENTIAL`
 
+建议至少同时提供 `udp + tcp + 443(tls)` 三类 TURN 地址，跨运营商/企业网络成功率和连接速度会更稳定，例如：  
+`turn:your-turn.example.com:3478?transport=udp,turn:your-turn.example.com:3478?transport=tcp,turns:your-turn.example.com:443?transport=tcp`
+
 ## 使用方法
 
 ### 发送文件

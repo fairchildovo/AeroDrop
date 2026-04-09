@@ -4,6 +4,16 @@ import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileComplete
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
+import {
+  attachIceRouteToSession,
+  collectIceRouteWithRetry,
+  ConnectionSession,
+  createConnectionSession,
+  markConnectionFailure,
+  markConnectionSuccess,
+  markSessionEvent,
+  startConnectionAttempt,
+} from '../services/connectionTelemetry';
 import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Users, Monitor } from 'lucide-react';
 
 interface SenderProps {
@@ -17,6 +27,12 @@ type PeerTransferStat = {
   speed: string;
   progress: number;
   status: 'waiting' | 'transferring' | 'completed';
+};
+
+type ConnectionRoute = {
+  isLan: boolean;
+  isRelay: boolean;
+  protocol: string;
 };
 
 export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
@@ -67,6 +83,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const fileListRef = useRef<File[]>([]);
   const lastConnectionStatsPollRef = useRef<number>(0);
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
+  const shareTelemetryRef = useRef<ConnectionSession | null>(null);
   const localDeviceNameRef = useRef<string>(deviceName);
   const peerNamesRef = useRef<Record<string, string>>(peerNames);
   const GHOST_SWEEP_INTERVAL_MS = 4000;
@@ -212,10 +229,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const peerIsLAN = useRef<Map<string, boolean>>(new Map());
 
-  const updateConnectionStats = async (conn: DataConnection): Promise<boolean> => {
-      if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') return false;
+  const updateConnectionStats = async (conn: DataConnection): Promise<ConnectionRoute> => {
+      if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') {
+        return { isLan: false, isRelay: false, protocol: 'udp' };
+      }
 
-      let isLanConnection = false;
+      let route: ConnectionRoute = { isLan: false, isRelay: false, protocol: 'udp' };
 
       try {
           const stats = await conn.peerConnection.getStats();
@@ -239,15 +258,19 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               const localCandidate = stats.get(selectedPair.localCandidateId);
               const remoteCandidate = stats.get(selectedPair.remoteCandidateId);
               const protocol = localCandidate?.protocol || 'udp';
+              const localCandidateType = localCandidate?.candidateType || '';
+              const remoteCandidateType = remoteCandidate?.candidateType || '';
 
               const localIP = localCandidate?.address || localCandidate?.ip || '';
               const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
-              isLanConnection = isPrivateIP(localIP) && isPrivateIP(remoteIP);
+              const isRelayConnection = localCandidateType === 'relay' || remoteCandidateType === 'relay';
+              const isLanConnection = !isRelayConnection && isPrivateIP(localIP) && isPrivateIP(remoteIP);
+              route = { isLan: isLanConnection, isRelay: isRelayConnection, protocol };
 
               peerIsLAN.current.set(conn.peer, isLanConnection);
 
               if (activeConnections.current.size === 1) {
-                  const networkType = isLanConnection ? 'LAN' : 'WAN';
+                  const networkType = isRelayConnection ? 'RELAY' : isLanConnection ? 'LAN' : 'P2P-WAN';
                   setConnectionStatus(`已连接 | ${protocol.toUpperCase()} | ${networkType}`);
               } else {
                   setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
@@ -257,7 +280,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           
       }
 
-      return isLanConnection;
+      return route;
   };
 
   
@@ -472,6 +495,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const startSharing = async () => {
     if (!fileList.length || !metadata) return;
+    shareTelemetryRef.current = createConnectionSession('sender', {
+      fileCount: fileList.length,
+      totalSize: metadata.totalSize,
+      customCode: customCodeInput.length === 4,
+    });
+    startConnectionAttempt(shareTelemetryRef.current, 'create_share');
     isDestroyingRef.current = false;
     
     
@@ -490,22 +519,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const metadataWithConstraints: FileMetadata = { ...metadata, constraints: { expiresAt } };
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
-    const peer = new Peer({ debug: peerDebugLevel, config: iceConfig });
-    peer.on('open', (id) => {
-      let finalCode = customCodeInput.length === 4 ? customCodeInput : Math.floor(1000 + Math.random() * 9000).toString();
-      peer.destroy();
-      const customPeer = new Peer(`aerodrop-${finalCode}`, { debug: peerDebugLevel, config: iceConfig });
-      setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
+    const finalCode = customCodeInput.length === 4 ? customCodeInput : Math.floor(1000 + Math.random() * 9000).toString();
+    const customPeer = new Peer(`aerodrop-${finalCode}`, {
+      debug: peerDebugLevel,
+      pingInterval: 5000,
+      config: {
+        iceServers: iceConfig.iceServers,
+        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+        iceTransportPolicy: iceConfig.iceTransportPolicy,
+      }
     });
-    peer.on('error', (err) => {
-        if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-            setErrorMsg('网络初始化失败，请检查网络后重试');
-            setState(TransferState.ERROR);
-            return;
-        }
-        setErrorMsg('网络初始化失败，请重试');
-        setState(TransferState.ERROR);
-    });
+    setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {
@@ -526,7 +550,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       updateConnectionStatusUI();
 
       if (isDestroyingRef.current) return;
-      if (activeConnections.current.size === 0 && activeTransfersCount.current === 0) {
+      if (activeSendingPeersRef.current.size === 0) {
+          if (activeConnections.current.size > 0) {
+              setState(TransferState.PEER_CONNECTED);
+              return;
+          }
+
           setConnectionStatus('');
           setState(TransferState.WAITING_FOR_PEER);
       }
@@ -591,6 +620,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const setupPeerListeners = (peer: Peer, code: string, sessionMetadata: FileMetadata) => {
       peerRef.current = peer;
       peer.on('open', () => {
+          markConnectionSuccess(shareTelemetryRef.current, { code });
           setTransferCode(code);
           setState(TransferState.WAITING_FOR_PEER);
       });
@@ -599,11 +629,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       });
       peer.on('error', (err) => {
           if (err.type === 'unavailable-id') {
+              markConnectionFailure(shareTelemetryRef.current, 'code_unavailable');
               setErrorMsg('该口令已被占用，请换一个。');
               setState(TransferState.CONFIGURING);
           } else {
               if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
               console.error("Peer Error:", err);
+              markConnectionFailure(shareTelemetryRef.current, `peer_error:${err.type}`);
               if (activeConnections.current.size === 0) {
                  setErrorMsg(`连接错误: ${err.type}`);
                  setState(TransferState.ERROR);
@@ -620,6 +652,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           }
           
           conn.on('open', () => {
+              markSessionEvent(shareTelemetryRef.current, 'receiver_connected', { peerId: conn.peer });
               activeConnections.current.add(conn);
               peerProgress.current.set(conn.peer, peerProgress.current.get(conn.peer) || 0);
               peerRealtimeSpeed.current.set(conn.peer, peerRealtimeSpeed.current.get(conn.peer) || 0);
@@ -627,6 +660,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               updateConnectionStatusUI();
               
               updateConnectionStats(conn);
+              const pc = conn.peerConnection;
+              if (pc) {
+                collectIceRouteWithRetry(pc).then((route) => {
+                  attachIceRouteToSession(shareTelemetryRef.current, route);
+                });
+              }
 
               setState(TransferState.PEER_CONNECTED);
               try {
@@ -666,6 +705,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               } else if (msg.type === 'TRANSFER_CANCELLED') {
                   const remoteName = peerNamesRef.current[conn.peer] || `设备 ${conn.peer.slice(0, 5)}...`;
                   onNotification(`${remoteName} 取消了下载`, 'info');
+                  // Receiver explicitly cancelled; close immediately so sender UI exits "transferring" state without delay.
+                  try {
+                    if (conn.open) conn.close();
+                  } catch {}
+                  cleanupConnectionState(conn);
               }
           });
           
@@ -686,13 +730,25 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
 
-    const isLAN = await updateConnectionStats(conn);
+    const route = await updateConnectionStats(conn);
 
-    const CHUNK_SIZE = isLAN ? TRANSFER_CONFIG.CHUNK_SIZE_LAN : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
+    const CHUNK_SIZE = route.isLan
+      ? TRANSFER_CONFIG.CHUNK_SIZE_LAN
+      : route.isRelay
+        ? TRANSFER_CONFIG.CHUNK_SIZE_RELAY
+        : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
     const READ_BUFFER_SIZE = TRANSFER_CONFIG.READ_BUFFER_SIZE;
 
-    const HIGH_WATER_MARK = isLAN ? FLOW_CONTROL.HIGH_WATER_MARK_LAN : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
-    const LOW_WATER_MARK = isLAN ? FLOW_CONTROL.LOW_WATER_MARK_LAN : FLOW_CONTROL.LOW_WATER_MARK_WAN;
+    const HIGH_WATER_MARK = route.isLan
+      ? FLOW_CONTROL.HIGH_WATER_MARK_LAN
+      : route.isRelay
+        ? FLOW_CONTROL.HIGH_WATER_MARK_RELAY
+        : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
+    const LOW_WATER_MARK = route.isLan
+      ? FLOW_CONTROL.LOW_WATER_MARK_LAN
+      : route.isRelay
+        ? FLOW_CONTROL.LOW_WATER_MARK_RELAY
+        : FLOW_CONTROL.LOW_WATER_MARK_WAN;
 
     let totalBytesSent = 0;
     let transferSucceeded = false;

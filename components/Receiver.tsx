@@ -6,6 +6,17 @@ streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig } from '../services/stunService';
+import {
+  attachIceRouteToSession,
+  collectIceRouteWithRetry,
+  ConnectionSession,
+  createConnectionSession,
+  markConnectionFailure,
+  markConnectionRetry,
+  markConnectionSuccess,
+  markSessionEvent,
+  startConnectionAttempt,
+} from '../services/connectionTelemetry';
 import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
 
 interface ReceiverProps {
@@ -15,6 +26,10 @@ interface ReceiverProps {
 }
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
+  const CONNECT_TIMEOUT_MS = 12000;
+  const FAST_RETRY_DELAY_MS = 700;
+  const MAX_CONNECT_RETRY = 6;
+
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
     try {
@@ -57,6 +72,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
   const localDeviceNameRef = useRef<string>(deviceName);
   const receiverSessionIdRef = useRef<string>(getReceiverSessionId());
+  const connectTelemetryRef = useRef<ConnectionSession | null>(null);
+  const hasTurnRef = useRef(false);
+  const currentIcePolicyRef = useRef<RTCIceTransportPolicy>('all');
+  const relayFallbackTriedRef = useRef(false);
+  const p2pTimeoutRetryCountRef = useRef(0);
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -205,10 +225,31 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const setupConnListeners = (conn: DataConnection) => {
+    let reconnectScheduled = false;
+    const scheduleFastReconnect = () => {
+      if (reconnectScheduled) return true;
+      if (stateRef.current !== TransferState.WAITING_FOR_PEER) return false;
+      if (retryCountRef.current >= MAX_CONNECT_RETRY) return false;
+      if (!peerRef.current || peerRef.current.destroyed) return false;
+
+      reconnectScheduled = true;
+      retryCountRef.current += 1;
+      markConnectionRetry(connectTelemetryRef.current, 'data_channel_close_or_error');
+      window.setTimeout(() => {
+        if (!peerRef.current || peerRef.current.destroyed) return;
+        if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
+        startConnectionAttempt(connectTelemetryRef.current, 'fast_retry');
+        const nextConn = peerRef.current.connect(`aerodrop-${codeRef.current}`, { serialization: 'binary' });
+        setupConnListeners(nextConn);
+      }, FAST_RETRY_DELAY_MS);
+      return true;
+    };
+
     connRef.current = conn;
     conn.on('open', () => {
       clearConnectionTimeout();
       retryCountRef.current = 0;
+      markConnectionSuccess(connectTelemetryRef.current, { peerId: conn.peer });
       conn.send({
         type: 'DEVICE_INFO',
         payload: {
@@ -216,6 +257,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           sessionId: receiverSessionIdRef.current
         }
       });
+
+      const pc = conn.peerConnection;
+      if (pc) {
+        collectIceRouteWithRetry(pc).then((route) => {
+          attachIceRouteToSession(connectTelemetryRef.current, route);
+        });
+      }
     });
 
     conn.on('data', async (data: any) => {
@@ -371,6 +419,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
          isTransferActiveRef.current = false; 
       }
       else if (msg.type === 'REJECT_TRANSFER') {
+         markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
          setErrorMsg(msg.payload?.reason || "发送方拒绝了请求。");
          setState(TransferState.ERROR);
          conn.close();
@@ -383,8 +432,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('close', () => {
-       clearConnectionTimeout();
        const currentState = stateRef.current;
+       if (currentState === TransferState.WAITING_FOR_PEER && scheduleFastReconnect()) {
+         return;
+       }
+       clearConnectionTimeout();
+       if (currentState !== TransferState.COMPLETED) {
+         markConnectionFailure(connectTelemetryRef.current, 'connection_closed', { state: currentState });
+       }
        if (
          currentState === TransferState.TRANSFERRING ||
          currentState === TransferState.WAITING_FOR_PEER ||
@@ -393,6 +448,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
            setErrorMsg("连接已断开");
            setState(TransferState.ERROR);
        }
+    });
+
+    conn.on('error', () => {
+      if (scheduleFastReconnect()) {
+        return;
+      }
+      markConnectionFailure(connectTelemetryRef.current, 'data_channel_error');
     });
   };
 
@@ -497,44 +559,97 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const handleConnect = async () => {
     if (!code || code.length !== 4) return;
+    connectTelemetryRef.current = createConnectionSession('receiver', { code });
     setState(TransferState.WAITING_FOR_PEER);
     setErrorMsg('');
     retryCountRef.current = 0;
-
-    clearConnectionTimeout();
-    connectionTimeoutRef.current = setTimeout(() => {
-        connectionTimeoutRef.current = null;
-        if (peerRef.current) peerRef.current.destroy();
-        setErrorMsg("连接超时。请检查口令是否正确。");
-        setState(TransferState.ERROR);
-    }, 15000);
+    startConnectionAttempt(connectTelemetryRef.current, 'initial_connect');
 
     if (peerRef.current) peerRef.current.destroy();
 
     const iceConfig = await getIceConfig();
-    const peer = new Peer({ debug: peerDebugLevel, config: iceConfig });
+    hasTurnRef.current = iceConfig.hasTurn;
+    relayFallbackTriedRef.current = false;
+    p2pTimeoutRetryCountRef.current = 0;
 
-    peer.on('open', () => {
-      const conn = peer.connect(`aerodrop-${code}`, { reliable: true });
-      setupConnListeners(conn);
-    });
-    
-    peer.on('error', (err) => {
-       if (err.type === 'peer-unavailable' && retryCountRef.current < 3) {
+    const applyConnectTimeout = () => {
+      clearConnectionTimeout();
+      connectionTimeoutRef.current = setTimeout(() => {
+        connectionTimeoutRef.current = null;
+
+        if (hasTurnRef.current && currentIcePolicyRef.current !== 'relay') {
+          if (p2pTimeoutRetryCountRef.current < 1) {
+            p2pTimeoutRetryCountRef.current += 1;
+            markSessionEvent(connectTelemetryRef.current, 'p2p_timeout_retry');
+            markConnectionRetry(connectTelemetryRef.current, 'timeout_retry_p2p_all');
+            startConnectionAttempt(connectTelemetryRef.current, 'p2p_retry_all');
+            createAndConnectPeer('all');
+            return;
+          }
+
+          if (!relayFallbackTriedRef.current) {
+            relayFallbackTriedRef.current = true;
+            markSessionEvent(connectTelemetryRef.current, 'relay_fallback_start');
+            markConnectionRetry(connectTelemetryRef.current, 'timeout_switch_to_relay');
+            startConnectionAttempt(connectTelemetryRef.current, 'relay_fallback');
+            createAndConnectPeer('relay');
+            return;
+          }
+        }
+
+        if (peerRef.current) peerRef.current.destroy();
+        markConnectionFailure(connectTelemetryRef.current, 'connect_timeout', { timeoutMs: CONNECT_TIMEOUT_MS });
+        setErrorMsg("连接超时。请检查口令是否正确。");
+        setState(TransferState.ERROR);
+      }, CONNECT_TIMEOUT_MS);
+    };
+
+    const createAndConnectPeer = (policy: RTCIceTransportPolicy) => {
+      currentIcePolicyRef.current = policy;
+      if (peerRef.current && !peerRef.current.destroyed) {
+        peerRef.current.destroy();
+      }
+
+      const peer = new Peer({
+        debug: peerDebugLevel,
+        pingInterval: 5000,
+        config: {
+          iceServers: iceConfig.iceServers,
+          iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+          iceTransportPolicy: policy,
+        }
+      });
+
+      peer.on('open', () => {
+        markSessionEvent(connectTelemetryRef.current, 'peer_open', { iceTransportPolicy: policy });
+        const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
+        setupConnListeners(conn);
+      });
+
+      peer.on('error', (err) => {
+        if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
           retryCountRef.current++;
-          setTimeout(() => {
-             if (peerRef.current && !peerRef.current.destroyed) {
-                const conn = peerRef.current.connect(`aerodrop-${code}`, { reliable: true });
-                setupConnListeners(conn);
-             }
-          }, 2000);
-       } else {
-           clearConnectionTimeout();
-           setErrorMsg(`连接错误: ${err.type}`);
-           setState(TransferState.ERROR);
-       }
-    });
-    peerRef.current = peer;
+          markConnectionRetry(connectTelemetryRef.current, 'peer_unavailable');
+          window.setTimeout(() => {
+            if (peerRef.current && !peerRef.current.destroyed) {
+              startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
+              const conn = peerRef.current.connect(`aerodrop-${code}`, { serialization: 'binary' });
+              setupConnListeners(conn);
+            }
+          }, FAST_RETRY_DELAY_MS);
+        } else {
+          clearConnectionTimeout();
+          markConnectionFailure(connectTelemetryRef.current, `peer_error:${err.type}`);
+          setErrorMsg(`连接错误: ${err.type}`);
+          setState(TransferState.ERROR);
+        }
+      });
+
+      peerRef.current = peer;
+      applyConnectTimeout();
+    };
+
+    createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy);
   };
 
   const acceptTransfer = async () => {
