@@ -1,9 +1,9 @@
-import React, { useState, useEffect, lazy, Suspense } from 'react';
-// import { Sender } from './components/Sender';
-// import { Receiver } from './components/Receiver';
+import React, { useState, useEffect } from 'react';
+import { Sender } from './components/Sender';
+import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Bell, Monitor, Package, Loader2, ShieldAlert, X } from 'lucide-react';
-// import { ScreenShare } from './components/ScreenShare';
+import { Share, DownloadCloud, Bell, Monitor, Package, ShieldAlert, X } from 'lucide-react';
+import { ScreenShare } from './components/ScreenShare';
 import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
@@ -17,10 +17,6 @@ interface NetworkCheckResponse {
   country: string;
 }
 
-// Lazy load components with named exports
-const Sender = lazy(() => import('./components/Sender').then(module => ({ default: module.Sender })));
-const Receiver = lazy(() => import('./components/Receiver').then(module => ({ default: module.Receiver })));
-const ScreenShare = lazy(() => import('./components/ScreenShare').then(module => ({ default: module.ScreenShare })));
 const RISK_BANNER_DISMISS_UNTIL_KEY = 'aerodrop-risk-banner-dismiss-until';
 
 const App: React.FC = () => {
@@ -113,31 +109,6 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const preloadViews = () => {
-      import('./components/Sender');
-      import('./components/Receiver');
-      import('./components/ScreenShare');
-    };
-
-    const win = window as Window & {
-      requestIdleCallback?: (cb: IdleRequestCallback, opts?: IdleRequestOptions) => number;
-      cancelIdleCallback?: (id: number) => void;
-    };
-
-    if (typeof win.requestIdleCallback === 'function') {
-      const id = win.requestIdleCallback(() => preloadViews(), { timeout: 1200 });
-      return () => {
-        if (typeof win.cancelIdleCallback === 'function') {
-          win.cancelIdleCallback(id);
-        }
-      };
-    }
-
-    const timer = globalThis.setTimeout(preloadViews, 200);
-    return () => globalThis.clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     const viewId = params.get('view');
@@ -191,16 +162,6 @@ const App: React.FC = () => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 4000);
   };
-
-  const suspenseFallback = (
-    <div className="w-full h-full flex">
-      <div className="w-full max-w-xl mx-auto p-4 md:p-6">
-        <div className="h-full min-h-[540px] flex items-center justify-center">
-          <Loader2 size={48} className="animate-spin text-brand-500 dark:text-brand-400" />
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
@@ -355,23 +316,21 @@ const App: React.FC = () => {
 
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
           <ErrorBoundary>
-            <Suspense fallback={suspenseFallback}>
-              {mode === 'send' && (
-                <div className="block animate-flip-in h-full transform-style-3d">
-                  <Sender onNotification={addNotification} deviceName={deviceName} />
-                </div>
-              )}
-              {mode === 'receive' && (
-                <div className="block animate-flip-in h-full transform-style-3d">
-                  <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
-                </div>
-              )}
-              {mode === 'screen' && (
-                <div className="block animate-flip-in h-full transform-style-3d">
-                  <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
-                </div>
-              )}
-            </Suspense>
+            {mode === 'send' && (
+              <div className="block animate-flip-in h-full transform-style-3d">
+                <Sender onNotification={addNotification} deviceName={deviceName} />
+              </div>
+            )}
+            {mode === 'receive' && (
+              <div className="block animate-flip-in h-full transform-style-3d">
+                <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
+              </div>
+            )}
+            {mode === 'screen' && (
+              <div className="block animate-flip-in h-full transform-style-3d">
+                <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
+              </div>
+            )}
           </ErrorBoundary>
         </div>
         
