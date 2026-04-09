@@ -270,7 +270,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               peerIsLAN.current.set(conn.peer, isLanConnection);
 
               if (activeConnections.current.size === 1) {
-                  const networkType = isRelayConnection ? 'RELAY' : isLanConnection ? 'LAN' : 'P2P-WAN';
+                  const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
                   setConnectionStatus(`已连接 | ${protocol.toUpperCase()} | ${networkType}`);
               } else {
                   setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
