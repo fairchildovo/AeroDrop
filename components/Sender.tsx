@@ -119,6 +119,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const GHOST_SWEEP_INTERVAL_MS = 4000;
   const GHOST_GRACE_MS = 10000;
   const HEARTBEAT_TIMEOUT_MS = 30000;
+  const HARD_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
   const SIGNALING_OPEN_TIMEOUT_MS = 10000;
   const MAX_SIGNALING_OPEN_RETRY = 1;
   const lastStatsPollIndexRef = useRef(0);
@@ -806,15 +807,33 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   return;
               }
 
+              const transportHealthy =
+                  pcState === 'connected' &&
+                  (dcState === 'open' || conn.open);
               const lastHeartbeatAt = peerHeartbeatAtRef.current.get(conn.peer) ?? now;
-              if (now - lastHeartbeatAt >= HEARTBEAT_TIMEOUT_MS) {
-                  markSessionEvent(shareTelemetryRef.current, 'heartbeat_timeout_kill', {
+              const heartbeatGapMs = now - lastHeartbeatAt;
+
+              // Browsers heavily throttle timers in background tabs. When SCTP/DataChannel
+              // is still healthy, trust WebRTC transport keepalive and avoid heartbeat-based kills.
+              if (transportHealthy) {
+                  peerHeartbeatAtRef.current.set(conn.peer, now);
+              } else if (heartbeatGapMs >= HARD_HEARTBEAT_TIMEOUT_MS) {
+                  markSessionEvent(shareTelemetryRef.current, 'heartbeat_hard_timeout_kill', {
                     peer: conn.peer,
-                    timeoutMs: now - lastHeartbeatAt,
+                    timeoutMs: heartbeatGapMs,
+                    pcState: pcState ?? 'unknown',
+                    dcState: dcState ?? 'unknown',
                   });
                   try { if (conn.open) conn.close(); } catch {}
                   cleanupConnectionState(conn);
                   return;
+              } else if (heartbeatGapMs >= HEARTBEAT_TIMEOUT_MS) {
+                  markSessionEvent(shareTelemetryRef.current, 'heartbeat_stale_signal', {
+                    peer: conn.peer,
+                    timeoutMs: heartbeatGapMs,
+                    pcState: pcState ?? 'unknown',
+                    dcState: dcState ?? 'unknown',
+                  });
               }
 
               if (unstableByState) {
@@ -1158,13 +1177,33 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
                         await new Promise<void>((resolve, reject) => {
                             let settled = false;
+                            const pc = conn.peerConnection;
+                            const BACKPRESSURE_DRAIN_TIMEOUT_MS = 30000;
+                            const BACKPRESSURE_CHECK_INTERVAL_MS = 250;
+                            let checkTimer: ReturnType<typeof setInterval> | null = null;
+
+                            const isTerminalState = () => {
+                                const pcState = pc?.connectionState;
+                                return (
+                                    !conn.open ||
+                                    dataChannel.readyState !== 'open' ||
+                                    pcState === 'closed' ||
+                                    pcState === 'failed'
+                                );
+                            };
 
                             const done = (err?: Error) => {
                                 if (settled) return;
                                 settled = true;
                                 clearTimeout(timeoutId);
+                                if (checkTimer) {
+                                    clearInterval(checkTimer);
+                                }
                                 dataChannel.removeEventListener('bufferedamountlow', onLow);
                                 dataChannel.removeEventListener('close', onClose);
+                                if (pc) {
+                                    pc.removeEventListener('connectionstatechange', onPcStateChange);
+                                }
                                 if (err) {
                                     reject(err);
                                 } else {
@@ -1182,10 +1221,35 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                                 done(new Error("Data channel closed while waiting for buffer drain"));
                             };
 
-                            const BACKPRESSURE_DRAIN_TIMEOUT_MS = 30000;
+                            const onPcStateChange = () => {
+                                if (!isTerminalState()) return;
+                                done(new Error(
+                                    `Transport closed while waiting for buffer drain: ` +
+                                    `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
+                                ));
+                            };
+
+                            const checkProgress = () => {
+                                if (isTerminalState()) {
+                                    done(new Error(
+                                        `Transport unavailable while waiting for buffer drain: ` +
+                                        `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
+                                    ));
+                                    return;
+                                }
+
+                                const bufferedNow = dataChannel.bufferedAmount;
+                                if (bufferedNow <= LOW_WATER_MARK) {
+                                    done();
+                                }
+                            };
+
                             const timeoutId = setTimeout(() => {
-                                if (dataChannel.readyState !== 'open') {
-                                    done(new Error("Data channel closed while waiting for buffer drain"));
+                                if (isTerminalState()) {
+                                    done(new Error(
+                                        `Transport closed while waiting for buffer drain: ` +
+                                        `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
+                                    ));
                                     return;
                                 }
 
@@ -1196,12 +1260,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
                                 done(new Error(
                                     `Backpressure drain timeout (${BACKPRESSURE_DRAIN_TIMEOUT_MS}ms): ` +
-                                    `buffered=${dataChannel.bufferedAmount}, high=${HIGH_WATER_MARK}, low=${LOW_WATER_MARK}`,
+                                    `buffered=${dataChannel.bufferedAmount}, high=${HIGH_WATER_MARK}, low=${LOW_WATER_MARK}, ` +
+                                    `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`,
                                 ));
                             }, BACKPRESSURE_DRAIN_TIMEOUT_MS);
 
-                            if (dataChannel.readyState !== 'open') {
-                                done(new Error("Data channel is not open"));
+                            checkTimer = setInterval(checkProgress, BACKPRESSURE_CHECK_INTERVAL_MS);
+
+                            if (isTerminalState()) {
+                                done(new Error(
+                                    `Transport unavailable while waiting for buffer drain: ` +
+                                    `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
+                                ));
                                 return;
                             }
 
@@ -1212,6 +1282,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
                             dataChannel.addEventListener('bufferedamountlow', onLow);
                             dataChannel.addEventListener('close', onClose);
+                            if (pc) {
+                                pc.addEventListener('connectionstatechange', onPcStateChange);
+                            }
                         });
                     }
 

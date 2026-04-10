@@ -24,6 +24,7 @@ export interface Crc32Hasher {
 }
 
 class Crc32WorkerHasher implements Crc32Hasher {
+  private static readonly WORKER_BATCH_BYTES = 2 * 1024 * 1024;
   private worker: Worker | null = null;
   private syncState = crc32Init();
   private requestSeq = 0;
@@ -32,6 +33,8 @@ class Crc32WorkerHasher implements Crc32Hasher {
   private readonly label: string;
   private readonly pendingResets = new Map<number, PendingRequest<void>>();
   private readonly pendingFinalizes = new Map<number, PendingRequest<string>>();
+  private pendingWorkerChunks: Uint8Array[] = [];
+  private pendingWorkerBytes = 0;
   private readonly onMessageBound: (event: MessageEvent<Crc32WorkerResponse>) => void;
   private readonly onErrorBound: (event: ErrorEvent) => void;
   private readonly onMessageErrorBound: () => void;
@@ -66,6 +69,8 @@ class Crc32WorkerHasher implements Crc32Hasher {
   }
 
   private failAllPending(err: Error) {
+    this.pendingWorkerChunks = [];
+    this.pendingWorkerBytes = 0;
     this.pendingResets.forEach((pending) => {
       clearTimeout(pending.timeoutId);
       pending.reject(err);
@@ -135,12 +140,35 @@ class Crc32WorkerHasher implements Crc32Hasher {
     if (this.fatalError) throw this.fatalError;
   }
 
+  private flushPendingWorkerUpdates() {
+    if (this.mode !== 'worker' || !this.worker) return;
+    if (this.pendingWorkerBytes <= 0 || this.pendingWorkerChunks.length === 0) return;
+    this.ensureHealthy();
+
+    const merged = new Uint8Array(this.pendingWorkerBytes);
+    let offset = 0;
+    for (const chunk of this.pendingWorkerChunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+
+    this.pendingWorkerChunks = [];
+    this.pendingWorkerBytes = 0;
+
+    const buffer = merged.buffer;
+    const msg: Crc32WorkerRequest = { type: 'update', buffer };
+    this.worker.postMessage(msg, [buffer]);
+  }
+
   async reset(): Promise<void> {
     if (this.mode === 'sync' || !this.worker) {
       this.syncState = crc32Init();
       return;
     }
     this.ensureHealthy();
+    // Reset discards any unsent updates by definition.
+    this.pendingWorkerChunks = [];
+    this.pendingWorkerBytes = 0;
 
     const requestId = ++this.requestSeq;
     await new Promise<void>((resolve, reject) => {
@@ -162,9 +190,14 @@ class Crc32WorkerHasher implements Crc32Hasher {
     }
     this.ensureHealthy();
 
-    const copied = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    const msg: Crc32WorkerRequest = { type: 'update', buffer: copied };
-    this.worker.postMessage(msg, [copied]);
+    const copied = new Uint8Array(data.byteLength);
+    copied.set(data);
+    this.pendingWorkerChunks.push(copied);
+    this.pendingWorkerBytes += copied.byteLength;
+
+    if (this.pendingWorkerBytes >= Crc32WorkerHasher.WORKER_BATCH_BYTES) {
+      this.flushPendingWorkerUpdates();
+    }
   }
 
   async finalizeHex(): Promise<string> {
@@ -172,6 +205,7 @@ class Crc32WorkerHasher implements Crc32Hasher {
       return crc32FinalHex(this.syncState);
     }
     this.ensureHealthy();
+    this.flushPendingWorkerUpdates();
 
     const requestId = ++this.requestSeq;
     return new Promise<string>((resolve, reject) => {
@@ -195,6 +229,8 @@ class Crc32WorkerHasher implements Crc32Hasher {
     this.worker = null;
     this.mode = 'sync';
     this.syncState = crc32Init();
+    this.pendingWorkerChunks = [];
+    this.pendingWorkerBytes = 0;
     this.fatalError = new Error(`[${this.label}] CRC32 hasher terminated`);
     this.failAllPending(this.fatalError);
   }

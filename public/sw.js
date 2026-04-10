@@ -1,10 +1,12 @@
 /* StreamSaver.js Service Worker + PWA Caching */
 
-const CACHE_NAME = 'aerodrop-cache-v1';
+const CACHE_NAME = 'aerodrop-cache-v2';
+const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
 const OFFLINE_URLS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/sw.js',
   '/logo.svg',
   '/mitm.html',
   '/apple-touch-icon.png',
@@ -80,16 +82,34 @@ function createStream(port) {
 
 self.onfetch = event => {
   const url = event.request.url;
+  const { pathname } = new URL(url);
 
   // StreamSaver Handling
   if (url.endsWith('/ping')) {
     return event.respondWith(new Response('pong'));
   }
 
-  const hijacke = map.get(url);
+  // StreamSaver bootstrap assets should be network-first, but still keep a cache
+  // fallback for offline/weak-network scenarios.
+  if (pathname === '/mitm.html' || pathname === '/sw.js') {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .catch(async () => {
+          const cached = await caches.match(event.request);
+          if (cached) return cached;
+          return new Response('Unavailable', {
+            status: 503,
+            headers: { 'Cache-Control': 'no-store' },
+          });
+        })
+    );
+    return;
+  }
 
-  if (hijacke) {
-    const [ stream, data, port ] = hijacke;
+  const hijacked = map.get(url);
+
+  if (hijacked) {
+    const [ stream, data, port ] = hijacked;
     map.delete(url);
 
     const responseHeaders = new Headers({
@@ -118,9 +138,24 @@ self.onfetch = event => {
     return;
   }
 
+  // A StreamSaver download URL without a registered stream should fail fast.
+  // Never fall through to generic network/cache handling for this namespace.
+  if (pathname.startsWith(STREAMSAVER_PATH_PREFIX)) {
+    event.respondWith(new Response('Stream session not found', {
+      status: 410,
+      headers: { 'Cache-Control': 'no-store' },
+    }));
+    return;
+  }
+
   // PWA Caching Strategy: Network First, fallback to Cache
   // Skip caching for API endpoints (may contain sensitive data like TURN credentials)
-  if (event.request.method !== 'GET' || !url.startsWith('http') || new URL(url).pathname.startsWith('/api/')) {
+  if (
+    event.request.method !== 'GET' ||
+    !url.startsWith('http') ||
+    pathname.startsWith('/api/') ||
+    event.request.headers.has('range')
+  ) {
       return;
   }
 

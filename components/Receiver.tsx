@@ -41,6 +41,7 @@ interface ReceiverProps {
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
   const INITIAL_TIMEOUT_MS = 8000;
   const RELAY_TIMEOUT_MS = 15000;
+  const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
   const FAST_RETRY_BASE_MS = 700;
   const FAST_RETRY_MAX_MS = 5000;
   const MAX_CONNECT_RETRY = 6;
@@ -49,6 +50,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const IOS_IDB_BUFFER_THRESHOLD_BYTES = 500 * 1024 * 1024;
   const IOS_IDB_DB_NAME = 'aerodrop-receiver-buffer-v1';
   const IOS_IDB_STORE = 'fileChunks';
+  const IOS_IDB_STALE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
@@ -139,6 +141,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const indexedDbBufferedBytesRef = useRef<number>(0);
   const indexedDbBufferedFileIndexRef = useRef<number | null>(null);
   const indexedDbNotifiedRef = useRef<boolean>(false);
+  const indexedDbCleanupStartedRef = useRef<boolean>(false);
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -180,6 +183,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   useEffect(() => {
     isMountedRef.current = true;
     prefetchIceConfig();
+    pruneStaleIndexedDbSessions().catch(() => {});
     return () => {
       isMountedRef.current = false;
       clearConnectionTimeout();
@@ -235,6 +239,74 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       });
     }
     return indexedDbOpenPromiseRef.current;
+  };
+
+  const pruneStaleIndexedDbSessions = async (): Promise<void> => {
+    if (!isIndexedDbSupported()) return;
+    if (indexedDbCleanupStartedRef.current) return;
+    indexedDbCleanupStartedRef.current = true;
+
+    try {
+      const db = await openIndexedDb();
+      const currentSessionId = receiverSessionIdRef.current;
+      const cutoff = Date.now() - IOS_IDB_STALE_SESSION_TTL_MS;
+      const sessionLastSeen = new Map<string, number>();
+
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(IOS_IDB_STORE, 'readonly');
+        const store = tx.objectStore(IOS_IDB_STORE);
+        const req = store.openCursor();
+        req.onerror = () => reject(req.error || new Error('INDEXED_DB_PRUNE_SCAN_FAILED'));
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) return;
+          const record = cursor.value as { sessionId?: string; createdAt?: number } | null;
+          const sessionId = typeof record?.sessionId === 'string' ? record.sessionId : '';
+          if (sessionId) {
+            const createdAt = typeof record?.createdAt === 'number' && Number.isFinite(record.createdAt)
+              ? record.createdAt
+              : 0;
+            const prev = sessionLastSeen.get(sessionId) || 0;
+            if (createdAt > prev) {
+              sessionLastSeen.set(sessionId, createdAt);
+            }
+          }
+          cursor.continue();
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error('INDEXED_DB_PRUNE_SCAN_TX_FAILED'));
+        tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_PRUNE_SCAN_TX_ABORTED'));
+      });
+
+      const staleSessions = Array.from(sessionLastSeen.entries())
+        .filter(([sessionId, lastSeen]) => sessionId !== currentSessionId && lastSeen < cutoff)
+        .map(([sessionId]) => sessionId);
+
+      if (staleSessions.length === 0) return;
+      const staleSet = new Set(staleSessions);
+
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(IOS_IDB_STORE, 'readwrite');
+        const store = tx.objectStore(IOS_IDB_STORE);
+        const req = store.openCursor();
+        req.onerror = () => reject(req.error || new Error('INDEXED_DB_PRUNE_DELETE_FAILED'));
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) return;
+          const record = cursor.value as { sessionId?: string } | null;
+          const sessionId = typeof record?.sessionId === 'string' ? record.sessionId : '';
+          if (sessionId && staleSet.has(sessionId)) {
+            cursor.delete();
+          }
+          cursor.continue();
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error('INDEXED_DB_PRUNE_DELETE_TX_FAILED'));
+        tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_PRUNE_DELETE_TX_ABORTED'));
+      });
+    } catch (err) {
+      console.warn('IndexedDB stale session cleanup failed:', err);
+    }
   };
 
   const deleteIndexedDbChunksForFile = async (fileIndex: number): Promise<void> => {
@@ -369,7 +441,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       resetIndexedDbBufferRuntime();
   };
 
-  const closeStreams = async (): Promise<boolean> => {
+  const closeStreams = async (options?: {
+      truncateNativeBeforeClose?: boolean;
+      abortStreamSaver?: boolean;
+  }): Promise<boolean> => {
+      const truncateNativeBeforeClose = options?.truncateNativeBeforeClose === true;
+      const abortStreamSaver = options?.abortStreamSaver === true;
       const closeWithTimeout = async (task: Promise<void>, timeoutMs: number, label: string) => {
           return Promise.race<void>([
               task,
@@ -378,18 +455,33 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               })
           ]);
       };
+      let ok = true;
       try {
           if (nativeWriterRef.current) {
+              if (truncateNativeBeforeClose) {
+                  try {
+                      await closeWithTimeout(nativeWriterRef.current.truncate(0), 12000, 'NATIVE_WRITER_TRUNCATE');
+                  } catch (e) {
+                      ok = false;
+                      console.warn("Native writer truncate warning:", e);
+                  }
+              }
               await closeWithTimeout(nativeWriterRef.current.close(), 12000, 'NATIVE_WRITER_CLOSE');
               nativeWriterRef.current = null;
           }
           if (streamSaverWriterRef.current) {
-              await closeWithTimeout(streamSaverWriterRef.current.close(), 12000, 'STREAM_SAVER_CLOSE');
+              if (abortStreamSaver) {
+                  await closeWithTimeout(streamSaverWriterRef.current.abort(), 12000, 'STREAM_SAVER_ABORT');
+              } else {
+                  await closeWithTimeout(streamSaverWriterRef.current.close(), 12000, 'STREAM_SAVER_CLOSE');
+              }
               streamSaverWriterRef.current = null;
           }
           isStreamingRef.current = false;
-          return true;
-      } catch (e) { console.warn("Stream close warning:", e); }
+          return ok;
+      } catch (e) {
+          console.warn("Stream close warning:", e);
+      }
       return false;
   };
 
@@ -525,6 +617,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           }
       } catch (err) {
           console.error("Write Error:", err);
+          const closeOk = await closeStreams({
+              truncateNativeBeforeClose: true,
+              abortStreamSaver: true,
+          });
+          if (!closeOk) {
+              await abortStreams();
+          }
           setErrorMsg("写入文件失败，磁盘可能已满或权限不足。");
           setState(TransferState.ERROR);
           if (connRef.current) connRef.current.close();
@@ -840,7 +939,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                     isStreamingRef.current = false;
                 } else if (streamSaver) {
                      try {
-                         const fileStream = streamSaver.createWriteStream(fileName, { size: fileSize });
+                         const streamPathname =
+                           `${STREAMSAVER_PATH_PREFIX}${Date.now().toString(36)}-` +
+                           `${Math.random().toString(36).slice(2, 8)}/${encodeURIComponent(fileName)}`;
+                         const fileStream = streamSaver.createWriteStream(fileName, {
+                           size: fileSize,
+                           pathname: streamPathname,
+                         });
                          streamSaverWriterRef.current = fileStream.getWriter();
                          isStreamingRef.current = true;
                      } catch {
