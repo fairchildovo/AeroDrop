@@ -21,6 +21,15 @@ import {
 } from '../services/connectionTelemetry';
 import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
 
+const sanitizeFileName = (name: string): string => {
+  const basename = name.replace(/\\/g, '/').split('/').pop() || `file_${Date.now()}`;
+  const cleaned = basename.replace(/[\x00-\x1f]/g, '_');
+  if (!cleaned || cleaned === '.' || cleaned === '..') {
+    return `file_${Date.now()}`;
+  }
+  return cleaned;
+};
+
 interface ReceiverProps {
   initialCode?: string;
   onNotification?: (msg: string, type: 'success' | 'info' | 'error') => void;
@@ -367,7 +376,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       } 
       else if (msg.type === 'FILE_START') {
         isTransferActiveRef.current = true;
-        const { fileName, fileSize, fileIndex } = msg.payload;
+        const { fileSize, fileIndex } = msg.payload;
+        const fileName = sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`);
         
   
         const resumingSameFile = currentFileIndexRef.current === fileIndex && chunksRef.current.length > 0;

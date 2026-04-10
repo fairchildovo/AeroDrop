@@ -530,7 +530,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
     markIceConfigFetched(shareTelemetryRef.current);
-    const finalCode = customCodeInput.length === 4 ? customCodeInput : Math.floor(1000 + Math.random() * 9000).toString();
+    const finalCode = customCodeInput.length === 4 ? customCodeInput : (() => {
+      const arr = new Uint32Array(1);
+      crypto.getRandomValues(arr);
+      return (1000 + (arr[0] % 9000)).toString();
+    })();
     const customPeer = new Peer(`aerodrop-${finalCode}`, {
       debug: peerDebugLevel,
       pingInterval: 5000,

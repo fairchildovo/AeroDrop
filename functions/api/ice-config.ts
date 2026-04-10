@@ -27,6 +27,17 @@ const parseTurnUrls = (raw: string | undefined): string[] => {
 };
 
 export const onRequest: PagesFunction<Env> = async (context) => {
+  const requestOrigin = context.request.headers.get('Origin');
+  const requestUrl = new URL(context.request.url);
+  const allowedOrigin = requestUrl.origin;
+
+  if (requestOrigin && requestOrigin !== allowedOrigin) {
+    return new Response(JSON.stringify({ error: 'Forbidden' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   const turnUrls = parseTurnUrls(context.env.TURN_URLS);
   const turnUsername = context.env.TURN_USERNAME?.trim();
   const turnCredential = context.env.TURN_CREDENTIAL?.trim();
