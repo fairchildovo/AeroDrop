@@ -45,17 +45,22 @@ export interface FileStartPayload {
 export interface FileCompletePayload {
   fileIndex: number;
   fileName?: string; 
+  hashAlgorithm?: 'crc32';
+  fileHash?: string;
+  hashStartOffset?: number;
+  hashedBytes?: number;
 }
 
 export interface ResumePayload {
   fileIndex: number;
   byteOffset?: number;
+  silent?: boolean;
   // Backward compatibility for older clients.
   chunkIndex?: number;
 }
 
 export interface P2PMessage {
-  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'TRANSFER_CANCELLED' | 'DEVICE_INFO' | 'HEARTBEAT';
+  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ALL_FILES_RECEIVED' | 'TRANSFER_PROGRESS' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'TRANSFER_CANCELLED' | 'DEVICE_INFO' | 'HEARTBEAT';
   payload?: any;
 }
 

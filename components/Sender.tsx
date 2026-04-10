@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
+import { crc32FinalHex, crc32Init, crc32Update } from '../services/hashUtils';
 import { getIceConfig, prefetchIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
 import {
@@ -95,6 +96,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const ghostCandidateSinceRef = useRef<Map<string, number>>(new Map());
   const peerConnectionTypeRef = useRef<Map<string, PeerTransferStat['connectionType']>>(new Map());
   const peerHeartbeatAtRef = useRef<Map<string, number>>(new Map());
+  const peerAwaitingFinalizeAckRef = useRef<Set<string>>(new Set());
+  const peerHasProgressSyncRef = useRef<Set<string>>(new Set());
+  const peerTransferredBytesRef = useRef<Map<string, number>>(new Map());
+  const peerTotalBytesRef = useRef<Map<string, number>>(new Map());
+  const peerSyncStartAtRef = useRef<Map<string, number>>(new Map());
+  const peerSyncBaseBytesRef = useRef<Map<string, number>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -142,9 +149,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                 const realtimeSpeed = peerRealtimeSpeed.current.get(peerId) || 0;
                 const avg = peerAverageSpeed.current.get(peerId) || 0;
                 const hasTransferStarted = peerProgress.current.has(peerId) || activeSendingPeersRef.current.has(peerId);
+                const waitingFinalizeAck = peerAwaitingFinalizeAckRef.current.has(peerId);
 
                 const status: PeerTransferStat['status'] =
-                    progress >= 100 ? 'completed' : hasTransferStarted && state === TransferState.TRANSFERRING ? 'transferring' : 'waiting';
+                    progress >= 100 && !waitingFinalizeAck ? 'completed' : hasTransferStarted && state === TransferState.TRANSFERRING ? 'transferring' : 'waiting';
 
                 if (status === 'transferring' || status === 'completed') {
                     combinedProgress += progress;
@@ -661,6 +669,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerProgress.current.clear();
     peerRealtimeSpeed.current.clear();
     peerAverageSpeed.current.clear();
+    peerHasProgressSyncRef.current.clear();
+    peerTransferredBytesRef.current.clear();
+    peerTotalBytesRef.current.clear();
+    peerSyncStartAtRef.current.clear();
+    peerSyncBaseBytesRef.current.clear();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -724,10 +737,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {
+      if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
+          activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
+      }
       activeConnections.current.delete(conn);
       peerProgress.current.delete(conn.peer);
       peerRealtimeSpeed.current.delete(conn.peer);
       peerAverageSpeed.current.delete(conn.peer);
+      peerHasProgressSyncRef.current.delete(conn.peer);
+      peerTransferredBytesRef.current.delete(conn.peer);
+      peerTotalBytesRef.current.delete(conn.peer);
+      peerSyncStartAtRef.current.delete(conn.peer);
+      peerSyncBaseBytesRef.current.delete(conn.peer);
       activeSendingPeersRef.current.delete(conn.peer);
       ghostCandidateSinceRef.current.delete(conn.peer);
       peerConnectionTypeRef.current.delete(conn.peer);
@@ -872,6 +893,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               peerProgress.current.set(conn.peer, peerProgress.current.get(conn.peer) || 0);
               peerRealtimeSpeed.current.set(conn.peer, peerRealtimeSpeed.current.get(conn.peer) || 0);
               peerAverageSpeed.current.set(conn.peer, peerAverageSpeed.current.get(conn.peer) || 0);
+              peerHasProgressSyncRef.current.delete(conn.peer);
+              peerTransferredBytesRef.current.set(conn.peer, peerTransferredBytesRef.current.get(conn.peer) || 0);
+              peerTotalBytesRef.current.set(conn.peer, peerTotalBytesRef.current.get(conn.peer) || (sessionMetadata.totalSize || 0));
+              peerSyncStartAtRef.current.delete(conn.peer);
+              peerSyncBaseBytesRef.current.delete(conn.peer);
               updateConnectionStatusUI();
               
               updateConnectionStats(conn);
@@ -914,7 +940,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   const payload = msg.payload as ResumePayload;
                   const legacyChunkIndex = typeof payload.chunkIndex === 'number' ? Math.max(0, payload.chunkIndex) : 0;
                   const resumedByteOffset = typeof payload.byteOffset === 'number' ? Math.max(0, payload.byteOffset) : legacyChunkIndex * TRANSFER_CONFIG.CHUNK_SIZE_WAN;
-                  onNotification(`检测到断点，正在从第 ${payload.fileIndex + 1} 个文件恢复...`, 'info');
+                  if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
+                    activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
+                  }
+                  if (!payload.silent) {
+                    onNotification(`检测到断点，正在从第 ${payload.fileIndex + 1} 个文件恢复...`, 'info');
+                  }
                   setState(TransferState.TRANSFERRING);
                   scheduleSendFileSequence(conn, payload.fileIndex, resumedByteOffset);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
@@ -925,6 +956,56 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     if (conn.open) conn.close();
                   } catch {}
                   cleanupConnectionState(conn);
+              } else if (msg.type === 'TRANSFER_PROGRESS') {
+                  const payload = (msg.payload || {}) as {
+                    overallTransferredBytes?: number;
+                    overallTotalBytes?: number;
+                    speedBytes?: number;
+                  };
+                  const totalBytes = typeof payload.overallTotalBytes === 'number' ? Math.max(0, payload.overallTotalBytes) : 0;
+                  const transferredBytes = typeof payload.overallTransferredBytes === 'number'
+                    ? Math.max(0, payload.overallTransferredBytes)
+                    : 0;
+                  const safeTransferredBytes = totalBytes > 0 ? Math.min(totalBytes, transferredBytes) : transferredBytes;
+                  const rawProgress = totalBytes > 0
+                    ? Math.floor((safeTransferredBytes / totalBytes) * 100)
+                    : 0;
+                  const waitingFinalizeAck = peerAwaitingFinalizeAckRef.current.has(conn.peer);
+                  const syncProgress = waitingFinalizeAck
+                    ? Math.min(rawProgress, 99)
+                    : Math.max(0, Math.min(100, rawProgress));
+                  const speedBytes = typeof payload.speedBytes === 'number' ? Math.max(0, payload.speedBytes) : 0;
+                  const now = Date.now();
+                  const hasSyncStarted = peerSyncStartAtRef.current.has(conn.peer);
+                  if (!hasSyncStarted) {
+                    peerSyncStartAtRef.current.set(conn.peer, now);
+                    peerSyncBaseBytesRef.current.set(conn.peer, safeTransferredBytes);
+                  }
+                  const syncStartAt = peerSyncStartAtRef.current.get(conn.peer) || now;
+                  const syncBaseBytes = peerSyncBaseBytesRef.current.get(conn.peer) || 0;
+                  const elapsedSec = Math.max(0.001, (now - syncStartAt) / 1000);
+                  const avgSpeedFromSync = Math.max(0, safeTransferredBytes - syncBaseBytes) / elapsedSec;
+
+                  peerHasProgressSyncRef.current.add(conn.peer);
+                  peerTransferredBytesRef.current.set(conn.peer, safeTransferredBytes);
+                  peerTotalBytesRef.current.set(conn.peer, totalBytes);
+                  peerProgress.current.set(conn.peer, syncProgress);
+                  peerRealtimeSpeed.current.set(conn.peer, speedBytes);
+                  peerAverageSpeed.current.set(conn.peer, avgSpeedFromSync);
+              } else if (msg.type === 'ALL_FILES_RECEIVED') {
+                  if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
+                    activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
+                  }
+                  const finalTotalBytes = peerTotalBytesRef.current.get(conn.peer) || metadata?.totalSize || 0;
+                  peerTransferredBytesRef.current.set(conn.peer, finalTotalBytes);
+                  peerTotalBytesRef.current.set(conn.peer, finalTotalBytes);
+                  peerProgress.current.set(conn.peer, 100);
+                  peerRealtimeSpeed.current.set(conn.peer, 0);
+                  if (activeTransfersCount.current === 0) {
+                    setTotalProgress(100);
+                    setCurrentFileIndex(0);
+                    onNotification("文件发送完成！", 'success');
+                  }
               } else if (msg.type === 'HEARTBEAT') {
                   peerHeartbeatAtRef.current.set(conn.peer, Date.now());
               }
@@ -960,14 +1041,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     updateConnectionStats(conn, { updateUi: false }).catch(() => {});
 
     let totalBytesSent = 0;
-    let transferSucceeded = false;
+    let sendCompleted = false;
     let lastBufferedAmount = 0;
     let lastUpdateTime = Date.now();
     let bytesInLastPeriod = 0;
     const startTime = Date.now();
 
     const peerId = conn.peer;
+    peerHasProgressSyncRef.current.delete(peerId);
+    peerSyncStartAtRef.current.delete(peerId);
+    peerSyncBaseBytesRef.current.delete(peerId);
     peerProgress.current.set(peerId, 0);
+    peerTransferredBytesRef.current.set(peerId, 0);
 
     for(let i = 0; i < startFileIndex; i++) {
         totalBytesSent += files[i].size;
@@ -1013,6 +1098,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
             let fileOffset = i === startFileIndex ? Math.min(Math.max(0, fileStartByteOffset), file.size) : 0;
             fileStartByteOffset = 0;
+            const hashStartOffset = fileOffset;
+            let fileHashState = crc32Init();
+            let hashedBytes = 0;
 
             while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId) return;
@@ -1102,6 +1190,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     }
 
                     const currentChunkSize = chunkView.byteLength;
+                    fileHashState = crc32Update(fileHashState, chunkView);
+                    hashedBytes += currentChunkSize;
                     totalBytesSent += currentChunkSize;
                     bytesInLastPeriod += currentChunkSize;
                     bufferOffset += currentChunkSize;
@@ -1118,11 +1208,16 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                             const totalDuration = (now - startTime) / 1000;
                             const realTotal = Math.max(0, totalBytesSent - currentBuffered);
                             
-                            peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
-                            peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
-                            if (totalSize > 0) {
-                                const p = Math.min(100, Math.floor((realTotal / totalSize) * 100));
-                                peerProgress.current.set(peerId, p);
+                            const hasProgressSync = peerHasProgressSyncRef.current.has(peerId);
+                            if (!hasProgressSync) {
+                                peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
+                                peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
+                                if (totalSize > 0) {
+                                    const p = Math.min(99, Math.floor((realTotal / totalSize) * 100));
+                                    peerProgress.current.set(peerId, p);
+                                }
+                                peerTotalBytesRef.current.set(peerId, totalSize);
+                                peerTransferredBytesRef.current.set(peerId, Math.max(0, Math.min(totalSize, realTotal)));
                             }
                         }
                         
@@ -1134,19 +1229,22 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                 fileOffset += readSize;
             }
 
-            const completePayload: FileCompletePayload = { fileIndex: i };
+            const completePayload: FileCompletePayload = {
+                fileIndex: i,
+                hashAlgorithm: 'crc32',
+                fileHash: crc32FinalHex(fileHashState),
+                hashStartOffset,
+                hashedBytes,
+            };
             try { conn.send({ type: 'FILE_COMPLETE', payload: completePayload }); } catch(e) {}
         }
 
         try { conn.send({ type: 'ALL_FILES_COMPLETE' }); } catch(e) {}
         
-        transferSucceeded = true;
-        peerProgress.current.set(peerId, 100);
+        sendCompleted = true;
+        peerAwaitingFinalizeAckRef.current.add(peerId);
+        peerProgress.current.set(peerId, 99);
         peerRealtimeSpeed.current.set(peerId, 0);
-
-        if (activeConnections.current.size === 1) {
-            onNotification("文件发送完成！", 'success');
-        }
 
     } catch (err) {
         if (transferSessionId.current === currentSessionId) {
@@ -1162,10 +1260,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         window.clearInterval(adaptiveTimer);
         activeSendingPeersRef.current.delete(peerId);
         if (transferSessionId.current === currentSessionId) {
-            activeTransfersCount.current -= 1;
-            if (transferSucceeded && activeTransfersCount.current === 0) {
-                setTotalProgress(100);
-                setCurrentFileIndex(0);
+            if (!sendCompleted) {
+                activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
             }
         }
     }
@@ -1187,6 +1283,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     });
     activeConnections.current.clear();
     activeSendingPeersRef.current.clear();
+    peerAwaitingFinalizeAckRef.current.clear();
+    peerHasProgressSyncRef.current.clear();
+    peerTransferredBytesRef.current.clear();
+    peerTotalBytesRef.current.clear();
+    peerSyncStartAtRef.current.clear();
+    peerSyncBaseBytesRef.current.clear();
     peerSessionIdsRef.current.clear();
     sessionToPeerRef.current.clear();
     ghostCandidateSinceRef.current.clear();
@@ -1245,25 +1347,22 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const perDeviceTotalBytes = metadata?.totalSize ?? 0;
   const activeTransferStats = individualStats.filter((s) => s.status !== 'waiting');
   const transferTargetCount = activeTransferStats.length;
-  const totalBytes = perDeviceTotalBytes * transferTargetCount;
-  const transferredBytes = perDeviceTotalBytes > 0
-    ? activeTransferStats.reduce((acc, s) => acc + Math.floor((Math.max(0, Math.min(100, s.progress)) / 100) * perDeviceTotalBytes), 0)
-    : 0;
+  const totalBytes = activeTransferStats.reduce((acc, s) => {
+    const peerTotal = peerTotalBytesRef.current.get(s.peerId);
+    return acc + (typeof peerTotal === 'number' && peerTotal > 0 ? peerTotal : perDeviceTotalBytes);
+  }, 0);
+  const transferredBytes = activeTransferStats.reduce((acc, s) => {
+    const peerTotal = peerTotalBytesRef.current.get(s.peerId);
+    const fallbackTotal = typeof peerTotal === 'number' && peerTotal > 0 ? peerTotal : perDeviceTotalBytes;
+    const peerDone = peerTransferredBytesRef.current.get(s.peerId);
+    if (typeof peerDone === 'number') {
+      return acc + Math.max(0, Math.min(fallbackTotal, peerDone));
+    }
+    return acc + Math.floor((Math.max(0, Math.min(100, s.progress)) / 100) * fallbackTotal);
+  }, 0);
   const remainingBytes = Math.max(0, totalBytes - transferredBytes);
   const etaSpeedBytes = currentSpeedBytes > 0 ? currentSpeedBytes : avgSpeedBytes;
   const overallEta = etaSpeedBytes > 0 ? formatEta(remainingBytes / etaSpeedBytes) : '--';
-  const adaptiveDebugRows = individualStats.map((stat) => {
-    const flow = peerAdaptiveFlowRef.current.get(stat.peerId);
-    return {
-      peerId: stat.peerId,
-      deviceName: stat.deviceName,
-      connectionType: stat.connectionType,
-      rttText: flow?.metrics.rttMs != null ? `${flow.metrics.rttMs} ms` : '--',
-      lossText: flow?.metrics.lossPct != null ? `${flow.metrics.lossPct.toFixed(2)}%` : '--',
-      chunkText: flow ? formatFileSize(flow.chunkSize) : '--',
-      windowText: flow ? `${formatFileSize(flow.highWaterMark)} / ${formatFileSize(flow.lowWaterMark)}` : '--',
-    };
-  });
 
   const handleCopyLink = async () => {
       try {
@@ -1425,33 +1524,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                             </div>
                         </div>
                     ))}
-                </div>
-              </div>
-           )}
-
-           {adaptiveDebugRows.length > 0 && (
-              <div className="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700 overflow-hidden mt-2 animate-slide-up text-left">
-                <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-500 dark:text-slate-400 flex justify-between items-center">
-                    <span>调试面板（自适应）</span>
-                    <span className="font-mono">{adaptiveDebugRows.length} 连接</span>
-                </div>
-                <div className="divide-y divide-slate-100 dark:divide-slate-700 max-h-56 overflow-y-auto">
-                  {adaptiveDebugRows.map((row) => (
-                    <div key={row.peerId} className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="truncate font-medium" title={row.peerId}>{row.deviceName}</span>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300 shrink-0">
-                          {row.connectionType}
-                        </span>
-                      </div>
-                      <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                        <span>RTT: <span className="font-mono">{row.rttText}</span></span>
-                        <span>丢包: <span className="font-mono">{row.lossText}</span></span>
-                        <span>Chunk: <span className="font-mono">{row.chunkText}</span></span>
-                        <span>窗口(H/L): <span className="font-mono">{row.windowText}</span></span>
-                      </div>
-                    </div>
-                  ))}
                 </div>
               </div>
            )}

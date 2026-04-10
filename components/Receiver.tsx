@@ -3,8 +3,9 @@ import Peer, { DataConnection } from 'peerjs';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
-import { TransferState, FileMetadata, P2PMessage } from '../types';
+import { TransferState, FileMetadata, P2PMessage, FileCompletePayload } from '../types';
 import { formatFileSize } from '../services/fileUtils';
+import { crc32FinalHex, crc32Init, crc32Update } from '../services/hashUtils';
 import { getIceConfig, prefetchIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
@@ -43,6 +44,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const FAST_RETRY_BASE_MS = 700;
   const FAST_RETRY_MAX_MS = 5000;
   const MAX_CONNECT_RETRY = 6;
+  const MAX_AUTO_REPAIR_RETRIES_PER_FILE = 2;
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
@@ -110,6 +112,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receivedChunksCountRef = useRef<number>(0);
   const receivedSizeRef = useRef<number>(0);
   const currentFileSizeRef = useRef<number>(0);
+  const fileHashStateRef = useRef<number>(crc32Init());
+  const hashedBytesRef = useRef<number>(0);
+  const fileRepairAttemptsRef = useRef<Map<number, number>>(new Map());
+  const pendingAutoRepairFileRef = useRef<number | null>(null);
   
   const isStreamingRef = useRef<boolean>(false);
   const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
@@ -123,6 +129,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
+  const lastReportedSpeedBytesRef = useRef<number>(0);
 
   const codeRef = useRef<string>('');
   const isMountedRef = useRef(true);
@@ -192,13 +199,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const abortStreams = async () => {
       try {
-          if (nativeWriterRef.current) { await nativeWriterRef.current.close(); nativeWriterRef.current = null; }
+          if (nativeWriterRef.current) {
+              try { await nativeWriterRef.current.truncate(0); } catch {}
+              await nativeWriterRef.current.close();
+              nativeWriterRef.current = null;
+          }
           if (streamSaverWriterRef.current) { await streamSaverWriterRef.current.abort(); streamSaverWriterRef.current = null; }
           isStreamingRef.current = false;
       } catch (e) { console.warn("Stream abort warning:", e); }
   };
 
-  const closeStreams = async () => {
+  const closeStreams = async (): Promise<boolean> => {
       const closeWithTimeout = async (task: Promise<void>, timeoutMs: number, label: string) => {
           return Promise.race<void>([
               task,
@@ -217,7 +228,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               streamSaverWriterRef.current = null;
           }
           isStreamingRef.current = false;
+          return true;
       } catch (e) { console.warn("Stream close warning:", e); }
+      return false;
   };
 
   const prepareNativeWriterForSingleFile = async (targetFileIndex: number): Promise<boolean> => {
@@ -273,10 +286,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             setProgress(pct);
             
             const timeDiff = now - lastSpeedUpdateRef.current;
+            let latestSpeedBytes = lastReportedSpeedBytesRef.current;
             if (timeDiff >= 1000) {
                 const bytesDiff = received - lastSpeedBytesRef.current;
                 const speed = (bytesDiff / timeDiff) * 1000;
                 const safeSpeed = Math.max(0, speed);
+                latestSpeedBytes = safeSpeed;
                 setDownloadSpeed(formatFileSize(safeSpeed) + '/s');
                 setDownloadSpeedBytes(safeSpeed);
                 if (safeSpeed > 0 && total > received) {
@@ -286,11 +301,51 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                 } else if (received >= total) { setEta('完成'); } else { setEta('--'); }
                 lastSpeedUpdateRef.current = now;
                 lastSpeedBytesRef.current = received;
+                lastReportedSpeedBytesRef.current = safeSpeed;
             }
+            sendTransferProgress(latestSpeedBytes);
         }, 1000);
     }
     return () => clearInterval(interval);
   }, [state]);
+
+  const getOverallTransferSnapshot = () => {
+    const meta = metadataRef.current;
+    if (!meta) {
+      return { overallTransferredBytes: 0, overallTotalBytes: 0 };
+    }
+    const files = meta.files || [];
+    const overallTotalBytes = Math.max(0, meta.totalSize || files.reduce((acc, file) => acc + file.size, 0));
+    const completedBytes = files.reduce((acc, file, idx) => {
+      return acc + (completedFileIndicesRef.current.has(idx) ? file.size : 0);
+    }, 0);
+    const currentIndex = currentFileIndexRef.current;
+    const currentFileBytes = (
+      currentIndex >= 0 &&
+      currentIndex < files.length &&
+      !completedFileIndicesRef.current.has(currentIndex)
+    ) ? Math.min(receivedSizeRef.current, files[currentIndex].size) : 0;
+    const overallTransferredBytes = Math.min(overallTotalBytes, completedBytes + currentFileBytes);
+    return { overallTransferredBytes, overallTotalBytes };
+  };
+
+  const sendTransferProgress = (speedBytes: number) => {
+    const conn = connRef.current;
+    if (!conn || !conn.open) return;
+    const { overallTransferredBytes, overallTotalBytes } = getOverallTransferSnapshot();
+    try {
+      conn.send({
+        type: 'TRANSFER_PROGRESS',
+        payload: {
+          overallTransferredBytes,
+          overallTotalBytes,
+          speedBytes: Math.max(0, speedBytes),
+        }
+      });
+    } catch {
+      // Ignore transient progress sync failures; next tick will retry.
+    }
+  };
 
   const flushSpecificBatch = async (batch: Uint8Array[], totalLen: number) => {
       if (!isStreamingRef.current) return;
@@ -314,6 +369,66 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           setState(TransferState.ERROR);
           if (connRef.current) connRef.current.close();
       }
+  };
+
+  const failTransferPersistence = (message: string) => {
+      isTransferActiveRef.current = false;
+      pendingAutoRepairFileRef.current = null;
+      setErrorMsg(message);
+      setState(TransferState.ERROR);
+      abortStreams().catch(() => {});
+      if (connRef.current?.open) {
+        try { connRef.current.send({ type: 'TRANSFER_CANCELLED', payload: { reason: message } }); } catch {}
+        try { connRef.current.close(); } catch {}
+      }
+  };
+
+  const requestFileAutoRepair = async (fileIndex: number, reason: string): Promise<boolean> => {
+      const attempt = (fileRepairAttemptsRef.current.get(fileIndex) || 0) + 1;
+      fileRepairAttemptsRef.current.set(fileIndex, attempt);
+
+      if (attempt > MAX_AUTO_REPAIR_RETRIES_PER_FILE) {
+          failTransferPersistence(`文件自动修复失败（已重试 ${MAX_AUTO_REPAIR_RETRIES_PER_FILE} 次）：${reason}`);
+          return false;
+      }
+
+      pendingAutoRepairFileRef.current = fileIndex;
+      setProgress(0);
+      setDownloadSpeed('0 KB/s');
+      setDownloadSpeedBytes(0);
+      setEta('自动修复中...');
+
+      chunksRef.current = [];
+      writeBufferRef.current = [];
+      writeBufferSizeRef.current = 0;
+      receivedChunksCountRef.current = 0;
+      receivedSizeRef.current = 0;
+      fileHashStateRef.current = crc32Init();
+      hashedBytesRef.current = 0;
+
+      await abortStreams();
+
+      const conn = connRef.current;
+      if (!conn || !conn.open) {
+          failTransferPersistence("连接已断开，无法自动修复，请重试。");
+          return false;
+      }
+
+      try {
+          conn.send({
+            type: 'RESUME_REQUEST',
+            payload: {
+              fileIndex,
+              byteOffset: 0,
+              silent: true
+            }
+          });
+      } catch {
+          failTransferPersistence("自动修复请求发送失败，请重试。");
+          return false;
+      }
+
+      return true;
   };
 
   const setupConnListeners = (conn: DataConnection) => {
@@ -383,7 +498,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     conn.on('data', async (data: any) => {
       if (data == null) return;
 
-      if (!isTransferActiveRef.current && state !== TransferState.IDLE && state !== TransferState.WAITING_FOR_PEER && state !== TransferState.PEER_CONNECTED) {
+      const currentState = stateRef.current;
+      if (!isTransferActiveRef.current && currentState !== TransferState.IDLE && currentState !== TransferState.WAITING_FOR_PEER && currentState !== TransferState.PEER_CONNECTED) {
           return;
       }
 
@@ -404,6 +520,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
          if (byteLength > 0) {
              receivedChunksCountRef.current++;
              receivedSizeRef.current += byteLength;
+             fileHashStateRef.current = crc32Update(fileHashStateRef.current, new Uint8Array(chunkData));
+             hashedBytesRef.current += byteLength;
              
              if (isStreamingRef.current) {
                  writeBufferRef.current.push(new Uint8Array(chunkData));
@@ -489,7 +607,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                          const fileStream = streamSaver.createWriteStream(fileName, { size: fileSize });
                          streamSaverWriterRef.current = fileStream.getWriter();
                          isStreamingRef.current = true;
-                     } catch(e) { isStreamingRef.current = false; }
+                     } catch {
+                         // Fallback to browser default save flow when stream writer is unavailable.
+                         isStreamingRef.current = false;
+                     }
+                } else {
+                    isStreamingRef.current = false;
                 }
             } else {
                 isStreamingRef.current = true;
@@ -498,18 +621,50 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         
         currentFileSizeRef.current = fileSize;
         currentFileIndexRef.current = fileIndex;
+        if (pendingAutoRepairFileRef.current === fileIndex) {
+          pendingAutoRepairFileRef.current = null;
+        }
+        fileHashStateRef.current = crc32Init();
+        hashedBytesRef.current = 0;
         
         lastSpeedUpdateRef.current = Date.now();
         lastSpeedBytesRef.current = receivedSizeRef.current;
+        lastReportedSpeedBytesRef.current = 0;
         
         setCurrentFileName(fileName);
         setCurrentFileIndex(fileIndex + 1);
         setProgress(0);
         setEta('计算中...');
         setDownloadSpeed('0 KB/s');
+        sendTransferProgress(0);
       }
       else if (msg.type === 'FILE_COMPLETE') {
          if (!isTransferActiveRef.current) return;
+         if (receivedSizeRef.current !== currentFileSizeRef.current) {
+             const repaired = await requestFileAutoRepair(
+               currentFileIndexRef.current,
+               `文件长度不一致（${receivedSizeRef.current}/${currentFileSizeRef.current}）`
+             );
+             if (!repaired) return;
+             return;
+         }
+         const completePayload = (msg.payload || {}) as FileCompletePayload;
+         if (completePayload.hashAlgorithm === 'crc32' && typeof completePayload.fileHash === 'string') {
+             const expectedBytes = typeof completePayload.hashedBytes === 'number'
+               ? Math.max(0, completePayload.hashedBytes)
+               : hashedBytesRef.current;
+             if (hashedBytesRef.current !== expectedBytes) {
+                const repaired = await requestFileAutoRepair(currentFileIndexRef.current, `字节数不一致（${hashedBytesRef.current}/${expectedBytes}）`);
+                if (!repaired) return;
+                return;
+             }
+             const actualHash = crc32FinalHex(fileHashStateRef.current);
+             if (actualHash !== completePayload.fileHash.toLowerCase()) {
+                const repaired = await requestFileAutoRepair(currentFileIndexRef.current, `哈希不一致（${actualHash} != ${completePayload.fileHash}）`);
+                if (!repaired) return;
+                return;
+             }
+         }
 
          if (isStreamingRef.current) {
              const finalBatch = writeBufferRef.current;
@@ -519,22 +674,43 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
              writeQueueRef.current = writeQueueRef.current.then(async () => {
                  if (finalSize > 0) await flushSpecificBatch(finalBatch, finalSize);
-                 await closeStreams();
+                 const closeOk = await closeStreams();
+                 if (!closeOk) {
+                    failTransferPersistence("文件落盘失败，请重试。");
+                    return;
+                 }
 
                  if (isTransferActiveRef.current) {
                     completedFileIndicesRef.current.add(currentFileIndexRef.current);
+                    fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
+                    sendTransferProgress(lastReportedSpeedBytesRef.current);
                     if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
                  }
              }).catch(e => console.error("File Complete Error", e));
 
              await writeQueueRef.current;
          } else {
-             saveCurrentFile();
+             if (!saveCurrentFile()) {
+               return;
+             }
           }
       }
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          if (!isTransferActiveRef.current) return;
+         if (pendingAutoRepairFileRef.current !== null) return;
          await writeQueueRef.current;
+         const expectedFiles = metadataRef.current?.files?.length ?? 0;
+         const savedFiles = completedFileIndicesRef.current.size;
+         if (expectedFiles > 0 && savedFiles < expectedFiles) {
+           failTransferPersistence(`文件保存不完整（${savedFiles}/${expectedFiles}），请重试。`);
+           return;
+         }
+         sendTransferProgress(0);
+         try {
+           conn.send({ type: 'ALL_FILES_RECEIVED' });
+         } catch {
+           // Ignore ack send failures; sender has heartbeat/close fallback.
+         }
          setState(TransferState.COMPLETED);
          if (onNotification) onNotification("所有文件接收完毕", 'success');
          resetStateForNewTransfer();
@@ -606,10 +782,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       writeBufferSizeRef.current = 0;
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
+      fileHashStateRef.current = crc32Init();
+      hashedBytesRef.current = 0;
       completedFileIndicesRef.current.clear();
       currentFileIndexRef.current = 0;
       setDownloadSpeed('0 KB/s');
       setDownloadSpeedBytes(0);
+      lastReportedSpeedBytesRef.current = 0;
+      fileRepairAttemptsRef.current.clear();
+      pendingAutoRepairFileRef.current = null;
       setEta('--');
       preparedNativeWriterFileIndexRef.current = null;
       writeQueueRef.current = Promise.resolve();
@@ -668,9 +849,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }, 30000);
   };
 
-  const saveCurrentFile = () => {
-      if (!isTransferActiveRef.current) return;
-      if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) return;
+  const saveCurrentFile = (): boolean => {
+      if (!isTransferActiveRef.current) return false;
+      if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) return false;
 
       let finalName = `file_${Date.now()}.bin`;
       let finalType = 'application/octet-stream';
@@ -692,11 +873,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           }
 
           completedFileIndicesRef.current.add(currentFileIndexRef.current);
+          fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
+          sendTransferProgress(lastReportedSpeedBytesRef.current);
           if (onNotification) onNotification(`文件 ${finalName} 已保存`, 'success');
-      } catch (e) { console.error("Save failed:", e); }
+      } catch (e) {
+          console.error("Save failed:", e);
+          failTransferPersistence("浏览器保存失败，请检查下载权限后重试。");
+          return false;
+      }
       chunksRef.current = [];
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
+      return true;
   };
 
   const handleConnect = async () => {
@@ -827,12 +1015,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (connRef.current?.open) {
       resetStateForNewTransfer();
       isTransferActiveRef.current = true;
+      // Default to browser-managed download behavior; do not force a save-path picker on accept.
+      preparedNativeWriterFileIndexRef.current = null;
 
       if (isIOS || isSafari) {
           isStreamingRef.current = false;
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
-      } else {
-          await prepareNativeWriterForSingleFile(0);
       }
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
