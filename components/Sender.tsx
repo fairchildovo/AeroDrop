@@ -26,6 +26,7 @@ interface SenderProps {
 type PeerTransferStat = {
   peerId: string;
   deviceName: string;
+  connectionType: '直连' | '点对点' | '中继（速度会变慢）' | '检测中';
   speed: string;
   progress: number;
   status: 'waiting' | 'transferring' | 'completed';
@@ -76,6 +77,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerSessionIdsRef = useRef<Map<string, string>>(new Map());
   const sessionToPeerRef = useRef<Map<string, string>>(new Map());
   const ghostCandidateSinceRef = useRef<Map<string, number>>(new Map());
+  const peerConnectionTypeRef = useRef<Map<string, PeerTransferStat['connectionType']>>(new Map());
+  const peerHeartbeatAtRef = useRef<Map<string, number>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -90,6 +93,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerNamesRef = useRef<Record<string, string>>(peerNames);
   const GHOST_SWEEP_INTERVAL_MS = 4000;
   const GHOST_GRACE_MS = 10000;
+  const HEARTBEAT_TIMEOUT_MS = 30000;
   const lastStatsPollIndexRef = useRef(0);
 
   const totalProgressRef = useRef(0);
@@ -134,6 +138,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     speed: status === 'transferring' ? `${formatFileSize(realtimeSpeed)}/s` : status === 'completed' ? '完成' : '--',
                     progress,
                     deviceName: peerNamesRef.current[peerId] || `设备 ...${peerId.slice(-4)}`,
+                    connectionType: peerConnectionTypeRef.current.get(peerId) || '检测中',
                     status
                 };
             });
@@ -280,8 +285,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
               if (activeConnections.current.size === 1) {
                   const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
+                  peerConnectionTypeRef.current.set(conn.peer, networkType);
                   setConnectionStatus(`已连接 | ${protocol.toUpperCase()} | ${networkType}`);
               } else {
+                  const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
+                  peerConnectionTypeRef.current.set(conn.peer, networkType);
                   setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
               }
           }
@@ -554,6 +562,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       peerAverageSpeed.current.delete(conn.peer);
       activeSendingPeersRef.current.delete(conn.peer);
       ghostCandidateSinceRef.current.delete(conn.peer);
+      peerConnectionTypeRef.current.delete(conn.peer);
+      peerHeartbeatAtRef.current.delete(conn.peer);
       removePeerName(conn.peer);
 
       const removedSessionId = peerSessionIdsRef.current.get(conn.peer);
@@ -598,6 +608,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   pcState === 'disconnected';
 
               if (closedByState) {
+                  try { if (conn.open) conn.close(); } catch {}
+                  cleanupConnectionState(conn);
+                  return;
+              }
+
+              const lastHeartbeatAt = peerHeartbeatAtRef.current.get(conn.peer) ?? now;
+              if (now - lastHeartbeatAt >= HEARTBEAT_TIMEOUT_MS) {
+                  markSessionEvent(shareTelemetryRef.current, 'heartbeat_timeout_kill', {
+                    peer: conn.peer,
+                    timeoutMs: now - lastHeartbeatAt,
+                  });
                   try { if (conn.open) conn.close(); } catch {}
                   cleanupConnectionState(conn);
                   return;
@@ -676,6 +697,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           conn.on('open', () => {
               markSessionEvent(shareTelemetryRef.current, 'receiver_connected', { peerId: conn.peer });
               activeConnections.current.add(conn);
+              peerHeartbeatAtRef.current.set(conn.peer, Date.now());
               peerProgress.current.set(conn.peer, peerProgress.current.get(conn.peer) || 0);
               peerRealtimeSpeed.current.set(conn.peer, peerRealtimeSpeed.current.get(conn.peer) || 0);
               peerAverageSpeed.current.set(conn.peer, peerAverageSpeed.current.get(conn.peer) || 0);
@@ -732,6 +754,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     if (conn.open) conn.close();
                   } catch {}
                   cleanupConnectionState(conn);
+              } else if (msg.type === 'HEARTBEAT') {
+                  peerHeartbeatAtRef.current.set(conn.peer, Date.now());
               }
           });
           
@@ -991,6 +1015,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerSessionIdsRef.current.clear();
     sessionToPeerRef.current.clear();
     ghostCandidateSinceRef.current.clear();
+    peerConnectionTypeRef.current.clear();
+    peerHeartbeatAtRef.current.clear();
 
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
@@ -1039,30 +1065,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       if (seconds < 3600) return `${Math.ceil(seconds / 60)} 分钟`;
       return `${Math.ceil(seconds / 3600)} 小时`;
   };
-  const parseSpeedToBytesPerSec = (speedLabel: string): number => {
-      const normalized = speedLabel.trim().toLowerCase();
-      if (!normalized || normalized === '--' || normalized === '完成') return 0;
-      const numeric = parseFloat(normalized);
-      if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-      if (normalized.includes('gb')) return numeric * 1024 * 1024 * 1024;
-      if (normalized.includes('mb')) return numeric * 1024 * 1024;
-      if (normalized.includes('kb')) return numeric * 1024;
-      if (normalized.includes('byte') || normalized.endsWith('b')) return numeric;
-      return 0;
-  };
-  const totalBytes = metadata?.totalSize ?? 0;
-  const transferredBytes = totalBytes > 0
-    ? Math.floor((Math.max(0, Math.min(100, totalProgress)) / 100) * totalBytes)
+  const perDeviceTotalBytes = metadata?.totalSize ?? 0;
+  const activeTransferStats = individualStats.filter((s) => s.status !== 'waiting');
+  const transferTargetCount = activeTransferStats.length;
+  const totalBytes = perDeviceTotalBytes * transferTargetCount;
+  const transferredBytes = perDeviceTotalBytes > 0
+    ? activeTransferStats.reduce((acc, s) => acc + Math.floor((Math.max(0, Math.min(100, s.progress)) / 100) * perDeviceTotalBytes), 0)
     : 0;
   const remainingBytes = Math.max(0, totalBytes - transferredBytes);
-  const peerRealtimeSpeeds = individualStats
-    .filter((s) => s.status === 'transferring')
-    .map((s) => parseSpeedToBytesPerSec(s.speed))
-    .filter((n) => Number.isFinite(n) && n > 0);
-  const slowestSpeedBytes = peerRealtimeSpeeds.length > 0 ? Math.min(...peerRealtimeSpeeds) : 0;
-  const etaSpeedBytes = activeConnections.current.size > 1
-    ? slowestSpeedBytes
-    : (currentSpeedBytes > 0 ? currentSpeedBytes : avgSpeedBytes);
+  const etaSpeedBytes = currentSpeedBytes > 0 ? currentSpeedBytes : avgSpeedBytes;
   const overallEta = etaSpeedBytes > 0 ? formatEta(remainingBytes / etaSpeedBytes) : '--';
 
   const handleCopyLink = async () => {
@@ -1207,6 +1218,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                                 <div className="flex items-center gap-2 min-w-0">
                                     <div className={`w-2 h-2 rounded-full ${stat.status === 'completed' ? 'bg-green-500' : stat.status === 'transferring' ? 'bg-brand-500 animate-pulse' : 'bg-slate-400'}`}></div>
                                     <span className="text-slate-700 dark:text-slate-200 truncate" title={stat.peerId}>{stat.deviceName}</span>
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300 shrink-0">
+                                      {stat.connectionType}
+                                    </span>
                                 </div>
                                 <div className="flex items-center gap-3">
                                     <span className={`font-medium ${stat.status === 'completed' ? 'text-green-600' : stat.status === 'transferring' ? 'text-brand-600' : 'text-slate-500'}`}>
@@ -1250,7 +1264,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
                    <div className="space-y-2">
                        <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 px-1">
-                           <span>{activeConnections.current.size > 1 ? '总进度 (平均)' : '总进度'}</span>
+                           <span>{activeConnections.current.size > 1 ? '所有设备总进度 (平均)' : '总进度'}</span>
                            <span>{totalProgress}%</span>
                        </div>
                        <div className="w-full bg-slate-100 dark:bg-slate-700 rounded-full h-3 overflow-hidden">
@@ -1262,18 +1276,21 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                            </div>
                        </div>
                        <div className="flex justify-between text-[11px] text-slate-500 dark:text-slate-400 px-1">
-                           <span>{formatFileSize(transferredBytes)} / {formatFileSize(totalBytes)}</span>
+                           <span>总任务字节: {formatFileSize(totalBytes)}</span>
+                           <span>已完成字节: {formatFileSize(transferredBytes)}</span>
+                       </div>
+                       <div className="flex justify-end text-[11px] text-slate-500 dark:text-slate-400 px-1">
                            <span>预计剩余 {overallEta}</span>
                        </div>
                    </div>
 
                    <div className="grid grid-cols-2 gap-3">
                        <div className="bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border border-slate-100 dark:border-slate-700 text-center">
-                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">总实时速度</p>
+                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">{activeConnections.current.size > 1 ? '所有设备总实时速度' : '实时速度'}</p>
                            <p className="text-brand-600 dark:text-brand-400 font-bold font-mono">{currentSpeed}</p>
                        </div>
                        <div className="bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border border-slate-100 dark:border-slate-700 text-center">
-                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">总平均速度</p>
+                           <p className="text-[10px] text-slate-400 uppercase tracking-wider mb-0.5">{activeConnections.current.size > 1 ? '所有设备总平均速度' : '平均速度'}</p>
                            <p className="text-blue-600 dark:text-blue-400 font-bold font-mono">{avgSpeed}</p>
                        </div>
                    </div>

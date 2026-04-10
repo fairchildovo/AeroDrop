@@ -81,6 +81,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const retryCountRef = useRef<number>(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatTimerRef = useRef<number | null>(null);
   const stateRef = useRef<TransferState>(TransferState.IDLE);
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
   const localDeviceNameRef = useRef<string>(deviceName);
@@ -135,6 +136,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }
   };
 
+  const clearHeartbeatTimer = () => {
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+  };
+
   const handleConnectRef = useRef<() => void>(() => {});
   useEffect(() => {
     handleConnectRef.current = handleConnect;
@@ -153,10 +161,30 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     return () => {
       isMountedRef.current = false;
       clearConnectionTimeout();
+      clearHeartbeatTimer();
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
       if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
       abortStreams();
+    };
+  }, []);
+
+  useEffect(() => {
+    const notifyClosing = () => {
+      const conn = connRef.current;
+      if (!conn || !conn.open) return;
+      try {
+        conn.send({ type: 'TRANSFER_CANCELLED' });
+      } catch {
+        // Ignore; sender side heartbeat timeout will clean up.
+      }
+    };
+
+    window.addEventListener('pagehide', notifyClosing);
+    window.addEventListener('beforeunload', notifyClosing);
+    return () => {
+      window.removeEventListener('pagehide', notifyClosing);
+      window.removeEventListener('beforeunload', notifyClosing);
     };
   }, []);
 
@@ -287,6 +315,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           sessionId: receiverSessionIdRef.current
         }
       });
+      clearHeartbeatTimer();
+      heartbeatTimerRef.current = window.setInterval(() => {
+        if (!conn.open) return;
+        try {
+          conn.send({ type: 'HEARTBEAT', payload: { t: Date.now() } });
+        } catch {
+          // Ignore heartbeat failures; close/error path handles reconnect.
+        }
+      }, 2500);
 
       const pc = conn.peerConnection;
       if (pc) {
@@ -465,6 +502,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     conn.on('close', () => {
        // Ignore close events from the losing happy-eyeballs connection.
        if (happyEyeballsWonRef.current && connRef.current !== conn) return;
+       clearHeartbeatTimer();
        const currentState = stateRef.current;
        if (currentState === TransferState.WAITING_FOR_PEER && scheduleFastReconnect()) {
          return;
@@ -486,6 +524,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     conn.on('error', () => {
       // Ignore error events from the losing happy-eyeballs connection.
       if (happyEyeballsWonRef.current && connRef.current !== conn) return;
+      clearHeartbeatTimer();
       if (scheduleFastReconnect()) {
         return;
       }
@@ -518,7 +557,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setDownloadSpeed('0 KB/s');
       setDownloadSpeedBytes(0);
       setEta('--');
-      abortStreams();
       writeQueueRef.current = Promise.resolve();
   };
 
@@ -775,6 +813,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     isTransferActiveRef.current = false;
     happyEyeballsWonRef.current = false;
     clearConnectionTimeout();
+    clearHeartbeatTimer();
     
     abortStreams().then(() => {
         if (connRef.current) connRef.current.close();
@@ -912,6 +951,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
            {state === TransferState.TRANSFERRING && (
              <div className="space-y-3">
                <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase">
+                  <span>当前文件进度</span>
                   <span>{progress}%</span>
                </div>
                <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-3 overflow-hidden">
