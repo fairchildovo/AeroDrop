@@ -39,6 +39,7 @@ type ConnectionRoute = {
 };
 
 export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
+  type PreparingStage = 'fetching_ice' | 'connecting_signaling';
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [fileList, setFileList] = useState<File[]>([]);
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
@@ -65,6 +66,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const [copied, setCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [preparingStage, setPreparingStage] = useState<PreparingStage>('fetching_ice');
 
   const peerRef = useRef<Peer | null>(null);
   const activeConnections = useRef<Set<DataConnection>>(new Set());
@@ -94,7 +96,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const GHOST_SWEEP_INTERVAL_MS = 4000;
   const GHOST_GRACE_MS = 10000;
   const HEARTBEAT_TIMEOUT_MS = 30000;
+  const SIGNALING_OPEN_TIMEOUT_MS = 10000;
+  const MAX_SIGNALING_OPEN_RETRY = 1;
   const lastStatsPollIndexRef = useRef(0);
+  const signalingOpenTimeoutRef = useRef<number | null>(null);
 
   const totalProgressRef = useRef(0);
   useEffect(() => {
@@ -528,6 +533,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
+    setPreparingStage('fetching_ice');
     setConnectionStatus('');
     let expiresAt: number | undefined;
     const now = Date.now();
@@ -537,22 +543,53 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const metadataWithConstraints: FileMetadata = { ...metadata, constraints: { expiresAt } };
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
+    setPreparingStage('connecting_signaling');
     markIceConfigFetched(shareTelemetryRef.current);
-    const finalCode = customCodeInput.length === 4 ? customCodeInput : (() => {
-      const arr = new Uint32Array(1);
-      crypto.getRandomValues(arr);
-      return (1000 + (arr[0] % 9000)).toString();
-    })();
-    const customPeer = new Peer(`aerodrop-${finalCode}`, {
-      debug: peerDebugLevel,
-      pingInterval: 5000,
-      config: {
-        iceServers: iceConfig.iceServers,
-        iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
-        iceTransportPolicy: iceConfig.iceTransportPolicy,
+    const clearSignalingOpenTimeout = () => {
+      if (signalingOpenTimeoutRef.current !== null) {
+        window.clearTimeout(signalingOpenTimeoutRef.current);
+        signalingOpenTimeoutRef.current = null;
       }
-    });
-    setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
+    };
+
+    const createSharePeer = (attempt: number) => {
+      const finalCode = customCodeInput.length === 4 ? customCodeInput : (() => {
+        const arr = new Uint32Array(1);
+        crypto.getRandomValues(arr);
+        return (1000 + (arr[0] % 9000)).toString();
+      })();
+
+      const customPeer = new Peer(`aerodrop-${finalCode}`, {
+        debug: peerDebugLevel,
+        pingInterval: 5000,
+        config: {
+          iceServers: iceConfig.iceServers,
+          iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+          iceTransportPolicy: iceConfig.iceTransportPolicy,
+        }
+      });
+
+      clearSignalingOpenTimeout();
+      signalingOpenTimeoutRef.current = window.setTimeout(() => {
+        if (isDestroyingRef.current) return;
+        if (peerRef.current !== customPeer) return;
+        markSessionEvent(shareTelemetryRef.current, 'signaling_open_timeout', { attempt });
+        try { customPeer.destroy(); } catch {}
+        if (attempt < MAX_SIGNALING_OPEN_RETRY) {
+          setPreparingStage('connecting_signaling');
+          createSharePeer(attempt + 1);
+          return;
+        }
+        setErrorMsg('准备传输节点超时，请重试');
+        setState(TransferState.ERROR);
+      }, SIGNALING_OPEN_TIMEOUT_MS);
+
+      customPeer.on('open', clearSignalingOpenTimeout);
+      customPeer.on('error', clearSignalingOpenTimeout);
+      setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
+    };
+
+    createSharePeer(0);
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {
@@ -665,6 +702,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           markSignalingOpen(shareTelemetryRef.current);
           markConnectionSuccess(shareTelemetryRef.current, { code });
           setTransferCode(code);
+          setPreparingStage('fetching_ice');
           setState(TransferState.WAITING_FOR_PEER);
       });
       peer.on('disconnected', () => {
@@ -681,6 +719,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               markConnectionFailure(shareTelemetryRef.current, `peer_error:${err.type}`);
               if (activeConnections.current.size === 0) {
                  setErrorMsg(`连接错误: ${err.type}`);
+                 setPreparingStage('fetching_ice');
                  setState(TransferState.ERROR);
               }
           }
@@ -1002,6 +1041,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const stopSharing = () => {
     isDestroyingRef.current = true;
+    if (signalingOpenTimeoutRef.current !== null) {
+      window.clearTimeout(signalingOpenTimeoutRef.current);
+      signalingOpenTimeoutRef.current = null;
+    }
     transferSessionId.current += 1; 
     
     activeConnections.current.forEach(conn => {
@@ -1031,6 +1074,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setPeerNames({});
 
     setConnectionStatus('');
+    setPreparingStage('fetching_ice');
     setState(TransferState.IDLE);
     setFileList([]);
     setMetadata(null);
@@ -1180,7 +1224,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       {state === TransferState.GENERATING_CODE && (
           <div className="py-12 flex flex-col items-center justify-center text-center animate-pop-in">
               <Loader2 size={48} className="animate-spin text-brand-500 mb-4" />
-              <h3 className="text-lg font-bold text-slate-800 dark:text-white">正在准备传输节点...</h3>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-white">
+                {preparingStage === 'fetching_ice' ? '获取网络配置...' : '连接信令服务...'}
+              </h3>
           </div>
       )}
 

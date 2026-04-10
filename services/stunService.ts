@@ -22,6 +22,7 @@ export type IceConfigResult = {
 };
 
 const ICE_CACHE_TTL_MS = 30_000;
+const ICE_FETCH_TIMEOUT_MS = 2000;
 let cachedConfig: IceConfigResult | null = null;
 let cachedAt = 0;
 let inflightRequest: Promise<IceConfigResult> | null = null;
@@ -55,8 +56,10 @@ const fallbackConfig: IceConfigResult = {
 };
 
 const fetchIceConfig = async (): Promise<IceConfigResult> => {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), ICE_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch('/api/ice-config', { cache: 'no-store' });
+    const res = await fetch('/api/ice-config', { cache: 'no-store', signal: controller.signal });
     if (!res.ok) return fallbackConfig;
     const data = (await res.json()) as IceConfigResponse;
 
@@ -81,6 +84,8 @@ const fetchIceConfig = async (): Promise<IceConfigResult> => {
     return result;
   } catch {
     return fallbackConfig;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 };
 
