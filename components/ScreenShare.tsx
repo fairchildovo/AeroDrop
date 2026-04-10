@@ -12,6 +12,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [isSharing, setIsSharing] = useState(false);
   const [isViewing, setIsViewing] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [viewerConnectingStage, setViewerConnectingStage] = useState<'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | ''>('');
   const [error, setError] = useState<string | null>(null);
   const [peerId, setPeerId] = useState<string | null>(null);
   const [isPeerReady, setIsPeerReady] = useState(false);
@@ -580,6 +581,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     streamRef.current = null;
     setIsViewing(false);
     setIsConnecting(false);
+    setViewerConnectingStage('');
 
     // 只有手动停止时才清除目标ID，方便重连
     if (isManual) {
@@ -609,6 +611,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     setError(null);
     setIsConnecting(true);
+    setViewerConnectingStage('fetching_ice');
     setTargetSharerId(sharerId);
 
     // 设置全局连接超时（弱网场景下放宽）
@@ -630,6 +633,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
 
     const iceConfig = await getIceConfig();
+    setViewerConnectingStage('connecting_signaling');
     const useSecurePeerServer = window.location.protocol === 'https:';
     const peer = new Peer({
       debug: 0,
@@ -648,6 +652,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       console.log('Viewer peer opened, calling:', sharerId);
       // 连接成功，重置重连计数
       reconnectAttemptsRef.current = 0;
+      setViewerConnectingStage('connecting_media');
 
       // 1. 建立数据连接（用于接收画质信息 和 发送心跳）
       const dataConn = peer.connect(sharerId);
@@ -690,6 +695,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         return;
       }
 
+      setViewerConnectingStage('waiting_stream');
       let hasReceivedStream = false;
 
       call.on('stream', (remoteStream) => {
@@ -1151,8 +1157,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         {isConnecting && (
           <div className="mb-6 flex flex-col items-center justify-center py-12">
             <Loader2 size={48} className="text-brand-600 animate-spin mb-4" />
-            <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
-              正在连接到屏幕共享...
+            <p className="text-sm text-slate-600 dark:text-slate-300 font-medium mb-1">
+              {viewerConnectingStage === 'fetching_ice' && '正在获取网络配置...'}
+              {viewerConnectingStage === 'connecting_signaling' && '正在连接信号服务器...'}
+              {viewerConnectingStage === 'connecting_media' && '正在建立媒体通道...'}
+              {viewerConnectingStage === 'waiting_stream' && '正在等待屏幕画面...'}
+              {!viewerConnectingStage && '正在连接到屏幕共享...'}
+            </p>
+            <p className="text-xs text-slate-400 dark:text-slate-500 mb-4">
+              {viewerConnectingStage === 'fetching_ice' && '获取 STUN/TURN 服务器信息'}
+              {viewerConnectingStage === 'connecting_signaling' && '连接 PeerJS 信令服务'}
+              {viewerConnectingStage === 'connecting_media' && '通过 WebRTC 建立音视频连接'}
+              {viewerConnectingStage === 'waiting_stream' && '已连接，等待对方屏幕画面传输'}
             </p>
             <button
               onClick={cancelConnecting}
