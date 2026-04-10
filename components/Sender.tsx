@@ -102,6 +102,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerTotalBytesRef = useRef<Map<string, number>>(new Map());
   const peerSyncStartAtRef = useRef<Map<string, number>>(new Map());
   const peerSyncBaseBytesRef = useRef<Map<string, number>>(new Map());
+  const peerTransferEpochRef = useRef<Map<string, number>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -674,6 +675,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerTotalBytesRef.current.clear();
     peerSyncStartAtRef.current.clear();
     peerSyncBaseBytesRef.current.clear();
+    peerTransferEpochRef.current.clear();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -749,6 +751,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       peerTotalBytesRef.current.delete(conn.peer);
       peerSyncStartAtRef.current.delete(conn.peer);
       peerSyncBaseBytesRef.current.delete(conn.peer);
+      peerTransferEpochRef.current.delete(conn.peer);
       activeSendingPeersRef.current.delete(conn.peer);
       ghostCandidateSinceRef.current.delete(conn.peer);
       peerConnectionTypeRef.current.delete(conn.peer);
@@ -839,13 +842,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   }, []);
 
   const scheduleSendFileSequence = (conn: DataConnection, startFileIndex: number, startByteOffset: number) => {
-      if (activeSendingPeersRef.current.has(conn.peer)) {
-          return;
-      }
+      // Bump the per-peer epoch so any running sendFileSequence for this peer
+      // will detect the change at its next check-point and exit gracefully.
+      const nextEpoch = (peerTransferEpochRef.current.get(conn.peer) || 0) + 1;
+      peerTransferEpochRef.current.set(conn.peer, nextEpoch);
 
       activeSendingPeersRef.current.add(conn.peer);
       setTimeout(() => {
-          sendFileSequence(conn, startFileIndex, startByteOffset);
+          sendFileSequence(conn, startFileIndex, startByteOffset, nextEpoch);
       }, 100);
   };
 
@@ -1021,9 +1025,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       });
   };
 
-  const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startByteOffset: number = 0) => {
+  const sendFileSequence = async (conn: DataConnection, startFileIndex: number = 0, startByteOffset: number = 0, peerEpoch: number = 0) => {
     const files = fileListRef.current;
     if (!files.length) return;
+
+    // If a newer sequence was already scheduled for this peer, bail out.
+    if (peerTransferEpochRef.current.get(conn.peer) !== peerEpoch) return;
+
+    // Wait for any previous sequence to finish exiting (it will detect the
+    // epoch bump and return soon).  Re-check our own epoch each iteration so
+    // we also bail if yet another sequence is scheduled while we wait.
+    let waitAttempts = 0;
+    while (activeSendingPeersRef.current.has(conn.peer)) {
+        await new Promise(r => setTimeout(r, 50));
+        waitAttempts++;
+        if (waitAttempts > 120) return; // 6 s safety cap
+        if (peerTransferEpochRef.current.get(conn.peer) !== peerEpoch) return;
+        if (!conn.open) return;
+    }
+
+    activeSendingPeersRef.current.add(conn.peer);
 
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
@@ -1076,7 +1097,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         let fileStartByteOffset = startByteOffset;
 
         for (let i = startFileIndex; i < files.length; i++) {
-            if (transferSessionId.current !== currentSessionId) return;
+            if (transferSessionId.current !== currentSessionId || peerTransferEpochRef.current.get(peerId) !== peerEpoch) return;
             if (!conn.open) throw new Error("Connection closed");
 
             if (activeConnections.current.size === 1) {
@@ -1103,7 +1124,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             let hashedBytes = 0;
 
             while (fileOffset < file.size) {
-                if (transferSessionId.current !== currentSessionId) return;
+                if (transferSessionId.current !== currentSessionId || peerTransferEpochRef.current.get(peerId) !== peerEpoch) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
 
                 const readSize = Math.min(READ_BUFFER_SIZE, file.size - fileOffset);
@@ -1258,7 +1279,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         }
     } finally {
         window.clearInterval(adaptiveTimer);
-        activeSendingPeersRef.current.delete(peerId);
+        // Only remove from activeSendingPeersRef if we are still the current
+        // epoch for this peer.  If a newer epoch was scheduled, it now owns
+        // the entry and will clean it up.
+        if (peerTransferEpochRef.current.get(peerId) === peerEpoch) {
+            activeSendingPeersRef.current.delete(peerId);
+        }
         if (transferSessionId.current === currentSessionId) {
             if (!sendCompleted) {
                 activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
@@ -1289,6 +1315,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerTotalBytesRef.current.clear();
     peerSyncStartAtRef.current.clear();
     peerSyncBaseBytesRef.current.clear();
+    peerTransferEpochRef.current.clear();
     peerSessionIdsRef.current.clear();
     sessionToPeerRef.current.clear();
     ghostCandidateSinceRef.current.clear();
