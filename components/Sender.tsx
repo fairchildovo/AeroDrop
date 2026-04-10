@@ -847,7 +847,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       const nextEpoch = (peerTransferEpochRef.current.get(conn.peer) || 0) + 1;
       peerTransferEpochRef.current.set(conn.peer, nextEpoch);
 
-      activeSendingPeersRef.current.add(conn.peer);
+      // Do NOT add to activeSendingPeersRef here — sendFileSequence adds itself
+      // after the wait-loop confirms the previous sequence has exited.
       setTimeout(() => {
           sendFileSequence(conn, startFileIndex, startByteOffset, nextEpoch);
       }, 100);
@@ -1279,12 +1280,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         }
     } finally {
         window.clearInterval(adaptiveTimer);
-        // Only remove from activeSendingPeersRef if we are still the current
-        // epoch for this peer.  If a newer epoch was scheduled, it now owns
-        // the entry and will clean it up.
-        if (peerTransferEpochRef.current.get(peerId) === peerEpoch) {
-            activeSendingPeersRef.current.delete(peerId);
-        }
+        // Always remove — the new sequence adds itself only after this
+        // sequence has exited, so there is no ownership conflict.
+        activeSendingPeersRef.current.delete(peerId);
         if (transferSessionId.current === currentSessionId) {
             if (!sendCompleted) {
                 activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
