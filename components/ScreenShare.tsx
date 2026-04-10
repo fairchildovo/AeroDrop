@@ -8,6 +8,8 @@ interface ScreenShareProps {
   initialViewId?: string;
 }
 
+type NetworkRouteClass = 'lan' | 'wan' | 'relay' | 'unknown';
+
 export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initialViewId }) => {
   const [isSharing, setIsSharing] = useState(false);
   const [isViewing, setIsViewing] = useState(false);
@@ -57,7 +59,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const reconnectAttemptsRef = useRef(0);
   const remoteShareEndedRef = useRef(false);
   const remoteShareEndHandledRef = useRef(false);
+  const sharerReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const sharerReconnectAttemptsRef = useRef(0);
   const MAX_RECONNECT_ATTEMPTS = 5;
+  const MAX_SHARER_SIGNAL_RECONNECT_ATTEMPTS = 5;
   // 观看者端：连接过程的全局超时定时器
   const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -74,6 +79,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
   const qualityLevelRef = useRef<'high' | 'medium' | 'low'>('high');
+  const peerQualityLevelRef = useRef<Map<string, 'high' | 'medium' | 'low'>>(new Map());
+  const peerLayerModeRef = useRef<Map<string, 'single' | 'svc' | 'simulcast'>>(new Map());
+  const peerRouteClassRef = useRef<Map<string, NetworkRouteClass>>(new Map());
+  const peerDynamicCapRef = useRef<Map<string, number>>(new Map());
 
 
   const qualityLabels = useMemo(() => ({
@@ -81,6 +90,45 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     medium: '高清',
     low: '流畅',
   }), []);
+
+  const getAggregateQualityLevel = useCallback((): 'high' | 'medium' | 'low' => {
+    const levels = Array.from(peerQualityLevelRef.current.values());
+    if (levels.length === 0) return 'high';
+    if (levels.includes('low')) return 'low';
+    if (levels.includes('medium')) return 'medium';
+    return 'high';
+  }, []);
+
+  const syncAggregateQualityLevel = useCallback(() => {
+    const next = getAggregateQualityLevel();
+    setQualityLevel(next);
+    qualityLevelRef.current = next;
+  }, [getAggregateQualityLevel]);
+
+  const sendQualityToViewer = useCallback((peerId: string, level: 'high' | 'medium' | 'low') => {
+    const conn = activeDataConnectionsRef.current.find((c) => c.peer === peerId && c.open);
+    if (!conn) return;
+    try {
+      conn.send({ type: 'quality', value: level });
+    } catch {
+      // Ignore transient send failures.
+    }
+  }, []);
+
+  const setPeerQualityLevel = useCallback((
+    peerId: string,
+    level: 'high' | 'medium' | 'low',
+    options?: { broadcast?: boolean },
+  ) => {
+    const prev = peerQualityLevelRef.current.get(peerId);
+    if (prev === level) return false;
+    peerQualityLevelRef.current.set(peerId, level);
+    syncAggregateQualityLevel();
+    if (options?.broadcast !== false) {
+      sendQualityToViewer(peerId, level);
+    }
+    return true;
+  }, [sendQualityToViewer, syncAggregateQualityLevel]);
 
 
   const bitrateLimits = useMemo(() => ({
@@ -94,6 +142,47 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     medium: { maxFrameRate: 45, scaleResolutionDownBy: 1 },
     low: { maxFrameRate: 24, scaleResolutionDownBy: 1.25 },
   }), []);
+
+  const routeBitrateCaps = useMemo<Record<NetworkRouteClass, { high: number; medium: number; low: number }>>(() => ({
+    lan: { high: 100000000, medium: 12000000, low: 3500000 },
+    wan: { high: 20000000, medium: 8000000, low: 2500000 },
+    relay: { high: 6000000, medium: 3500000, low: 1500000 },
+    unknown: { high: 12000000, medium: 6000000, low: 2000000 },
+  }), []);
+
+  const isPrivateOrMdnsAddress = useCallback((rawAddress?: string | null) => {
+    if (!rawAddress) return false;
+    const address = rawAddress.trim().toLowerCase();
+    if (!address) return false;
+    if (address.endsWith('.local')) return true;
+    if (address === '::1') return true;
+    if (address.startsWith('fe80:')) return true;
+    if (address.startsWith('fc') || address.startsWith('fd')) return true;
+
+    const ipv4 = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!ipv4) return false;
+    const octets = ipv4.slice(1).map((part) => Number(part));
+    if (octets.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
+    if (octets[0] === 10) return true;
+    if (octets[0] === 127) return true;
+    if (octets[0] === 169 && octets[1] === 254) return true;
+    if (octets[0] === 192 && octets[1] === 168) return true;
+    if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true;
+    return false;
+  }, []);
+
+  const getCaptureTargetResolution = useCallback((level: 'high' | 'medium' | 'low') => {
+    const dpr = window.devicePixelRatio || 1;
+    const baseWidth = Math.floor(window.screen.width * dpr);
+    const baseHeight = Math.floor(window.screen.height * dpr);
+    const sourceWidth = Math.min(3840, Math.max(1280, baseWidth || 1920));
+    const sourceHeight = Math.min(2160, Math.max(720, baseHeight || 1080));
+    const scale = qualityCaptureConstraints[level].scaleResolutionDownBy || 1;
+    return {
+      width: Math.max(640, Math.floor(sourceWidth / scale)),
+      height: Math.max(360, Math.floor(sourceHeight / scale)),
+    };
+  }, [qualityCaptureConstraints]);
 
   const buildDisplayMediaConstraints = useCallback((): DisplayMediaStreamOptions => {
     const dpr = window.devicePixelRatio || 1;
@@ -122,19 +211,52 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const videoTrack = stream.getVideoTracks()[0];
     if (!videoTrack || !videoTrack.applyConstraints) return;
     const preset = qualityCaptureConstraints[level];
+    const resolution = getCaptureTargetResolution(level);
     try {
-      await videoTrack.applyConstraints({
+      const constraints: MediaTrackConstraints & { resizeMode?: ConstrainDOMString } = {
+        width: { ideal: resolution.width, max: resolution.width },
+        height: { ideal: resolution.height, max: resolution.height },
         frameRate: { ideal: preset.maxFrameRate, max: preset.maxFrameRate },
-      });
+      };
+      constraints.resizeMode = 'none';
+      await videoTrack.applyConstraints(constraints);
     } catch (err) {
       console.warn('Failed to apply local track constraints:', err);
     }
-  }, [qualityCaptureConstraints]);
+  }, [qualityCaptureConstraints, getCaptureTargetResolution]);
+
+  const preferVideoCodecs = useCallback((peerConnection: RTCPeerConnection) => {
+    if (typeof RTCRtpReceiver === 'undefined' || typeof RTCRtpReceiver.getCapabilities !== 'function') return;
+    const caps = RTCRtpReceiver.getCapabilities('video');
+    if (!caps?.codecs?.length) return;
+
+    const rankCodec = (mimeType: string) => {
+      const mt = mimeType.toLowerCase();
+      if (mt.includes('av1')) return 0;
+      if (mt.includes('vp9')) return 1;
+      if (mt.includes('h264')) return 2;
+      if (mt.includes('vp8')) return 3;
+      return 4;
+    };
+
+    const sorted = [...caps.codecs].sort((a, b) => rankCodec(a.mimeType) - rankCodec(b.mimeType));
+    peerConnection.getTransceivers().forEach((transceiver) => {
+      const kind = transceiver.receiver?.track?.kind || transceiver.sender?.track?.kind;
+      if (kind !== 'video') return;
+      if (typeof transceiver.setCodecPreferences !== 'function') return;
+      try {
+        transceiver.setCodecPreferences(sorted);
+      } catch (err) {
+        console.warn('setCodecPreferences failed:', err);
+      }
+    });
+  }, []);
 
 
   const applyBitrateConstraints = useCallback(async (
     peerConnection: RTCPeerConnection,
-    level: 'high' | 'medium' | 'low'
+    level: 'high' | 'medium' | 'low',
+    options?: { maxBitrateCap?: number },
   ) => {
     const senders = peerConnection.getSenders();
     const videoSender = senders.find(s => s.track?.kind === 'video');
@@ -157,58 +279,115 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         params.encodings = [{}];
       }
 
+      const levelLimits = bitrateLimits[level];
+      const baseMaxBitrate = levelLimits.max;
+      const requestedCap = typeof options?.maxBitrateCap === 'number' && options.maxBitrateCap > 0
+        ? Math.floor(options.maxBitrateCap)
+        : baseMaxBitrate;
+      const boundedMaxBitrate = Math.max(levelLimits.min, Math.min(baseMaxBitrate, requestedCap));
 
-      if (level === 'high') {
-        // 原画模式：显式设置极高码率 (100Mbps)
-        // 提升至 100Mbps 以彻底消除 1080p60fps 下的动态画面涂抹，跑满局域网带宽
-        params.encodings[0].maxBitrate = 100000000;
-        params.encodings[0].maxFramerate = qualityCaptureConstraints.high.maxFrameRate;
-        params.encodings[0].scaleResolutionDownBy = qualityCaptureConstraints.high.scaleResolutionDownBy;
-
-        // 尝试设置编码优先级
-        if ('networkPriority' in params.encodings[0]) {
-          (params.encodings[0] as any).networkPriority = 'high';
-        }
+      if (params.encodings.length > 1) {
+        const profileRatios =
+          level === 'high'
+            ? [0.58, 0.30, 0.12]
+            : level === 'medium'
+              ? [0.50, 0.32, 0.18]
+              : [0.42, 0.33, 0.25];
+        params.encodings.forEach((encoding, idx) => {
+          const ratio = profileRatios[Math.min(idx, profileRatios.length - 1)];
+          encoding.maxBitrate = Math.max(120000, Math.floor(boundedMaxBitrate * ratio));
+          encoding.maxFramerate = Math.max(15, qualityCaptureConstraints[level].maxFrameRate - idx * 15);
+          if (typeof encoding.scaleResolutionDownBy !== 'number') {
+            encoding.scaleResolutionDownBy = idx === 0 ? 1 : idx === 1 ? 1.5 : 2.5;
+          }
+          if ('priority' in encoding) {
+            (encoding as any).priority = idx === 0 ? 'high' : level === 'low' ? 'low' : 'medium';
+          }
+        });
       } else {
-        const limits = bitrateLimits[level];
-        params.encodings[0].maxBitrate = limits.max;
+        params.encodings[0].maxBitrate = boundedMaxBitrate;
         params.encodings[0].maxFramerate = qualityCaptureConstraints[level].maxFrameRate;
         params.encodings[0].scaleResolutionDownBy = qualityCaptureConstraints[level].scaleResolutionDownBy;
+
+        if ('networkPriority' in params.encodings[0]) {
+          (params.encodings[0] as any).networkPriority = level === 'high' ? 'high' : level === 'medium' ? 'medium' : 'low';
+        }
+        if ('priority' in params.encodings[0]) {
+          (params.encodings[0] as any).priority = level === 'high' ? 'high' : level === 'medium' ? 'medium' : 'low';
+        }
       }
 
       // 共享场景优先可读性：在带宽波动时尽量保分辨率而不是先降清晰度
-      if ('degradationPreference' in (params as any)) {
-        (params as any).degradationPreference = level === 'low' ? 'balanced' : 'maintain-resolution';
-      }
+      (params as any).degradationPreference = level === 'low' ? 'balanced' : 'maintain-resolution';
 
       try {
         await videoSender.setParameters(params);
-        console.log(`Applied ${level} quality bitrate: ${bitrateLimits[level].max / 1000000}Mbps`);
+        console.log(`Applied ${level} quality bitrate cap: ${(boundedMaxBitrate / 1000000).toFixed(2)}Mbps`);
       } catch (err) {
         console.error('Failed to set bitrate parameters:', err);
       }
     }
   }, [bitrateLimits, qualityCaptureConstraints]);
 
+  const configureAdaptiveVideoLayers = useCallback(async (call: MediaConnection) => {
+    const pc = call.peerConnection;
+    if (!pc) return;
+    const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+    if (!sender) return;
+
+    const supportsSimulcast = typeof (sender as any).setParameters === 'function';
+    let mode: 'single' | 'svc' | 'simulcast' = 'single';
+
+    if (supportsSimulcast) {
+      const params = sender.getParameters();
+      try {
+        const canTrySimulcast =
+          (!params.encodings || params.encodings.length <= 1) &&
+          !((params.encodings?.[0] as any)?.rid);
+
+        if (canTrySimulcast) {
+          const simulcastParams: RTCRtpSendParameters = {
+            ...params,
+            encodings: [
+              { rid: 'h', maxBitrate: 14_000_000, scaleResolutionDownBy: 1, maxFramerate: 60, active: true },
+              { rid: 'm', maxBitrate: 6_000_000, scaleResolutionDownBy: 1.5, maxFramerate: 45, active: true },
+              { rid: 'l', maxBitrate: 2_000_000, scaleResolutionDownBy: 2.5, maxFramerate: 24, active: true },
+            ],
+          };
+          (simulcastParams as any).degradationPreference = 'maintain-resolution';
+          await sender.setParameters(simulcastParams);
+          mode = 'simulcast';
+        }
+      } catch (err) {
+        // Simulcast may be unsupported on some browser/peerconnection states; fall through to SVC.
+      }
+    }
+
+    if (mode === 'single') {
+      const svcParams = sender.getParameters();
+      if (!svcParams.encodings || svcParams.encodings.length === 0) {
+        svcParams.encodings = [{}];
+      }
+      const first = svcParams.encodings[0] as any;
+      if ('scalabilityMode' in first) {
+        first.scalabilityMode = 'L3T3';
+        mode = 'svc';
+      }
+      (svcParams as any).degradationPreference = 'maintain-resolution';
+      try {
+        await sender.setParameters(svcParams);
+      } catch {
+        mode = 'single';
+      }
+    }
+
+    peerLayerModeRef.current.set(call.peer, mode);
+  }, []);
+
 
   useEffect(() => {
     qualityLevelRef.current = qualityLevel;
-
-    // 当画质改变时，广播给所有连接的观看者
-    activeDataConnectionsRef.current.forEach(conn => {
-      if (conn.open) {
-        conn.send({ type: 'quality', value: qualityLevel });
-      }
-    });
-
-    // 画质档位切换后，立即对本地采集轨道和所有已连接观看者应用新参数，减少“切档后还模糊几秒”的体感
-    applyLocalTrackConstraints(streamRef.current, qualityLevel);
-    activeCallsRef.current.forEach((call) => {
-      if (call.peerConnection) {
-        applyBitrateConstraints(call.peerConnection, qualityLevel);
-      }
-    });
-  }, [qualityLevel, applyBitrateConstraints, applyLocalTrackConstraints]);
+  }, [qualityLevel]);
 
 
   // 监听连接状态，一旦结束连接过程（无论是成功还是失败），就清除超时定时器
@@ -240,19 +419,95 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         let currentBytesSent = 0;
         let packetsLost = 0;
         let packetsSent = 0;
+        let availableOutgoingBitrate = 0;
+        let routeClass: NetworkRouteClass = peerRouteClassRef.current.get(call.peer) || 'unknown';
+        const outboundCandidates: any[] = [];
+        const remoteInboundCandidates: any[] = [];
 
-        stats.forEach((report) => {
-          if (report.type === 'outbound-rtp' && report.kind === 'video') {
-            currentBytesSent = report.bytesSent || 0;
-            packetsSent = report.packetsSent || 0;
+        stats.forEach((report: any) => {
+          const mediaKind = report.kind || report.mediaType;
+          if (report.type === 'outbound-rtp' && mediaKind === 'video' && !report.isRemote) {
+            outboundCandidates.push(report);
           }
-          if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
-            packetsLost = report.packetsLost || 0;
+          if (report.type === 'remote-inbound-rtp' && mediaKind === 'video') {
+            remoteInboundCandidates.push(report);
           }
         });
 
+        let selectedPair: any = null;
+        stats.forEach((report: any) => {
+          if (selectedPair) return;
+          if (report.type === 'transport' && report.selectedCandidatePairId && stats.has(report.selectedCandidatePairId)) {
+            selectedPair = stats.get(report.selectedCandidatePairId);
+          }
+        });
+        if (!selectedPair) {
+          stats.forEach((report: any) => {
+            if (selectedPair) return;
+            if (
+              report.type === 'candidate-pair' &&
+              (report.selected === true || (report.nominated === true && report.state === 'succeeded'))
+            ) {
+              selectedPair = report;
+            }
+          });
+        }
+
+        if (selectedPair && typeof selectedPair.availableOutgoingBitrate === 'number') {
+          availableOutgoingBitrate = selectedPair.availableOutgoingBitrate;
+        }
+        if (selectedPair) {
+          const localCandidate = selectedPair.localCandidateId && stats.has(selectedPair.localCandidateId)
+            ? stats.get(selectedPair.localCandidateId) as any
+            : null;
+          const remoteCandidate = selectedPair.remoteCandidateId && stats.has(selectedPair.remoteCandidateId)
+            ? stats.get(selectedPair.remoteCandidateId) as any
+            : null;
+
+          const localType = (localCandidate?.candidateType || '').toLowerCase();
+          const remoteType = (remoteCandidate?.candidateType || '').toLowerCase();
+          const localAddress = localCandidate?.address || localCandidate?.ip || localCandidate?.ipAddress || '';
+          const remoteAddress = remoteCandidate?.address || remoteCandidate?.ip || remoteCandidate?.ipAddress || '';
+
+          if (localType === 'relay' || remoteType === 'relay') {
+            routeClass = 'relay';
+          } else if (isPrivateOrMdnsAddress(localAddress) && isPrivateOrMdnsAddress(remoteAddress)) {
+            routeClass = 'lan';
+          } else if (localType || remoteType || localAddress || remoteAddress) {
+            routeClass = 'wan';
+          }
+          peerRouteClassRef.current.set(call.peer, routeClass);
+        }
+
+        if (outboundCandidates.length > 0) {
+          const selectedOutbound = outboundCandidates.reduce((best, item) => {
+            const bestBytes = typeof best?.bytesSent === 'number' ? best.bytesSent : -1;
+            const itemBytes = typeof item?.bytesSent === 'number' ? item.bytesSent : -1;
+            return itemBytes > bestBytes ? item : best;
+          }, outboundCandidates[0] as any);
+
+          currentBytesSent = selectedOutbound?.bytesSent || 0;
+          packetsSent = selectedOutbound?.packetsSent || 0;
+
+          const linkedRemoteId = selectedOutbound?.remoteId;
+          if (linkedRemoteId && stats.has(linkedRemoteId)) {
+            const linkedRemote = stats.get(linkedRemoteId) as any;
+            if (linkedRemote && linkedRemote.type === 'remote-inbound-rtp') {
+              packetsLost = linkedRemote.packetsLost || 0;
+            }
+          }
+        }
+
+        if (packetsLost === 0 && remoteInboundCandidates.length > 0) {
+          packetsLost = remoteInboundCandidates.reduce((maxLost, item) => {
+            const lost = typeof item?.packetsLost === 'number' ? item.packetsLost : 0;
+            return Math.max(maxLost, lost);
+          }, 0);
+        }
+
         const now = Date.now();
         const timeDiff = (now - lastTimestamp) / 1000;
+        if (timeDiff <= 0) return;
         const bytesDiff = currentBytesSent - lastBytesSent;
         const currentBitrate = (bytesDiff * 8) / timeDiff;
         const sentDiff = Math.max(0, packetsSent - lastPacketsSent);
@@ -265,8 +520,38 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         lastTimestamp = now;
 
 
-        const currentQuality = qualityLevelRef.current;
+        const currentQuality = peerQualityLevelRef.current.get(call.peer) || 'high';
         const limits = bitrateLimits[currentQuality];
+        const routeCaps = routeBitrateCaps[routeClass];
+        let targetDynamicCap = routeCaps[currentQuality];
+        if (availableOutgoingBitrate > 0) {
+          const headroomFactor = routeClass === 'relay' ? 0.72 : routeClass === 'wan' ? 0.82 : 0.88;
+          const congestionSafeCap = Math.floor(availableOutgoingBitrate * headroomFactor);
+          if (congestionSafeCap > 0) {
+            targetDynamicCap = Math.min(targetDynamicCap, congestionSafeCap);
+          }
+        }
+        targetDynamicCap = Math.max(bitrateLimits.low.min, targetDynamicCap);
+
+        const previousCap = peerDynamicCapRef.current.get(call.peer);
+        let smoothedCap = targetDynamicCap;
+        if (typeof previousCap === 'number' && previousCap > 0) {
+          if (targetDynamicCap < previousCap) {
+            smoothedCap = Math.max(targetDynamicCap, Math.floor(previousCap * 0.75));
+          } else if (targetDynamicCap > previousCap) {
+            smoothedCap = Math.min(targetDynamicCap, Math.floor(previousCap * 1.15));
+          }
+          const closeEnough = Math.abs(smoothedCap - targetDynamicCap) / Math.max(targetDynamicCap, 1) < 0.05;
+          if (closeEnough) smoothedCap = targetDynamicCap;
+        }
+
+        const capDelta = previousCap
+          ? Math.abs(smoothedCap - previousCap) / Math.max(previousCap, 1)
+          : 1;
+        peerDynamicCapRef.current.set(call.peer, smoothedCap);
+        if (capDelta >= 0.08) {
+          await applyBitrateConstraints(pc, currentQuality, { maxBitrateCap: smoothedCap });
+        }
 
         // 连接初期带宽估计和丢包统计波动很大，先预热避免误降档导致“刚连上先糊”
         if (now - monitorStartedAt < BANDWIDTH_WARMUP_MS) {
@@ -294,14 +579,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           // medium -> low 需要连续 16 秒严重卡顿。
           const lowThreshold = currentQuality === 'high' ? 6 : 8;
           if (consecutiveLowBandwidth >= lowThreshold) {
+            const activeCap = peerDynamicCapRef.current.get(call.peer);
             if (currentQuality === 'high') {
-              setQualityLevel('medium');
-              await applyBitrateConstraints(pc, 'medium');
-              onNotification('检测到持续严重卡顿，已降至高清模式', 'info');
+              setPeerQualityLevel(call.peer, 'medium');
+              await applyBitrateConstraints(pc, 'medium', activeCap ? { maxBitrateCap: activeCap } : undefined);
+              onNotification(`观看者 ${call.peer.slice(-4)} 网络波动，已降至高清模式`, 'info');
             } else if (currentQuality === 'medium') {
-              setQualityLevel('low');
-              await applyBitrateConstraints(pc, 'low');
-              onNotification('网络极不稳定，已切换到流畅模式', 'info');
+              setPeerQualityLevel(call.peer, 'low');
+              await applyBitrateConstraints(pc, 'low', activeCap ? { maxBitrateCap: activeCap } : undefined);
+              onNotification(`观看者 ${call.peer.slice(-4)} 网络极不稳定，已切换到流畅模式`, 'info');
             }
             consecutiveLowBandwidth = 0;
           }
@@ -310,14 +596,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           consecutiveLowBandwidth = 0;
 
           if (consecutiveHighBandwidth >= 5) {
+            const activeCap = peerDynamicCapRef.current.get(call.peer);
             if (currentQuality === 'low') {
-              setQualityLevel('medium');
-              await applyBitrateConstraints(pc, 'medium');
-              onNotification('网络好转，已恢复高清画质', 'info');
+              setPeerQualityLevel(call.peer, 'medium');
+              await applyBitrateConstraints(pc, 'medium', activeCap ? { maxBitrateCap: activeCap } : undefined);
+              onNotification(`观看者 ${call.peer.slice(-4)} 网络好转，已恢复高清画质`, 'info');
             } else if (currentQuality === 'medium') {
-              setQualityLevel('high');
-              await applyBitrateConstraints(pc, 'high');
-              onNotification('网络良好，已切换回原画模式', 'info');
+              setPeerQualityLevel(call.peer, 'high');
+              await applyBitrateConstraints(pc, 'high', activeCap ? { maxBitrateCap: activeCap } : undefined);
+              onNotification(`观看者 ${call.peer.slice(-4)} 网络良好，已切换回原画模式`, 'info');
             }
             consecutiveHighBandwidth = 0;
           }
@@ -331,9 +618,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     };
 
 
+    void monitor();
     const timer = setInterval(monitor, 2000);
     bandwidthMonitorsRef.current.set(call.peer, timer);
-  }, [bitrateLimits, applyBitrateConstraints, onNotification]);
+  }, [bitrateLimits, routeBitrateCaps, applyBitrateConstraints, isPrivateOrMdnsAddress, onNotification, setPeerQualityLevel]);
 
 
   const stopBandwidthMonitoring = useCallback((peerId?: string) => {
@@ -343,11 +631,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         clearInterval(timer);
         bandwidthMonitorsRef.current.delete(peerId);
       }
+      peerRouteClassRef.current.delete(peerId);
+      peerDynamicCapRef.current.delete(peerId);
       return;
     }
 
     bandwidthMonitorsRef.current.forEach((timer) => clearInterval(timer));
     bandwidthMonitorsRef.current.clear();
+    peerRouteClassRef.current.clear();
+    peerDynamicCapRef.current.clear();
   }, []);
 
   const getUniqueViewerCount = useCallback(() => {
@@ -372,6 +664,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const removeActiveCall = useCallback((call: MediaConnection) => {
     const beforeLength = activeCallsRef.current.length;
     activeCallsRef.current = activeCallsRef.current.filter(c => c !== call);
+    peerQualityLevelRef.current.delete(call.peer);
+    peerLayerModeRef.current.delete(call.peer);
+    peerRouteClassRef.current.delete(call.peer);
+    peerDynamicCapRef.current.delete(call.peer);
+    syncAggregateQualityLevel();
 
     if (beforeLength !== activeCallsRef.current.length) {
       syncViewerCount();
@@ -381,7 +678,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     if (activeCallsRef.current.length === 0) {
       stopBandwidthMonitoring();
     }
-  }, [syncViewerCount, stopBandwidthMonitoring]);
+  }, [syncViewerCount, stopBandwidthMonitoring, syncAggregateQualityLevel]);
 
 
   const generatePeerId = useCallback(() => {
@@ -417,6 +714,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('open', (openedId) => {
       console.log('Peer ID:', openedId);
+      if (sharerReconnectTimerRef.current) {
+        clearTimeout(sharerReconnectTimerRef.current);
+        sharerReconnectTimerRef.current = null;
+      }
+      sharerReconnectAttemptsRef.current = 0;
       setPeerId(openedId);
       setIsPeerReady(true);
       onNotification(`连接 ID: ${openedId}`, 'info');
@@ -431,8 +733,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       viewerHeartbeatsRef.current[conn.peer] = Date.now();
 
       conn.on('open', () => {
-        // 连接建立后立即发送当前画质
-        conn.send({ type: 'quality', value: qualityLevelRef.current });
+        const level = peerQualityLevelRef.current.get(conn.peer) || 'high';
+        peerQualityLevelRef.current.set(conn.peer, level);
+        syncAggregateQualityLevel();
+        sendQualityToViewer(conn.peer, level);
       });
 
       conn.on('data', (data: any) => {
@@ -457,6 +761,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peer.on('call', (call) => {
 
       if (streamRef.current) {
+        if (call.peerConnection) {
+          preferVideoCodecs(call.peerConnection);
+        }
+        setPeerQualityLevel(call.peer, 'high');
         call.answer(streamRef.current);
         const hasNewViewer = addActiveCall(call);
         if (hasNewViewer) {
@@ -465,12 +773,23 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
         if (call.peerConnection) {
-          const currentQuality = qualityLevelRef.current;
-          applyBitrateConstraints(call.peerConnection, currentQuality);
+          const currentQuality = peerQualityLevelRef.current.get(call.peer) || 'high';
+          configureAdaptiveVideoLayers(call);
+          const activeCap = peerDynamicCapRef.current.get(call.peer);
+          applyBitrateConstraints(
+            call.peerConnection,
+            currentQuality,
+            activeCap ? { maxBitrateCap: activeCap } : undefined,
+          );
           // 某些浏览器在初始协商后才完全挂载 sender 参数，短延迟重复应用可减少前几秒模糊
           setTimeout(() => {
             if (call.peerConnection && call.open) {
-              applyBitrateConstraints(call.peerConnection, qualityLevelRef.current);
+              const delayedCap = peerDynamicCapRef.current.get(call.peer);
+              applyBitrateConstraints(
+                call.peerConnection,
+                peerQualityLevelRef.current.get(call.peer) || 'high',
+                delayedCap ? { maxBitrateCap: delayedCap } : undefined,
+              );
             }
           }, 1200);
           startBandwidthMonitoring(call);
@@ -496,11 +815,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peer.on('disconnected', () => {
       console.log('Peer disconnected');
       setIsPeerReady(false);
+      if (!peer.destroyed) {
+        try {
+          peer.reconnect();
+        } catch {
+          // Fallback reconnect will be handled by the recovery effect.
+        }
+      }
     });
 
     peerRef.current = peer;
     return peer;
-  }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, addActiveCall, removeActiveCall]);
+  }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, addActiveCall, removeActiveCall, preferVideoCodecs, sendQualityToViewer, syncAggregateQualityLevel, setPeerQualityLevel, configureAdaptiveVideoLayers]);
 
 
   // 分享者端：定期检查观看者心跳，移除断开的连接
@@ -538,6 +864,61 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     return () => clearInterval(checkInterval);
   }, [isSharing, syncViewerCount]);
+
+  useEffect(() => {
+    if (!isSharing) {
+      if (sharerReconnectTimerRef.current) {
+        clearTimeout(sharerReconnectTimerRef.current);
+        sharerReconnectTimerRef.current = null;
+      }
+      sharerReconnectAttemptsRef.current = 0;
+      return;
+    }
+
+    if (isPeerReady) {
+      if (sharerReconnectTimerRef.current) {
+        clearTimeout(sharerReconnectTimerRef.current);
+        sharerReconnectTimerRef.current = null;
+      }
+      sharerReconnectAttemptsRef.current = 0;
+      return;
+    }
+
+    // Recover only after we had a valid sharer peer id once.
+    if (!peerId) return;
+    if (sharerReconnectTimerRef.current) return;
+
+    const attempt = sharerReconnectAttemptsRef.current + 1;
+    sharerReconnectAttemptsRef.current = attempt;
+
+    const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+    sharerReconnectTimerRef.current = setTimeout(async () => {
+      sharerReconnectTimerRef.current = null;
+      const currentPeer = peerRef.current;
+      if (!currentPeer || currentPeer.destroyed || !isSharing) return;
+
+      try {
+        if (currentPeer.disconnected) {
+          currentPeer.reconnect();
+        }
+      } catch {
+        // Ignore and continue to fallback rebuild path below.
+      }
+
+      // Final fallback: rebuild peer when repeated reconnect attempts fail.
+      if (attempt >= MAX_SHARER_SIGNAL_RECONNECT_ATTEMPTS) {
+        try {
+          if (!currentPeer.destroyed) currentPeer.destroy();
+        } catch {
+          // Ignore destroy errors.
+        }
+        if (isSharing) {
+          onNotification('信令连接恢复失败，正在重建共享连接 ID...', 'info');
+          await initializePeer();
+        }
+      }
+    }, delay);
+  }, [isSharing, isPeerReady, peerId, onNotification, initializePeer]);
 
 
 
@@ -1047,6 +1428,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       activeCallsRef.current.forEach(call => call.close());
       activeCallsRef.current = [];
       setViewerCount(0);
+      peerQualityLevelRef.current.clear();
+      peerLayerModeRef.current.clear();
+      peerRouteClassRef.current.clear();
+      peerDynamicCapRef.current.clear();
+      setQualityLevel('high');
+      qualityLevelRef.current = 'high';
 
       if (peerRef.current) {
         peerRef.current.destroy();
@@ -1054,6 +1441,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       if (mediaConnectionRef.current) {
         mediaConnectionRef.current.close();
+      }
+      if (sharerReconnectTimerRef.current) {
+        clearTimeout(sharerReconnectTimerRef.current);
+        sharerReconnectTimerRef.current = null;
       }
     };
   }, []);
@@ -1193,6 +1584,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const stopScreenShare = () => {
     broadcastShareEnded('stopped');
+    if (sharerReconnectTimerRef.current) {
+      clearTimeout(sharerReconnectTimerRef.current);
+      sharerReconnectTimerRef.current = null;
+    }
+    sharerReconnectAttemptsRef.current = 0;
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -1208,6 +1604,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     activeCallsRef.current.forEach(call => call.close());
     activeCallsRef.current = [];
     setViewerCount(0);
+    peerQualityLevelRef.current.clear();
+    peerLayerModeRef.current.clear();
+    peerRouteClassRef.current.clear();
+    peerDynamicCapRef.current.clear();
+    setQualityLevel('high');
+    qualityLevelRef.current = 'high';
     stopBandwidthMonitoring();
 
 
