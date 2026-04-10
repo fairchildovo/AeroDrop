@@ -325,9 +325,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const generatePeerId = useCallback(() => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const randomValues = new Uint32Array(6);
+    crypto.getRandomValues(randomValues);
     let id = '';
     for (let i = 0; i < 6; i++) {
-      id += chars.charAt(Math.floor(Math.random() * chars.length));
+      id += chars.charAt(randomValues[i] % chars.length);
     }
     return `AERO-${id}`;
   }, []);
