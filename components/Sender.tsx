@@ -16,7 +16,7 @@ import {
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
-import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Users, Monitor } from 'lucide-react';
+import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Monitor } from 'lucide-react';
 
 interface SenderProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
@@ -36,6 +36,20 @@ type ConnectionRoute = {
   isLan: boolean;
   isRelay: boolean;
   protocol: string;
+};
+
+type ConnectionMetrics = {
+  rttMs: number | null;
+  lossPct: number | null;
+  availableOutgoingBitrate: number | null;
+};
+
+type AdaptiveFlowProfile = {
+  chunkSize: number;
+  highWaterMark: number;
+  lowWaterMark: number;
+  lastUpdatedAt: number;
+  metrics: ConnectionMetrics;
 };
 
 export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
@@ -247,8 +261,106 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const peerIsLAN = useRef<Map<string, boolean>>(new Map());
+  const peerAdaptiveFlowRef = useRef<Map<string, AdaptiveFlowProfile>>(new Map());
 
-  const updateConnectionStats = async (conn: DataConnection): Promise<ConnectionRoute> => {
+  const toStep = (value: number, step = 16 * 1024) => {
+    return Math.max(step, Math.round(value / step) * step);
+  };
+
+  const getBaseFlowByRoute = (route: ConnectionRoute) => {
+    if (route.isLan) {
+      return {
+        chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_LAN,
+        highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_LAN,
+        lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_LAN,
+      };
+    }
+    if (route.isRelay) {
+      return {
+        chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_RELAY,
+        highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_RELAY,
+        lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_RELAY,
+      };
+    }
+    return {
+      chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_WAN,
+      highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_WAN,
+      lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_WAN,
+    };
+  };
+
+  const deriveAdaptiveFlow = (route: ConnectionRoute, metrics: ConnectionMetrics) => {
+    const base = getBaseFlowByRoute(route);
+    let chunkSize = base.chunkSize;
+    let highWaterMark = base.highWaterMark;
+    let lowWaterMark = base.lowWaterMark;
+
+    const rtt = metrics.rttMs ?? 0;
+    const loss = metrics.lossPct ?? 0;
+    const bitrate = metrics.availableOutgoingBitrate ?? 0;
+
+    if (route.isLan) {
+      if (loss > 1 || rtt > 80) {
+        chunkSize = Math.max(128 * 1024, Math.floor(base.chunkSize / 2));
+        highWaterMark = Math.max(8 * 1024 * 1024, Math.floor(base.highWaterMark * 0.75));
+        lowWaterMark = Math.max(2 * 1024 * 1024, Math.floor(base.lowWaterMark * 0.75));
+      } else if (loss < 0.2 && rtt > 0 && rtt < 25) {
+        highWaterMark = Math.min(24 * 1024 * 1024, Math.floor(base.highWaterMark * 1.25));
+        lowWaterMark = Math.min(6 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.25));
+      }
+    } else if (route.isRelay) {
+      if (loss > 4 || rtt > 350 || (bitrate > 0 && bitrate < 8_000_000)) {
+        chunkSize = Math.max(32 * 1024, Math.floor(base.chunkSize / 2));
+        highWaterMark = Math.max(1 * 1024 * 1024, Math.floor(base.highWaterMark * 0.6));
+        lowWaterMark = Math.max(256 * 1024, Math.floor(base.lowWaterMark * 0.6));
+      } else if (loss < 1 && rtt > 0 && rtt < 120 && bitrate > 20_000_000) {
+        chunkSize = Math.min(128 * 1024, Math.floor(base.chunkSize * 1.5));
+        highWaterMark = Math.min(4 * 1024 * 1024, Math.floor(base.highWaterMark * 1.5));
+        lowWaterMark = Math.min(1 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.5));
+      }
+    } else {
+      if (loss > 3 || rtt > 260 || (bitrate > 0 && bitrate < 12_000_000)) {
+        chunkSize = Math.max(128 * 1024, Math.floor(base.chunkSize / 2));
+        highWaterMark = Math.max(4 * 1024 * 1024, Math.floor(base.highWaterMark * 0.6));
+        lowWaterMark = Math.max(1 * 1024 * 1024, Math.floor(base.lowWaterMark * 0.6));
+      } else if (loss < 0.5 && rtt > 0 && rtt < 90) {
+        highWaterMark = Math.min(16 * 1024 * 1024, Math.floor(base.highWaterMark * 1.5));
+        lowWaterMark = Math.min(4 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.5));
+      }
+    }
+
+    const finalHigh = toStep(highWaterMark);
+    const finalLow = toStep(Math.min(lowWaterMark, Math.floor(finalHigh * 0.5)));
+    const finalChunk = toStep(chunkSize, 4 * 1024);
+    return {
+      chunkSize: finalChunk,
+      highWaterMark: finalHigh,
+      lowWaterMark: finalLow,
+    };
+  };
+
+  const updateAdaptiveFlow = (peerId: string, route: ConnectionRoute, metrics: ConnectionMetrics) => {
+    const next = deriveAdaptiveFlow(route, metrics);
+    const prev = peerAdaptiveFlowRef.current.get(peerId);
+    if (
+      prev &&
+      prev.chunkSize === next.chunkSize &&
+      prev.highWaterMark === next.highWaterMark &&
+      prev.lowWaterMark === next.lowWaterMark &&
+      prev.metrics.rttMs === metrics.rttMs &&
+      prev.metrics.lossPct === metrics.lossPct
+    ) {
+      return;
+    }
+    peerAdaptiveFlowRef.current.set(peerId, {
+      ...next,
+      lastUpdatedAt: Date.now(),
+      metrics,
+    });
+  };
+
+  const updateConnectionStats = async (conn: DataConnection, options?: { updateUi?: boolean }): Promise<ConnectionRoute> => {
+      const shouldUpdateUi = options?.updateUi ?? true;
       if (!conn.peerConnection || conn.peerConnection.connectionState === 'closed') {
         return { isLan: false, isRelay: false, protocol: 'udp' };
       }
@@ -279,23 +391,42 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               const protocol = localCandidate?.protocol || 'udp';
               const localCandidateType = localCandidate?.candidateType || '';
               const remoteCandidateType = remoteCandidate?.candidateType || '';
+              const rttMs = typeof selectedPair.currentRoundTripTime === 'number'
+                ? Math.round(selectedPair.currentRoundTripTime * 1000)
+                : null;
+              const availableOutgoingBitrate = typeof selectedPair.availableOutgoingBitrate === 'number'
+                ? selectedPair.availableOutgoingBitrate
+                : null;
+              const packetsSent = typeof selectedPair.packetsSent === 'number' ? selectedPair.packetsSent : null;
+              const packetsLost = typeof selectedPair.packetsLost === 'number'
+                ? selectedPair.packetsLost
+                : typeof selectedPair.packetsDiscardedOnSend === 'number'
+                  ? selectedPair.packetsDiscardedOnSend
+                  : null;
+              const lossPct = packetsSent && packetsSent > 0 && packetsLost !== null
+                ? Math.max(0, Math.min(100, (packetsLost / packetsSent) * 100))
+                : null;
 
               const localIP = localCandidate?.address || localCandidate?.ip || '';
               const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
               const isRelayConnection = localCandidateType === 'relay' || remoteCandidateType === 'relay';
               const isLanConnection = !isRelayConnection && isPrivateIP(localIP) && isPrivateIP(remoteIP);
               route = { isLan: isLanConnection, isRelay: isRelayConnection, protocol };
+              updateAdaptiveFlow(conn.peer, route, { rttMs, lossPct, availableOutgoingBitrate });
 
               peerIsLAN.current.set(conn.peer, isLanConnection);
 
-              if (activeConnections.current.size === 1) {
+              if (shouldUpdateUi && activeConnections.current.size === 1) {
                   const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
                   peerConnectionTypeRef.current.set(conn.peer, networkType);
                   setConnectionStatus(`已连接 | ${protocol.toUpperCase()} | ${networkType}`);
-              } else {
+              } else if (shouldUpdateUi) {
                   const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
                   peerConnectionTypeRef.current.set(conn.peer, networkType);
                   setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
+              } else {
+                  const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
+                  peerConnectionTypeRef.current.set(conn.peer, networkType);
               }
           }
       } catch (e) {
@@ -601,6 +732,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       ghostCandidateSinceRef.current.delete(conn.peer);
       peerConnectionTypeRef.current.delete(conn.peer);
       peerHeartbeatAtRef.current.delete(conn.peer);
+      peerAdaptiveFlowRef.current.delete(conn.peer);
       removePeerName(conn.peer);
 
       const removedSessionId = peerSessionIdsRef.current.get(conn.peer);
@@ -815,30 +947,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
 
-    // Default to WAN parameters so transfer starts immediately; adjust async.
-    let CHUNK_SIZE = TRANSFER_CONFIG.CHUNK_SIZE_WAN;
+    // Start with WAN profile, then auto-adapt by live RTT/loss/bitrate stats.
+    const defaultFlow: AdaptiveFlowProfile = {
+      chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_WAN,
+      highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_WAN,
+      lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_WAN,
+      lastUpdatedAt: Date.now(),
+      metrics: { rttMs: null, lossPct: null, availableOutgoingBitrate: null },
+    };
+    peerAdaptiveFlowRef.current.set(conn.peer, defaultFlow);
     const READ_BUFFER_SIZE = TRANSFER_CONFIG.READ_BUFFER_SIZE;
-    let HIGH_WATER_MARK = FLOW_CONTROL.HIGH_WATER_MARK_WAN;
-    let LOW_WATER_MARK = FLOW_CONTROL.LOW_WATER_MARK_WAN;
-
-    // Fire-and-forget: detect route and upgrade parameters in the background.
-    updateConnectionStats(conn).then((route) => {
-      CHUNK_SIZE = route.isLan
-        ? TRANSFER_CONFIG.CHUNK_SIZE_LAN
-        : route.isRelay
-          ? TRANSFER_CONFIG.CHUNK_SIZE_RELAY
-          : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
-      HIGH_WATER_MARK = route.isLan
-        ? FLOW_CONTROL.HIGH_WATER_MARK_LAN
-        : route.isRelay
-          ? FLOW_CONTROL.HIGH_WATER_MARK_RELAY
-          : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
-      LOW_WATER_MARK = route.isLan
-        ? FLOW_CONTROL.LOW_WATER_MARK_LAN
-        : route.isRelay
-          ? FLOW_CONTROL.LOW_WATER_MARK_RELAY
-          : FLOW_CONTROL.LOW_WATER_MARK_WAN;
-    }).catch(() => {});
+    updateConnectionStats(conn, { updateUi: false }).catch(() => {});
 
     let totalBytesSent = 0;
     let transferSucceeded = false;
@@ -860,6 +979,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const totalSize = metadata?.totalSize || 0;
 
     const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
+    const adaptiveTimer = window.setInterval(() => {
+      if (transferSessionId.current !== currentSessionId || !conn.open) {
+        window.clearInterval(adaptiveTimer);
+        return;
+      }
+      updateConnectionStats(conn, { updateUi: false }).catch(() => {});
+    }, 2000);
 
     try {
         let fileStartByteOffset = startByteOffset;
@@ -899,6 +1025,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                 let bufferOffset = 0;
                 while (bufferOffset < readSize) {
                     if (!conn.open) throw new Error("Connection closed");
+                    const flow = peerAdaptiveFlowRef.current.get(peerId) || defaultFlow;
+                    const HIGH_WATER_MARK = flow.highWaterMark;
+                    const LOW_WATER_MARK = flow.lowWaterMark;
+                    const CHUNK_SIZE = flow.chunkSize;
 
                     if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
                         dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
@@ -960,17 +1090,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     }
 
                     const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
-                    const chunk = largeBuffer.slice(bufferOffset, chunkEnd);
+                    // Use typed-array views to avoid per-chunk memory copy from ArrayBuffer.slice.
+                    const chunkView = new Uint8Array(largeBuffer, bufferOffset, chunkEnd - bufferOffset);
 
                     try {
-                        conn.send(chunk);
+                        conn.send(chunkView);
                     } catch (e) {
                          if (!conn.open) throw new Error("Connection closed during send");
-                         await new Promise(r => setTimeout(r, 50));
-                         try { conn.send(chunk); } catch(err) { throw err; }
+                         await new Promise(r => setTimeout(r, 20));
+                         conn.send(chunkView);
                     }
 
-                    const currentChunkSize = chunk.byteLength;
+                    const currentChunkSize = chunkView.byteLength;
                     totalBytesSent += currentChunkSize;
                     bytesInLastPeriod += currentChunkSize;
                     bufferOffset += currentChunkSize;
@@ -1028,6 +1159,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             }
         }
     } finally {
+        window.clearInterval(adaptiveTimer);
         activeSendingPeersRef.current.delete(peerId);
         if (transferSessionId.current === currentSessionId) {
             activeTransfersCount.current -= 1;
@@ -1060,6 +1192,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     ghostCandidateSinceRef.current.clear();
     peerConnectionTypeRef.current.clear();
     peerHeartbeatAtRef.current.clear();
+    peerAdaptiveFlowRef.current.clear();
 
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
@@ -1119,6 +1252,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const remainingBytes = Math.max(0, totalBytes - transferredBytes);
   const etaSpeedBytes = currentSpeedBytes > 0 ? currentSpeedBytes : avgSpeedBytes;
   const overallEta = etaSpeedBytes > 0 ? formatEta(remainingBytes / etaSpeedBytes) : '--';
+  const adaptiveDebugRows = individualStats.map((stat) => {
+    const flow = peerAdaptiveFlowRef.current.get(stat.peerId);
+    return {
+      peerId: stat.peerId,
+      deviceName: stat.deviceName,
+      connectionType: stat.connectionType,
+      rttText: flow?.metrics.rttMs != null ? `${flow.metrics.rttMs} ms` : '--',
+      lossText: flow?.metrics.lossPct != null ? `${flow.metrics.lossPct.toFixed(2)}%` : '--',
+      chunkText: flow ? formatFileSize(flow.chunkSize) : '--',
+      windowText: flow ? `${formatFileSize(flow.highWaterMark)} / ${formatFileSize(flow.lowWaterMark)}` : '--',
+    };
+  });
 
   const handleCopyLink = async () => {
       try {
@@ -1284,6 +1429,33 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               </div>
            )}
 
+           {adaptiveDebugRows.length > 0 && (
+              <div className="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700 overflow-hidden mt-2 animate-slide-up text-left">
+                <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-500 dark:text-slate-400 flex justify-between items-center">
+                    <span>调试面板（自适应）</span>
+                    <span className="font-mono">{adaptiveDebugRows.length} 连接</span>
+                </div>
+                <div className="divide-y divide-slate-100 dark:divide-slate-700 max-h-56 overflow-y-auto">
+                  {adaptiveDebugRows.map((row) => (
+                    <div key={row.peerId} className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-300">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="truncate font-medium" title={row.peerId}>{row.deviceName}</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300 shrink-0">
+                          {row.connectionType}
+                        </span>
+                      </div>
+                      <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                        <span>RTT: <span className="font-mono">{row.rttText}</span></span>
+                        <span>丢包: <span className="font-mono">{row.lossText}</span></span>
+                        <span>Chunk: <span className="font-mono">{row.chunkText}</span></span>
+                        <span>窗口(H/L): <span className="font-mono">{row.windowText}</span></span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+           )}
+
            {state === TransferState.TRANSFERRING && (
                <div className="w-full space-y-5">
                    <div className="flex flex-col items-center gap-2">
@@ -1296,15 +1468,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                            <p className="text-lg font-bold text-slate-700 dark:text-slate-200">
                                {totalProgress === 100 && activeTransfersCount.current === 0 ? '传输完成' : '正在发送...'}
                            </p>
-                           {activeConnections.current.size > 1 ? (
-                               <p className="text-sm text-slate-500 dark:text-slate-400 font-medium flex items-center gap-1 justify-center mt-1">
-                                  <Users size={14} /> 正在向 {activeConnections.current.size} 个设备传输
-                               </p>
-                           ) : (
-                               <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">
-                                   {currentFileIndex + 1}/{metadata?.files.length}: {fileList[currentFileIndex]?.name}
-                               </p>
-                           )}
+                           <p className="text-sm text-slate-500 dark:text-slate-400 font-medium mt-1 max-w-full truncate">
+                               {currentFileIndex + 1}/{metadata?.files.length}: {fileList[currentFileIndex]?.name}
+                           </p>
                        </div>
                    </div>
 

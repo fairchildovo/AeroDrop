@@ -6,6 +6,7 @@ streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { getIceConfig, prefetchIceConfig } from '../services/stunService';
+import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
   attachIceRouteToSession,
   collectIceRouteWithRetry,
@@ -113,11 +114,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const isStreamingRef = useRef<boolean>(false);
   const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
   const streamSaverWriterRef = useRef<WritableStreamDefaultWriter | null>(null);
+  const preparedNativeWriterFileIndexRef = useRef<number | null>(null);
 
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
-  const BUFFER_FLUSH_THRESHOLD = 16 * 1024 * 1024;
+  const BUFFER_FLUSH_THRESHOLD = TRANSFER_CONFIG.WRITE_BUFFER_FLUSH_THRESHOLD;
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -197,11 +199,56 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const closeStreams = async () => {
+      const closeWithTimeout = async (task: Promise<void>, timeoutMs: number, label: string) => {
+          return Promise.race<void>([
+              task,
+              new Promise<void>((_, reject) => {
+                  window.setTimeout(() => reject(new Error(`${label}_TIMEOUT`)), timeoutMs);
+              })
+          ]);
+      };
       try {
-          if (nativeWriterRef.current) { await nativeWriterRef.current.close(); nativeWriterRef.current = null; }
-          if (streamSaverWriterRef.current) { await streamSaverWriterRef.current.close(); streamSaverWriterRef.current = null; }
+          if (nativeWriterRef.current) {
+              await closeWithTimeout(nativeWriterRef.current.close(), 12000, 'NATIVE_WRITER_CLOSE');
+              nativeWriterRef.current = null;
+          }
+          if (streamSaverWriterRef.current) {
+              await closeWithTimeout(streamSaverWriterRef.current.close(), 12000, 'STREAM_SAVER_CLOSE');
+              streamSaverWriterRef.current = null;
+          }
           isStreamingRef.current = false;
       } catch (e) { console.warn("Stream close warning:", e); }
+  };
+
+  const prepareNativeWriterForSingleFile = async (targetFileIndex: number): Promise<boolean> => {
+    if (isIOS || isSafari) return false;
+    if (!window.showSaveFilePicker) return false;
+    const meta = metadataRef.current;
+    if (!meta || meta.files.length !== 1) return false;
+    const info = meta.files[targetFileIndex];
+    if (!info) return false;
+
+    const ext = (() => {
+      const dot = info.name.lastIndexOf('.');
+      return dot > -1 ? info.name.slice(dot).toLowerCase() : '';
+    })();
+
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: sanitizeFileName(info.name),
+        types: ext
+          ? [{ description: '文件', accept: { [info.type || 'application/octet-stream']: [ext] } }]
+          : undefined,
+        excludeAcceptAllOption: false,
+      });
+      const writable = await handle.createWritable();
+      nativeWriterRef.current = writable;
+      isStreamingRef.current = true;
+      preparedNativeWriterFileIndexRef.current = targetFileIndex;
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   useEffect(() => {
@@ -418,16 +465,23 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         
   
         const resumingSameFile = currentFileIndexRef.current === fileIndex && chunksRef.current.length > 0;
+        const usePreparedNativeWriter =
+          preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
 
         if (!resumingSameFile) {
-            await abortStreams();
+            if (!usePreparedNativeWriter) {
+              await abortStreams();
+            }
             chunksRef.current = [];
             writeBufferRef.current = [];
             writeBufferSizeRef.current = 0;
             receivedChunksCountRef.current = 0;
             receivedSizeRef.current = 0;
 
-            if (!nativeWriterRef.current) {
+            if (usePreparedNativeWriter) {
+                isStreamingRef.current = true;
+                preparedNativeWriterFileIndexRef.current = null;
+            } else if (!nativeWriterRef.current) {
                 if (isIOS || isSafari) {
                     isStreamingRef.current = false;
                 } else if (streamSaver) {
@@ -476,7 +530,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
              await writeQueueRef.current;
          } else {
              saveCurrentFile();
-         }
+          }
       }
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          if (!isTransferActiveRef.current) return;
@@ -557,6 +611,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setDownloadSpeed('0 KB/s');
       setDownloadSpeedBytes(0);
       setEta('--');
+      preparedNativeWriterFileIndexRef.current = null;
       writeQueueRef.current = Promise.resolve();
   };
 
@@ -776,6 +831,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (isIOS || isSafari) {
           isStreamingRef.current = false;
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
+      } else {
+          await prepareNativeWriterForSingleFile(0);
       }
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
@@ -794,6 +851,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           const byteOffset = Math.max(0, receivedSizeRef.current);
 
           isStreamingRef.current = false;
+          preparedNativeWriterFileIndexRef.current = null;
 
           if (completedFileIndicesRef.current.has(currentIdx)) {
               connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx + 1, byteOffset: 0 } });
