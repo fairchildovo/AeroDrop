@@ -938,7 +938,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       ctx.fillStyle = 'black';
       ctx.fillRect(0, 0, 1, 1);
     }
-    const videoStream = canvas.captureStream(1);
+    // Keep placeholder stream alive with a reasonable frame cadence to avoid
+    // strict clients treating an ultra-low-FPS pre-negotiation stream as stalled.
+    const videoStream = canvas.captureStream(15);
 
 
 

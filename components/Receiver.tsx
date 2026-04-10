@@ -5,7 +5,7 @@ import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize } from '../services/fileUtils';
-import { crc32FinalHex, crc32Init, crc32Update } from '../services/hashUtils';
+import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { getIceConfig, prefetchIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
@@ -117,7 +117,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receivedChunksCountRef = useRef<number>(0);
   const receivedSizeRef = useRef<number>(0);
   const currentFileSizeRef = useRef<number>(0);
-  const fileHashStateRef = useRef<number>(crc32Init());
+  const fileHasherRef = useRef<Crc32Hasher | null>(null);
   const hashedBytesRef = useRef<number>(0);
   const fileRepairAttemptsRef = useRef<Map<number, number>>(new Map());
   const pendingAutoRepairFileRef = useRef<number | null>(null);
@@ -189,8 +189,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
       deleteIndexedDbChunksForSession().catch(() => {});
       abortStreams();
+      fileHasherRef.current?.terminate();
+      fileHasherRef.current = null;
     };
   }, []);
+
+  const getFileHasher = (): Crc32Hasher => {
+    if (!fileHasherRef.current) {
+      fileHasherRef.current = createCrc32Hasher('receiver');
+    }
+    return fileHasherRef.current;
+  };
 
   const isIndexedDbSupported = () => typeof window !== 'undefined' && 'indexedDB' in window;
 
@@ -558,7 +567,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       indexedDbBufferedFileIndexRef.current = fileIndex;
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
-      fileHashStateRef.current = crc32Init();
+      try {
+        await getFileHasher().reset();
+      } catch {
+        failTransferPersistence("文件校验初始化失败，请重试传输。");
+        return false;
+      }
       hashedBytesRef.current = 0;
 
       await abortStreams();
@@ -679,11 +693,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
          })();
          const byteLength = chunkData.byteLength;
 
-         if (byteLength > 0) {
-             receivedChunksCountRef.current++;
-             receivedSizeRef.current += byteLength;
-             fileHashStateRef.current = crc32Update(fileHashStateRef.current, new Uint8Array(chunkData));
-             hashedBytesRef.current += byteLength;
+          if (byteLength > 0) {
+              receivedChunksCountRef.current++;
+              receivedSizeRef.current += byteLength;
+              try {
+                getFileHasher().update(new Uint8Array(chunkData));
+              } catch {
+                failTransferPersistence("文件校验计算失败，请重试传输。");
+                return;
+              }
+              hashedBytesRef.current += byteLength;
              
              if (isStreamingRef.current) {
                  writeBufferRef.current.push(new Uint8Array(chunkData));
@@ -841,7 +860,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (pendingAutoRepairFileRef.current === fileIndex) {
           pendingAutoRepairFileRef.current = null;
         }
-        fileHashStateRef.current = crc32Init();
+        try {
+          await getFileHasher().reset();
+        } catch {
+          failTransferPersistence('文件校验初始化失败，请重试。');
+          return;
+        }
         hashedBytesRef.current = 0;
         
         lastSpeedUpdateRef.current = Date.now();
@@ -875,11 +899,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                 if (!repaired) return;
                 return;
              }
-             const actualHash = crc32FinalHex(fileHashStateRef.current);
-             if (actualHash !== completePayload.fileHash.toLowerCase()) {
-                const repaired = await requestFileAutoRepair(currentFileIndexRef.current, `哈希不一致（${actualHash} != ${completePayload.fileHash}）`);
-                if (!repaired) return;
+              let actualHash = '';
+              try {
+                actualHash = await getFileHasher().finalizeHex();
+              } catch {
+                failTransferPersistence('文件校验计算失败，请重试。');
                 return;
+              }
+              if (actualHash !== completePayload.fileHash.toLowerCase()) {
+                 const repaired = await requestFileAutoRepair(currentFileIndexRef.current, `哈希不一致（${actualHash} != ${completePayload.fileHash}）`);
+                 if (!repaired) return;
+                 return;
              }
          }
 
@@ -1026,7 +1056,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       resetIndexedDbFileState();
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
-      fileHashStateRef.current = crc32Init();
       hashedBytesRef.current = 0;
       completedFileIndicesRef.current.clear();
       currentFileIndexRef.current = 0;
@@ -1070,6 +1099,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     downloadLink.textContent = '点击保存文件';
     downloadLink.onclick = () => {
       setTimeout(() => downloadModal.remove(), 500);
+      scheduleBlobUrlRevokeAfterFocus(url, { fallbackMs: 10 * 60 * 1000, focusDelayMs: 5000 });
     };
 
     const cancelBtn = document.createElement('button');
@@ -1086,11 +1116,46 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     contentDiv.appendChild(cancelBtn);
     downloadModal.appendChild(contentDiv);
     document.body.appendChild(downloadModal);
+  };
 
-    setTimeout(() => {
-      downloadModal.remove();
-      URL.revokeObjectURL(url);
-    }, 30000);
+  const scheduleBlobUrlRevokeAfterFocus = (url: string, opts?: { fallbackMs?: number; focusDelayMs?: number }) => {
+      const fallbackMs = opts?.fallbackMs ?? 5 * 60 * 1000;
+      const focusDelayMs = opts?.focusDelayMs ?? 4000;
+      let revoked = false;
+      let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+      let focusDelayTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanupListener = () => {
+          window.removeEventListener('focus', onFocus);
+      };
+
+      const revokeNow = () => {
+          if (revoked) return;
+          revoked = true;
+          cleanupListener();
+          if (fallbackTimer) {
+              clearTimeout(fallbackTimer);
+              fallbackTimer = null;
+          }
+          if (focusDelayTimer) {
+              clearTimeout(focusDelayTimer);
+              focusDelayTimer = null;
+          }
+          URL.revokeObjectURL(url);
+      };
+
+      const onFocus = () => {
+          if (revoked) return;
+          if (focusDelayTimer) clearTimeout(focusDelayTimer);
+          focusDelayTimer = setTimeout(() => {
+              revokeNow();
+          }, focusDelayMs);
+      };
+
+      window.addEventListener('focus', onFocus);
+      fallbackTimer = setTimeout(() => {
+          revokeNow();
+      }, fallbackMs);
   };
 
   const saveCurrentFile = async (): Promise<boolean> => {
@@ -1124,7 +1189,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               const a = document.createElement('a');
               a.href = url; a.download = finalName;
               document.body.appendChild(a); a.click(); document.body.removeChild(a);
-              setTimeout(() => URL.revokeObjectURL(url), 1000);
+              scheduleBlobUrlRevokeAfterFocus(url);
           }
 
       } catch (e) {

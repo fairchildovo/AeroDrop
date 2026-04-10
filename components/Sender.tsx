@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
-import { crc32FinalHex, crc32Init, crc32Update } from '../services/hashUtils';
+import { createCrc32Hasher } from '../services/crc32WorkerClient';
 import { getIceConfig, prefetchIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
 import {
@@ -1098,6 +1098,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const totalSize = metadata?.totalSize || 0;
 
     const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
+    const fileHasher = createCrc32Hasher(`sender-${peerId}`);
     const adaptiveTimer = window.setInterval(() => {
       if (transferSessionId.current !== currentSessionId || !conn.open) {
         window.clearInterval(adaptiveTimer);
@@ -1133,7 +1134,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             let fileOffset = i === startFileIndex ? Math.min(Math.max(0, fileStartByteOffset), file.size) : 0;
             fileStartByteOffset = 0;
             const hashStartOffset = fileOffset;
-            let fileHashState = crc32Init();
+            await fileHasher.reset();
             let hashedBytes = 0;
 
             while (fileOffset < file.size) {
@@ -1181,6 +1182,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                                 done(new Error("Data channel closed while waiting for buffer drain"));
                             };
 
+                            const BACKPRESSURE_DRAIN_TIMEOUT_MS = 30000;
                             const timeoutId = setTimeout(() => {
                                 if (dataChannel.readyState !== 'open') {
                                     done(new Error("Data channel closed while waiting for buffer drain"));
@@ -1192,9 +1194,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                                     return;
                                 }
 
-                                // 在极端网络下 bufferedamountlow 可能不会触发，超时后继续发送，避免死等。
-                                done();
-                            }, 5000);
+                                done(new Error(
+                                    `Backpressure drain timeout (${BACKPRESSURE_DRAIN_TIMEOUT_MS}ms): ` +
+                                    `buffered=${dataChannel.bufferedAmount}, high=${HIGH_WATER_MARK}, low=${LOW_WATER_MARK}`,
+                                ));
+                            }, BACKPRESSURE_DRAIN_TIMEOUT_MS);
 
                             if (dataChannel.readyState !== 'open') {
                                 done(new Error("Data channel is not open"));
@@ -1224,7 +1228,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     }
 
                     const currentChunkSize = chunkView.byteLength;
-                    fileHashState = crc32Update(fileHashState, chunkView);
+                    fileHasher.update(chunkView);
                     hashedBytes += currentChunkSize;
                     totalBytesSent += currentChunkSize;
                     bytesInLastPeriod += currentChunkSize;
@@ -1263,10 +1267,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                 fileOffset += readSize;
             }
 
+            const fileHash = await fileHasher.finalizeHex();
             const completePayload: FileCompletePayload = {
                 fileIndex: i,
                 hashAlgorithm: 'crc32',
-                fileHash: crc32FinalHex(fileHashState),
+                fileHash,
                 hashStartOffset,
                 hashedBytes,
             };
@@ -1291,6 +1296,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             }
         }
     } finally {
+        fileHasher.terminate();
         window.clearInterval(adaptiveTimer);
         // Always remove — the new sequence adds itself only after this
         // sequence has exited, so there is no ownership conflict.

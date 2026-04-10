@@ -11,7 +11,7 @@ const setSecurityHeaders = (headers: Headers) => {
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('X-Frame-Options', 'DENY');
   headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  headers.set('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
   headers.set('X-XSS-Protection', '1; mode=block');
   if (!headers.has('Strict-Transport-Security')) {
     headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -26,7 +26,10 @@ const App: React.FC = () => {
   const [initialViewId, setInitialViewId] = useState<string>('');
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
+  const [swUpdateReady, setSwUpdateReady] = useState(false);
+  const [isApplyingSwUpdate, setIsApplyingSwUpdate] = useState(false);
   const [deviceName] = useState<string>(() => getInitialDeviceName());
+  const swUpdateReloadTimerRef = useRef<number | null>(null);
 
   const isRiskBannerDismissed = () => {
     try {
@@ -48,6 +51,105 @@ const App: React.FC = () => {
     } catch {
       // Ignore persistence errors and still hide for current session.
     }
+  };
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    let cancelled = false;
+    let registrationRef: ServiceWorkerRegistration | null = null;
+    let installingWorkerRef: ServiceWorker | null = null;
+
+    const markUpdateReady = () => {
+      if (cancelled) return;
+      setSwUpdateReady(true);
+    };
+
+    const onInstallingStateChange = () => {
+      if (!installingWorkerRef) return;
+      if (installingWorkerRef.state === 'installed' && navigator.serviceWorker.controller) {
+        markUpdateReady();
+      }
+    };
+
+    const onUpdateFound = () => {
+      if (!registrationRef) return;
+      installingWorkerRef = registrationRef.installing;
+      if (!installingWorkerRef) return;
+      installingWorkerRef.addEventListener('statechange', onInstallingStateChange);
+    };
+
+    navigator.serviceWorker.getRegistration()
+      .then((registration) => {
+        if (cancelled || !registration) return;
+        registrationRef = registration;
+        if (registration.waiting) {
+          markUpdateReady();
+        }
+        registration.addEventListener('updatefound', onUpdateFound);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (registrationRef) {
+        registrationRef.removeEventListener('updatefound', onUpdateFound);
+      }
+      if (installingWorkerRef) {
+        installingWorkerRef.removeEventListener('statechange', onInstallingStateChange);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (swUpdateReloadTimerRef.current !== null) {
+        window.clearTimeout(swUpdateReloadTimerRef.current);
+        swUpdateReloadTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const applySwUpdate = () => {
+    if (isApplyingSwUpdate) return;
+    setIsApplyingSwUpdate(true);
+
+    const forceReload = () => {
+      if (swUpdateReloadTimerRef.current !== null) {
+        window.clearTimeout(swUpdateReloadTimerRef.current);
+        swUpdateReloadTimerRef.current = null;
+      }
+      window.location.reload();
+    };
+
+    if (!('serviceWorker' in navigator)) {
+      forceReload();
+      return;
+    }
+
+    navigator.serviceWorker.getRegistration()
+      .then((registration) => {
+        const waiting = registration?.waiting;
+        if (!waiting) {
+          forceReload();
+          return;
+        }
+
+        const onControllerChange = () => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          forceReload();
+        };
+        navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+
+        swUpdateReloadTimerRef.current = window.setTimeout(() => {
+          navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+          forceReload();
+        }, 2000);
+
+        waiting.postMessage({ type: 'SKIP_WAITING' });
+      })
+      .catch(() => {
+        forceReload();
+      });
   };
 
   useEffect(() => {
@@ -127,6 +229,14 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    // Touch/coarse-pointer devices don't benefit from mouse glow tracking.
+    if (
+      window.matchMedia('(any-hover: none)').matches ||
+      window.matchMedia('(pointer: coarse)').matches
+    ) {
+      return;
+    }
+
     const docEl = document.documentElement;
     let rafId: number | null = null;
     let pendingX = 0;
@@ -165,6 +275,21 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
+      {swUpdateReady && (
+        <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 z-50 pointer-events-auto">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/95 px-4 py-3 text-blue-900 shadow-lg backdrop-blur dark:border-blue-900 dark:bg-slate-900/95 dark:text-blue-200">
+            <p className="text-sm font-medium">发现新版本，建议刷新以避免新旧版本混用导致连接异常。</p>
+            <button
+              onClick={applySwUpdate}
+              className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70"
+              disabled={isApplyingSwUpdate}
+            >
+              {isApplyingSwUpdate ? '更新中...' : '立即刷新'}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div
         className="fixed inset-0 pointer-events-none z-0 transition-opacity duration-700"
         style={{
