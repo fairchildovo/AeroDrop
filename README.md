@@ -1,76 +1,85 @@
 # AeroDrop
 
-一款基于 WebRTC 的点对点文件传输与屏幕共享工具。数据直接在设备间传输，无需经过云端服务器，安全高效。
+轻量级 WebRTC 文件传输与屏幕共享应用。默认优先端对端（P2P），不可达时回退 TURN 中继。
 
-## 功能特性
+## Features
 
-- **文件发送** - 选择文件后生成分享码，对方输入码即可接收
-- **文件接收** - 输入发送方提供的分享码，直接下载文件
-- **屏幕共享** - 实时共享屏幕画面给其他用户观看
+- 文件传输：4 位口令 / 分享链接连接，支持多文件与文件夹
+- 屏幕共享：跨设备实时观看
+- 跨平台：现代浏览器即开即用
+- 安全：数据不经业务服务器落盘
 
-## 技术亮点
+## Connection Modes
 
-- **点对点传输** - 基于 WebRTC 技术，数据直接在设备间传输
-- **无需注册** - 打开即用，无需账号登录
-- **隐私安全** - 文件不经过云端存储，传输过程加密
-- **跨平台** - 支持任何现代浏览器，无需安装应用
+- `直连`：同内网或可直接互通，通常最快  
+- `点对点`：跨网络 P2P，速度通常优于中继  
+- `中继（速度会变慢）`：TURN 转发，成功率更高
 
-## 本地运行
+## Quick Start
 
-**环境要求：** Node.js
+```bash
+npm install
+npm run dev
+```
 
-1. 安装依赖：
-   ```bash
-   npm install
-   ```
+Build:
 
-2. 启动开发服务器：
-   ```bash
-   npm run dev
-   ```
+```bash
+npm run build
+```
 
-3. 打开浏览器访问显示的本地地址
+## Deploy
 
-### TURN（可选但推荐）
+Cloudflare Pages:
 
-为提升跨网络连接成功率，建议在 Cloudflare Pages/Workers 环境变量中配置：
+```bash
+npm run deploy
+```
 
-- `TURN_URLS`：逗号分隔，例如 `turn:free.expressturn.com:3478?transport=udp,turn:free.expressturn.com:3478?transport=tcp`
+Cloudflare Worker:
+
+```bash
+npm run deploy:worker
+```
+
+## TURN Configuration (Recommended)
+
+在运行环境配置以下变量：
+
+- `TURN_URLS`
 - `TURN_USERNAME`
 - `TURN_CREDENTIAL`
 
-建议至少同时提供 `udp + tcp + 443(tls)` 三类 TURN 地址，跨运营商/企业网络成功率和连接速度会更稳定，例如：  
-`turn:your-turn.example.com:3478?transport=udp,turn:your-turn.example.com:3478?transport=tcp,turns:your-turn.example.com:443?transport=tcp`
+建议 `TURN_URLS` 同时包含：
 
-## 使用方法
+- `turn:...:3478?transport=udp`
+- `turn:...:3478?transport=tcp`
+- `turns:...:443?transport=tcp`
 
-### 发送文件
-1. 点击「发送」标签
-2. 选择要分享的文件
-3. 将生成的分享码发送给接收方
+示例：
 
-### 接收文件
-1. 点击「接收」标签
-2. 输入发送方提供的分享码
-3. 等待文件传输完成后自动下载
+```text
+turn:your-turn.example.com:3478?transport=udp,turn:your-turn.example.com:3478?transport=tcp,turns:your-turn.example.com:443?transport=tcp
+```
 
-### 屏幕共享
-1. 点击「共享」标签
-2. 选择要共享的屏幕或窗口
-3. 将共享链接发送给观看者
+## Diagnostics
 
-## 技术栈
+浏览器控制台过滤 `conn-metrics`，可查看：
 
-- React 19 + TypeScript
-- Vite
-- PeerJS (WebRTC)
-- Tailwind CSS
-- StreamSaver.js
+- 首连耗时（`firstConnectMs`）
+- 重试次数（`retries`）
+- ICE 路径（host/srflx/relay，udp/tcp，LAN/WAN）
 
-## 许可证
+## Project Structure
 
-MIT License
+```text
+components/      UI 与传输逻辑
+constants/       传输与超时参数
+functions/api/   后端接口（ice-config 等）
+services/        STUN/TURN 与诊断服务
+types/           类型定义
+```
 
----
+## License
 
-Made with  by @Tianzora
+MIT
