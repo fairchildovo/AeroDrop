@@ -1044,9 +1044,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     while (activeSendingPeersRef.current.has(conn.peer)) {
         await new Promise(r => setTimeout(r, 50));
         waitAttempts++;
-        if (waitAttempts > 120) return; // 6 s safety cap
+        if (waitAttempts > 120) {
+            // Safety cap — clean up pending since this attempt failed.
+            pendingSendPeersRef.current.delete(conn.peer);
+            return;
+        }
         if (peerTransferEpochRef.current.get(conn.peer) !== peerEpoch) return;
-        if (!conn.open) return;
+        // ^ Newer epoch scheduled — that sequence owns the pending entry.
+        if (!conn.open) {
+            // Connection dead — clean up pending.
+            pendingSendPeersRef.current.delete(conn.peer);
+            return;
+        }
     }
 
     // Transition from pending → active now that the previous sequence exited.
