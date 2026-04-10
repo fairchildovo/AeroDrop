@@ -35,6 +35,8 @@ export type ConnectionSession = {
   context?: Record<string, unknown>;
   firstConnectedAt?: number;
   firstConnectMs?: number;
+  iceConfigFetchMs?: number;
+  signalingOpenMs?: number;
   lastError?: string;
   iceRoute?: IceRoute;
   events: EventRecord[];
@@ -153,6 +155,22 @@ export const markConnectionRetry = (
   log('info', session, 'attempt_retry', { reason, retries: session.retries });
 };
 
+export const markIceConfigFetched = (
+  session: ConnectionSession | null | undefined
+) => {
+  if (!session) return;
+  session.iceConfigFetchMs = toFixedMs(now() - session.startedAt);
+  log('info', session, 'ice_config_fetched', { iceConfigFetchMs: session.iceConfigFetchMs });
+};
+
+export const markSignalingOpen = (
+  session: ConnectionSession | null | undefined
+) => {
+  if (!session) return;
+  session.signalingOpenMs = toFixedMs(now() - session.startedAt);
+  log('info', session, 'signaling_open', { signalingOpenMs: session.signalingOpenMs });
+};
+
 export const markConnectionSuccess = (
   session: ConnectionSession | null | undefined,
   data?: Record<string, unknown>
@@ -164,6 +182,8 @@ export const markConnectionSuccess = (
   session.firstConnectMs = toFixedMs(session.firstConnectedAt - session.startedAt);
   log('info', session, 'connected', {
     firstConnectMs: session.firstConnectMs,
+    iceConfigFetchMs: session.iceConfigFetchMs,
+    signalingOpenMs: session.signalingOpenMs,
     retries: session.retries,
     ...data,
   });
@@ -252,7 +272,7 @@ export const getIceRoute = async (pc: RTCPeerConnection): Promise<IceRoute | nul
 export const collectIceRouteWithRetry = async (
   pc: RTCPeerConnection,
   tries = 6,
-  intervalMs = 500
+  initialIntervalMs = 200
 ): Promise<IceRoute | null> => {
   for (let i = 0; i < tries; i++) {
     try {
@@ -262,7 +282,9 @@ export const collectIceRouteWithRetry = async (
       // Ignore and retry.
     }
     if (i < tries - 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+      // Exponential backoff: 200, 400, 800, 1600, 3200 ms
+      const delay = initialIntervalMs * Math.pow(2, i);
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
     }
   }
   return null;

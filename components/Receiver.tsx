@@ -5,7 +5,7 @@ import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage } from '../types';
 import { formatFileSize } from '../services/fileUtils';
-import { getIceConfig } from '../services/stunService';
+import { getIceConfig, prefetchIceConfig } from '../services/stunService';
 import {
   attachIceRouteToSession,
   collectIceRouteWithRetry,
@@ -14,6 +14,8 @@ import {
   markConnectionFailure,
   markConnectionRetry,
   markConnectionSuccess,
+  markIceConfigFetched,
+  markSignalingOpen,
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
@@ -26,8 +28,10 @@ interface ReceiverProps {
 }
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
-  const CONNECT_TIMEOUT_MS = 12000;
-  const FAST_RETRY_DELAY_MS = 700;
+  const INITIAL_TIMEOUT_MS = 8000;
+  const RELAY_TIMEOUT_MS = 15000;
+  const FAST_RETRY_BASE_MS = 700;
+  const FAST_RETRY_MAX_MS = 5000;
   const MAX_CONNECT_RETRY = 6;
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
@@ -75,7 +79,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const connectTelemetryRef = useRef<ConnectionSession | null>(null);
   const hasTurnRef = useRef(false);
   const currentIcePolicyRef = useRef<RTCIceTransportPolicy>('all');
-  const relayFallbackTriedRef = useRef(false);
+  const relayPeerRef = useRef<Peer | null>(null);
+  const relayConnRef = useRef<DataConnection | null>(null);
+  const happyEyeballsWonRef = useRef(false);
   const p2pTimeoutRetryCountRef = useRef(0);
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -134,11 +140,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   useEffect(() => {
     isMountedRef.current = true;
+    prefetchIceConfig();
     return () => {
       isMountedRef.current = false;
       clearConnectionTimeout();
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
+      if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
       abortStreams();
     };
   }, []);
@@ -234,6 +242,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       reconnectScheduled = true;
       retryCountRef.current += 1;
+      const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
       markConnectionRetry(connectTelemetryRef.current, 'data_channel_close_or_error');
       window.setTimeout(() => {
         if (!peerRef.current || peerRef.current.destroyed) return;
@@ -241,7 +250,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         startConnectionAttempt(connectTelemetryRef.current, 'fast_retry');
         const nextConn = peerRef.current.connect(`aerodrop-${codeRef.current}`, { serialization: 'binary' });
         setupConnListeners(nextConn);
-      }, FAST_RETRY_DELAY_MS);
+      }, delay);
       return true;
     };
 
@@ -249,6 +258,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     conn.on('open', () => {
       clearConnectionTimeout();
       retryCountRef.current = 0;
+
+      // Happy-eyeballs: if a parallel attempt already won, discard this one.
+      if (happyEyeballsWonRef.current && connRef.current !== conn) {
+        try { conn.close(); } catch {}
+        return;
+      }
+      happyEyeballsWonRef.current = true;
+      connRef.current = conn;
+
+      // Tear down the losing parallel peer (if any).
+      cleanupLosingPeer(conn);
+
       markConnectionSuccess(connectTelemetryRef.current, { peerId: conn.peer });
       conn.send({
         type: 'DEVICE_INFO',
@@ -458,6 +479,20 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
   };
 
+  const cleanupLosingPeer = (winningConn: DataConnection) => {
+    // Destroy the relay peer if the P2P peer won, or vice-versa.
+    const winningPeer = winningConn.provider;
+    if (relayPeerRef.current && relayPeerRef.current !== winningPeer) {
+      try { relayPeerRef.current.destroy(); } catch {}
+      relayPeerRef.current = null;
+      relayConnRef.current = null;
+    }
+    if (peerRef.current && peerRef.current !== winningPeer) {
+      try { peerRef.current.destroy(); } catch {}
+    }
+    peerRef.current = winningPeer;
+  };
+
   const resetStateForNewTransfer = () => {
       chunksRef.current = [];
       writeBufferRef.current = [];
@@ -563,19 +598,24 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     setState(TransferState.WAITING_FOR_PEER);
     setErrorMsg('');
     retryCountRef.current = 0;
+    happyEyeballsWonRef.current = false;
     startConnectionAttempt(connectTelemetryRef.current, 'initial_connect');
 
     if (peerRef.current) peerRef.current.destroy();
+    if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
 
     const iceConfig = await getIceConfig();
+    markIceConfigFetched(connectTelemetryRef.current);
     hasTurnRef.current = iceConfig.hasTurn;
-    relayFallbackTriedRef.current = false;
     p2pTimeoutRetryCountRef.current = 0;
 
-    const applyConnectTimeout = () => {
+    const applyConnectTimeout = (timeoutMs: number) => {
       clearConnectionTimeout();
       connectionTimeoutRef.current = setTimeout(() => {
         connectionTimeoutRef.current = null;
+
+        // If happy-eyeballs already connected, ignore the timeout.
+        if (happyEyeballsWonRef.current) return;
 
         if (hasTurnRef.current && currentIcePolicyRef.current !== 'relay') {
           if (p2pTimeoutRetryCountRef.current < 1) {
@@ -583,30 +623,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             markSessionEvent(connectTelemetryRef.current, 'p2p_timeout_retry');
             markConnectionRetry(connectTelemetryRef.current, 'timeout_retry_p2p_all');
             startConnectionAttempt(connectTelemetryRef.current, 'p2p_retry_all');
-            createAndConnectPeer('all');
-            return;
-          }
-
-          if (!relayFallbackTriedRef.current) {
-            relayFallbackTriedRef.current = true;
-            markSessionEvent(connectTelemetryRef.current, 'relay_fallback_start');
-            markConnectionRetry(connectTelemetryRef.current, 'timeout_switch_to_relay');
-            startConnectionAttempt(connectTelemetryRef.current, 'relay_fallback');
-            createAndConnectPeer('relay');
+            createAndConnectPeer('all', INITIAL_TIMEOUT_MS);
             return;
           }
         }
 
+        // Final timeout — tear down everything.
         if (peerRef.current) peerRef.current.destroy();
-        markConnectionFailure(connectTelemetryRef.current, 'connect_timeout', { timeoutMs: CONNECT_TIMEOUT_MS });
+        if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
+        markConnectionFailure(connectTelemetryRef.current, 'connect_timeout', { timeoutMs });
         setErrorMsg("连接超时。请检查口令是否正确。");
         setState(TransferState.ERROR);
-      }, CONNECT_TIMEOUT_MS);
+      }, timeoutMs);
     };
 
-    const createAndConnectPeer = (policy: RTCIceTransportPolicy) => {
+    const createAndConnectPeer = (policy: RTCIceTransportPolicy, timeoutMs: number) => {
       currentIcePolicyRef.current = policy;
-      if (peerRef.current && !peerRef.current.destroyed) {
+
+      // For relay fallback via happy-eyeballs, keep the P2P peer alive.
+      if (policy !== 'relay' && peerRef.current && !peerRef.current.destroyed) {
         peerRef.current.destroy();
       }
 
@@ -621,23 +656,33 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       });
 
       peer.on('open', () => {
+        if (happyEyeballsWonRef.current) { peer.destroy(); return; }
+        markSignalingOpen(connectTelemetryRef.current);
         markSessionEvent(connectTelemetryRef.current, 'peer_open', { iceTransportPolicy: policy });
         const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
+        if (policy === 'relay') {
+          relayConnRef.current = conn;
+        }
         setupConnListeners(conn);
       });
 
       peer.on('error', (err) => {
+        if (happyEyeballsWonRef.current) return;
         if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
           retryCountRef.current++;
+          const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
           markConnectionRetry(connectTelemetryRef.current, 'peer_unavailable');
           window.setTimeout(() => {
+            if (happyEyeballsWonRef.current) return;
             if (peerRef.current && !peerRef.current.destroyed) {
               startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
               const conn = peerRef.current.connect(`aerodrop-${code}`, { serialization: 'binary' });
               setupConnListeners(conn);
             }
-          }, FAST_RETRY_DELAY_MS);
+          }, delay);
         } else {
+          // Only fail if this is the primary peer (not a background relay attempt).
+          if (policy === 'relay' && peerRef.current && !peerRef.current.destroyed) return;
           clearConnectionTimeout();
           markConnectionFailure(connectTelemetryRef.current, `peer_error:${err.type}`);
           setErrorMsg(`连接错误: ${err.type}`);
@@ -645,11 +690,27 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         }
       });
 
-      peerRef.current = peer;
-      applyConnectTimeout();
+      if (policy === 'relay') {
+        relayPeerRef.current = peer;
+      } else {
+        peerRef.current = peer;
+      }
+      applyConnectTimeout(timeoutMs);
     };
 
-    createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy);
+    // Start P2P attempt.
+    createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy, INITIAL_TIMEOUT_MS);
+
+    // Happy-eyeballs: launch relay attempt in parallel after a short delay.
+    if (iceConfig.hasTurn) {
+      window.setTimeout(() => {
+        if (happyEyeballsWonRef.current) return;
+        if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
+        markSessionEvent(connectTelemetryRef.current, 'happy_eyeballs_relay_start');
+        startConnectionAttempt(connectTelemetryRef.current, 'relay_parallel');
+        createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
+      }, 3000);
+    }
   };
 
   const acceptTransfer = async () => {
@@ -695,11 +756,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const reset = () => {
     isStreamingRef.current = false;
     isTransferActiveRef.current = false;
+    happyEyeballsWonRef.current = false;
     clearConnectionTimeout();
     
     abortStreams().then(() => {
         if (connRef.current) connRef.current.close();
         if (peerRef.current) peerRef.current.destroy();
+        if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
         setMetadata(null);
         setCode('');
         setState(TransferState.IDLE);
