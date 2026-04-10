@@ -26,6 +26,7 @@ export interface FileMetadata {
   files: FileInfo[];
   totalSize: number;
   constraints?: TransferConstraints;
+  protocolVersion?: number;
 }
 
 export interface ChunkPayload {
@@ -59,9 +60,67 @@ export interface ResumePayload {
   chunkIndex?: number;
 }
 
-export interface P2PMessage {
-  type: 'METADATA' | 'FILE_START' | 'FILE_CHUNK' | 'FILE_COMPLETE' | 'ALL_FILES_COMPLETE' | 'ALL_FILES_RECEIVED' | 'TRANSFER_PROGRESS' | 'ACCEPT_TRANSFER' | 'REJECT_TRANSFER' | 'RESUME_REQUEST' | 'TRANSFER_CANCELLED' | 'DEVICE_INFO' | 'HEARTBEAT';
-  payload?: any;
+export const P2P_PROTOCOL_VERSION = 2;
+
+export interface TransferProgressPayload {
+  overallTransferredBytes: number;
+  overallTotalBytes: number;
+  speedBytes: number;
+}
+
+export interface RejectTransferPayload {
+  reason?: string;
+}
+
+export interface TransferCancelledPayload {
+  reason?: string;
+}
+
+export interface DeviceInfoPayload {
+  deviceName?: string;
+  sessionId?: string;
+}
+
+export interface HeartbeatPayload {
+  t: number;
+}
+
+export type P2PMessageMap = {
+  METADATA: FileMetadata;
+  FILE_START: FileStartPayload;
+  FILE_CHUNK: ChunkPayload;
+  FILE_COMPLETE: FileCompletePayload;
+  ALL_FILES_COMPLETE: undefined;
+  ALL_FILES_RECEIVED: undefined;
+  TRANSFER_PROGRESS: TransferProgressPayload;
+  ACCEPT_TRANSFER: undefined;
+  REJECT_TRANSFER: RejectTransferPayload;
+  RESUME_REQUEST: ResumePayload;
+  TRANSFER_CANCELLED: TransferCancelledPayload;
+  DEVICE_INFO: DeviceInfoPayload;
+  HEARTBEAT: HeartbeatPayload;
+};
+
+export type P2PMessage = {
+  [K in keyof P2PMessageMap]:
+    P2PMessageMap[K] extends undefined
+      ? { type: K; payload?: undefined }
+      : { type: K; payload: P2PMessageMap[K] }
+}[keyof P2PMessageMap];
+
+export type TypedP2PMessage<T extends keyof P2PMessageMap> =
+  P2PMessageMap[T] extends undefined
+    ? { type: T; payload?: undefined }
+    : { type: T; payload: P2PMessageMap[T] };
+
+export const createP2PMessage = <T extends keyof P2PMessageMap>(
+  type: T,
+  ...payload: P2PMessageMap[T] extends undefined ? [] : [P2PMessageMap[T]]
+): TypedP2PMessage<T> => {
+  if (payload.length === 0) {
+    return { type } as TypedP2PMessage<T>;
+  }
+  return { type, payload: payload[0] } as TypedP2PMessage<T>;
 }
 
 export interface AeroFile {

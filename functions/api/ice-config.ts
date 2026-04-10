@@ -28,13 +28,31 @@ const parseTurnUrls = (raw: string | undefined): string[] => {
 
 export const onRequest: PagesFunction<Env> = async (context) => {
   const requestOrigin = context.request.headers.get('Origin');
+  const requestReferer = context.request.headers.get('Referer');
+  const secFetchSite = context.request.headers.get('Sec-Fetch-Site');
   const requestUrl = new URL(context.request.url);
   const allowedOrigin = requestUrl.origin;
+  let refererOrigin: string | null = null;
+  if (requestReferer) {
+    try {
+      refererOrigin = new URL(requestReferer).origin;
+    } catch {
+      refererOrigin = null;
+    }
+  }
 
-  if (requestOrigin && requestOrigin !== allowedOrigin) {
+  const isFromAllowedOrigin =
+    requestOrigin === allowedOrigin ||
+    (!requestOrigin && refererOrigin === allowedOrigin) ||
+    (!requestOrigin && !refererOrigin && (secFetchSite === 'same-origin' || secFetchSite === 'same-site'));
+
+  if (!isFromAllowedOrigin) {
     return new Response(JSON.stringify({ error: 'Forbidden' }), {
       status: 403,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      },
     });
   }
 
@@ -64,7 +82,8 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'no-store'
+        'Cache-Control': 'no-store',
+        'Vary': 'Origin, Referer',
       }
     }
   );

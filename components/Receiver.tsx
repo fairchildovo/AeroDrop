@@ -3,7 +3,7 @@ import Peer, { DataConnection } from 'peerjs';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
-import { TransferState, FileMetadata, P2PMessage, FileCompletePayload } from '../types';
+import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { crc32FinalHex, crc32Init, crc32Update } from '../services/hashUtils';
 import { getIceConfig, prefetchIceConfig } from '../services/stunService';
@@ -21,7 +21,7 @@ import {
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
-import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
+import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
 
 const sanitizeFileName = (name: string): string => {
   const basename = name.replace(/\\/g, '/').split('/').pop() || `file_${Date.now()}`;
@@ -45,6 +45,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const FAST_RETRY_MAX_MS = 5000;
   const MAX_CONNECT_RETRY = 6;
   const MAX_AUTO_REPAIR_RETRIES_PER_FILE = 2;
+  const IOS_MEMORY_WARN_BYTES = 500 * 1024 * 1024;
+  const IOS_IDB_BUFFER_THRESHOLD_BYTES = 500 * 1024 * 1024;
+  const IOS_IDB_DB_NAME = 'aerodrop-receiver-buffer-v1';
+  const IOS_IDB_STORE = 'fileChunks';
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
@@ -78,7 +82,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const [downloadSpeedBytes, setDownloadSpeedBytes] = useState(0);
   const [eta, setEta] = useState<string>('--');
   const [senderDeviceName, setSenderDeviceName] = useState<string>('');
-  const [connectingStage, setConnectingStage] = useState<'fetching_ice' | 'connecting_signaling' | 'connecting_peer' | 'waiting_response' | ''>('');
+  const [connectingStage, setConnectingStage] = useState<ReceiverConnectingStage>('');
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -127,6 +131,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
   const BUFFER_FLUSH_THRESHOLD = TRANSFER_CONFIG.WRITE_BUFFER_FLUSH_THRESHOLD;
+  const isIndexedDbBufferingRef = useRef<boolean>(false);
+  const indexedDbOpenPromiseRef = useRef<Promise<IDBDatabase> | null>(null);
+  const indexedDbBatchRef = useRef<ArrayBuffer[]>([]);
+  const indexedDbBatchBytesRef = useRef<number>(0);
+  const indexedDbChunkSeqRef = useRef<number>(0);
+  const indexedDbBufferedBytesRef = useRef<number>(0);
+  const indexedDbBufferedFileIndexRef = useRef<number | null>(null);
+  const indexedDbNotifiedRef = useRef<boolean>(false);
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -175,9 +187,146 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
       if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
+      deleteIndexedDbChunksForSession().catch(() => {});
       abortStreams();
     };
   }, []);
+
+  const isIndexedDbSupported = () => typeof window !== 'undefined' && 'indexedDB' in window;
+
+  const resetIndexedDbBufferRuntime = () => {
+    indexedDbBatchRef.current = [];
+    indexedDbBatchBytesRef.current = 0;
+  };
+
+  const resetIndexedDbFileState = () => {
+    isIndexedDbBufferingRef.current = false;
+    indexedDbChunkSeqRef.current = 0;
+    indexedDbBufferedBytesRef.current = 0;
+    indexedDbBufferedFileIndexRef.current = null;
+    resetIndexedDbBufferRuntime();
+  };
+
+  const openIndexedDb = async (): Promise<IDBDatabase> => {
+    if (!isIndexedDbSupported()) {
+      throw new Error('INDEXED_DB_UNSUPPORTED');
+    }
+    if (!indexedDbOpenPromiseRef.current) {
+      indexedDbOpenPromiseRef.current = new Promise<IDBDatabase>((resolve, reject) => {
+        const request = window.indexedDB.open(IOS_IDB_DB_NAME, 1);
+        request.onerror = () => reject(request.error || new Error('INDEXED_DB_OPEN_FAILED'));
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(IOS_IDB_STORE)) {
+            const store = db.createObjectStore(IOS_IDB_STORE, { keyPath: ['sessionId', 'fileIndex', 'seq'] });
+            store.createIndex('bySessionFile', ['sessionId', 'fileIndex'], { unique: false });
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+      });
+    }
+    return indexedDbOpenPromiseRef.current;
+  };
+
+  const deleteIndexedDbChunksForFile = async (fileIndex: number): Promise<void> => {
+    if (!isIndexedDbSupported()) return;
+    const db = await openIndexedDb();
+    const sessionId = receiverSessionIdRef.current;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IOS_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IOS_IDB_STORE);
+      const index = store.index('bySessionFile');
+      const req = index.openCursor(IDBKeyRange.only([sessionId, fileIndex]));
+      req.onerror = () => reject(req.error || new Error('INDEXED_DB_CURSOR_FAILED'));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('INDEXED_DB_DELETE_FAILED'));
+      tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_DELETE_ABORTED'));
+    });
+  };
+
+  const deleteIndexedDbChunksForSession = async (): Promise<void> => {
+    if (!isIndexedDbSupported()) return;
+    const db = await openIndexedDb();
+    const sessionId = receiverSessionIdRef.current;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IOS_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IOS_IDB_STORE);
+      const index = store.index('bySessionFile');
+      const req = index.openCursor(IDBKeyRange.bound([sessionId, 0], [sessionId, Number.MAX_SAFE_INTEGER]));
+      req.onerror = () => reject(req.error || new Error('INDEXED_DB_SESSION_CURSOR_FAILED'));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('INDEXED_DB_SESSION_DELETE_FAILED'));
+      tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_SESSION_DELETE_ABORTED'));
+    });
+  };
+
+  const appendIndexedDbChunkBlob = async (fileIndex: number, blob: Blob, size: number): Promise<void> => {
+    const db = await openIndexedDb();
+    const sessionId = receiverSessionIdRef.current;
+    const seq = indexedDbChunkSeqRef.current++;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IOS_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IOS_IDB_STORE);
+      store.put({
+        sessionId,
+        fileIndex,
+        seq,
+        blob,
+        size,
+        createdAt: Date.now(),
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('INDEXED_DB_APPEND_FAILED'));
+      tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_APPEND_ABORTED'));
+    });
+    indexedDbBufferedBytesRef.current += size;
+  };
+
+  const readIndexedDbBlobsForFile = async (fileIndex: number): Promise<Blob[]> => {
+    const db = await openIndexedDb();
+    const sessionId = receiverSessionIdRef.current;
+    return new Promise<Blob[]>((resolve, reject) => {
+      const blobs: Blob[] = [];
+      const tx = db.transaction(IOS_IDB_STORE, 'readonly');
+      const store = tx.objectStore(IOS_IDB_STORE);
+      const range = IDBKeyRange.bound([sessionId, fileIndex, 0], [sessionId, fileIndex, Number.MAX_SAFE_INTEGER]);
+      const req = store.openCursor(range);
+      req.onerror = () => reject(req.error || new Error('INDEXED_DB_READ_CURSOR_FAILED'));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        const record = cursor.value as { blob?: Blob };
+        if (record?.blob) blobs.push(record.blob);
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve(blobs);
+      tx.onerror = () => reject(tx.error || new Error('INDEXED_DB_READ_FAILED'));
+      tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_READ_ABORTED'));
+    });
+  };
+
+  const flushIndexedDbBatch = async (fileIndex: number, batch: ArrayBuffer[], totalLen: number) => {
+    try {
+      const blob = new Blob(batch, { type: 'application/octet-stream' });
+      await appendIndexedDbChunkBlob(fileIndex, blob, totalLen);
+      indexedDbBufferedFileIndexRef.current = fileIndex;
+    } catch (err) {
+      console.error('IndexedDB write error:', err);
+      failTransferPersistence('iOS 大文件缓冲写入失败，请释放存储空间后重试。');
+    }
+  };
 
   useEffect(() => {
     const notifyClosing = () => {
@@ -208,6 +357,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           if (streamSaverWriterRef.current) { await streamSaverWriterRef.current.abort(); streamSaverWriterRef.current = null; }
           isStreamingRef.current = false;
       } catch (e) { console.warn("Stream abort warning:", e); }
+      resetIndexedDbBufferRuntime();
   };
 
   const closeStreams = async (): Promise<boolean> => {
@@ -402,12 +552,22 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       chunksRef.current = [];
       writeBufferRef.current = [];
       writeBufferSizeRef.current = 0;
+      resetIndexedDbBufferRuntime();
+      indexedDbChunkSeqRef.current = 0;
+      indexedDbBufferedBytesRef.current = 0;
+      indexedDbBufferedFileIndexRef.current = fileIndex;
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
       fileHashStateRef.current = crc32Init();
       hashedBytesRef.current = 0;
 
       await abortStreams();
+      try {
+        await writeQueueRef.current;
+        await deleteIndexedDbChunksForFile(fileIndex);
+      } catch (e) {
+        console.warn('IndexedDB cleanup before repair failed:', e);
+      }
 
       const conn = connRef.current;
       if (!conn || !conn.open) {
@@ -536,13 +696,27 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                      writeBufferRef.current = [];
                      writeBufferSizeRef.current = 0;
 
-                     writeQueueRef.current = writeQueueRef.current.then(() => flushSpecificBatch(batch, batchSize));
+                      writeQueueRef.current = writeQueueRef.current.then(() => flushSpecificBatch(batch, batchSize));
+                  }
+             } else if (isIndexedDbBufferingRef.current) {
+                 indexedDbBatchRef.current.push(chunkData);
+                 indexedDbBatchBytesRef.current += byteLength;
+
+                 if (indexedDbBatchBytesRef.current >= BUFFER_FLUSH_THRESHOLD) {
+                     const fileIndexForBatch = currentFileIndexRef.current;
+                     const batch = indexedDbBatchRef.current;
+                     const batchSize = indexedDbBatchBytesRef.current;
+
+                     indexedDbBatchRef.current = [];
+                     indexedDbBatchBytesRef.current = 0;
+
+                     writeQueueRef.current = writeQueueRef.current.then(() => flushIndexedDbBatch(fileIndexForBatch, batch, batchSize));
                  }
-             } else {
-                 chunksRef.current.push(chunkData);
-             }
-         }
-         return;
+              } else {
+                  chunksRef.current.push(chunkData);
+              }
+          }
+          return;
       }
 
       const msg = data as P2PMessage;
@@ -553,6 +727,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
       else if (msg.type === 'METADATA') {
         const meta = msg.payload as FileMetadata;
+        const remoteProtocolVersion = typeof meta.protocolVersion === 'number' ? meta.protocolVersion : 1;
+        if (remoteProtocolVersion > P2P_PROTOCOL_VERSION) {
+            setErrorMsg(`发送方协议版本(${remoteProtocolVersion})高于当前版本(${P2P_PROTOCOL_VERSION})，请升级接收端。`);
+            setState(TransferState.ERROR);
+            conn.close();
+            return;
+        }
         const previousMeta = metadataRef.current;
         let isResumable = false;
         if (previousMeta &&
@@ -577,14 +758,34 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         isTransferActiveRef.current = false;
 
         if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
+        if ((isIOS || isSafari) && meta.totalSize >= IOS_MEMORY_WARN_BYTES && onNotification) {
+            onNotification('检测到超大文件：将优先尝试使用 IndexedDB 分块缓冲，减少内存占用。', 'info');
+        }
       } 
       else if (msg.type === 'FILE_START') {
         isTransferActiveRef.current = true;
         const { fileSize, fileIndex } = msg.payload;
         const fileName = sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`);
-        
-  
-        const resumingSameFile = currentFileIndexRef.current === fileIndex && chunksRef.current.length > 0;
+
+        const shouldUseIndexedDbBuffering =
+          (isIOS || isSafari) &&
+          fileSize >= IOS_IDB_BUFFER_THRESHOLD_BYTES &&
+          isIndexedDbSupported();
+        isIndexedDbBufferingRef.current = shouldUseIndexedDbBuffering;
+
+        if (shouldUseIndexedDbBuffering && !indexedDbNotifiedRef.current && onNotification) {
+          indexedDbNotifiedRef.current = true;
+          onNotification('iOS 大文件已启用 IndexedDB 缓冲模式', 'info');
+        }
+
+        const hasIndexedDbBufferedData =
+          isIndexedDbBufferingRef.current &&
+          indexedDbBufferedFileIndexRef.current === fileIndex &&
+          indexedDbBufferedBytesRef.current > 0;
+
+        const resumingSameFile =
+          currentFileIndexRef.current === fileIndex &&
+          (chunksRef.current.length > 0 || hasIndexedDbBufferedData);
         const usePreparedNativeWriter =
           preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
 
@@ -595,14 +796,28 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             chunksRef.current = [];
             writeBufferRef.current = [];
             writeBufferSizeRef.current = 0;
+            resetIndexedDbBufferRuntime();
+            indexedDbChunkSeqRef.current = 0;
+            indexedDbBufferedBytesRef.current = 0;
+            indexedDbBufferedFileIndexRef.current = fileIndex;
             receivedChunksCountRef.current = 0;
             receivedSizeRef.current = 0;
+
+            if (isIndexedDbBufferingRef.current) {
+              try {
+                await writeQueueRef.current;
+                await deleteIndexedDbChunksForFile(fileIndex);
+              } catch (e) {
+                failTransferPersistence('无法初始化 iOS 大文件缓存，请重试。');
+                return;
+              }
+            }
 
             if (usePreparedNativeWriter) {
                 isStreamingRef.current = true;
                 preparedNativeWriterFileIndexRef.current = null;
             } else if (!nativeWriterRef.current) {
-                if (isIOS || isSafari) {
+                if (isIndexedDbBufferingRef.current || isIOS || isSafari) {
                     isStreamingRef.current = false;
                 } else if (streamSaver) {
                      try {
@@ -668,34 +883,60 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
              }
          }
 
-         if (isStreamingRef.current) {
-             const finalBatch = writeBufferRef.current;
-             const finalSize = writeBufferSizeRef.current;
-             writeBufferRef.current = [];
-             writeBufferSizeRef.current = 0;
+         if (isStreamingRef.current || isIndexedDbBufferingRef.current) {
+              if (isIndexedDbBufferingRef.current) {
+                  const finalBatch = indexedDbBatchRef.current;
+                  const finalSize = indexedDbBatchBytesRef.current;
+                  indexedDbBatchRef.current = [];
+                  indexedDbBatchBytesRef.current = 0;
 
-             writeQueueRef.current = writeQueueRef.current.then(async () => {
-                 if (finalSize > 0) await flushSpecificBatch(finalBatch, finalSize);
-                 const closeOk = await closeStreams();
-                 if (!closeOk) {
-                    failTransferPersistence("文件落盘失败，请重试。");
-                    return;
-                 }
+                  writeQueueRef.current = writeQueueRef.current.then(async () => {
+                      if (finalSize > 0) await flushIndexedDbBatch(currentFileIndexRef.current, finalBatch, finalSize);
+                  }).catch(e => console.error("IndexedDB final batch flush error", e));
+              }
 
-                 if (isTransferActiveRef.current) {
-                    completedFileIndicesRef.current.add(currentFileIndexRef.current);
-                    fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
-                    sendTransferProgress(lastReportedSpeedBytesRef.current);
-                    if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
-                 }
-             }).catch(e => console.error("File Complete Error", e));
+              const finalBatch = writeBufferRef.current;
+              const finalSize = writeBufferSizeRef.current;
+              writeBufferRef.current = [];
+              writeBufferSizeRef.current = 0;
 
-             await writeQueueRef.current;
-         } else {
-             if (!saveCurrentFile()) {
-               return;
-             }
-          }
+              writeQueueRef.current = writeQueueRef.current.then(async () => {
+                  if (finalSize > 0) await flushSpecificBatch(finalBatch, finalSize);
+                  if (isStreamingRef.current) {
+                    const closeOk = await closeStreams();
+                    if (!closeOk) {
+                       failTransferPersistence("文件落盘失败，请重试。");
+                       return;
+                    }
+                  }
+
+                  if (isTransferActiveRef.current) {
+                     if (isIndexedDbBufferingRef.current) {
+                       if (await saveCurrentFile()) {
+                         completedFileIndicesRef.current.add(currentFileIndexRef.current);
+                         fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
+                         sendTransferProgress(lastReportedSpeedBytesRef.current);
+                         if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
+                       }
+                     } else {
+                       completedFileIndicesRef.current.add(currentFileIndexRef.current);
+                       fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
+                       sendTransferProgress(lastReportedSpeedBytesRef.current);
+                       if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
+                     }
+                  }
+              }).catch(e => console.error("File Complete Error", e));
+
+              await writeQueueRef.current;
+          } else {
+              if (!await saveCurrentFile()) {
+                return;
+              }
+              completedFileIndicesRef.current.add(currentFileIndexRef.current);
+              fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
+              sendTransferProgress(lastReportedSpeedBytesRef.current);
+              if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
+           }
       }
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          if (!isTransferActiveRef.current) return;
@@ -782,6 +1023,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       chunksRef.current = [];
       writeBufferRef.current = [];
       writeBufferSizeRef.current = 0;
+      resetIndexedDbFileState();
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
       fileHashStateRef.current = crc32Init();
@@ -851,7 +1093,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }, 30000);
   };
 
-  const saveCurrentFile = (): boolean => {
+  const saveCurrentFile = async (): Promise<boolean> => {
       if (!isTransferActiveRef.current) return false;
       if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) return false;
 
@@ -862,7 +1104,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           finalType = metadataRef.current.files[currentFileIndexRef.current].type;
       }
       try {
-          const blob = new Blob(chunksRef.current, { type: finalType });
+          let blob: Blob;
+          if (isIndexedDbBufferingRef.current) {
+              const fileIndex = currentFileIndexRef.current;
+              const blobs = await readIndexedDbBlobsForFile(fileIndex);
+              if (blobs.length === 0 && currentFileSizeRef.current > 0) {
+                failTransferPersistence("iOS 缓冲文件为空，请重试传输。");
+                return false;
+              }
+              blob = new Blob(blobs, { type: finalType });
+          } else {
+              blob = new Blob(chunksRef.current, { type: finalType });
+          }
 
           if (isIOS || isSafari) {
               saveFileForIOS(blob, finalName);
@@ -874,14 +1127,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               setTimeout(() => URL.revokeObjectURL(url), 1000);
           }
 
-          completedFileIndicesRef.current.add(currentFileIndexRef.current);
-          fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
-          sendTransferProgress(lastReportedSpeedBytesRef.current);
-          if (onNotification) onNotification(`文件 ${finalName} 已保存`, 'success');
       } catch (e) {
           console.error("Save failed:", e);
           failTransferPersistence("浏览器保存失败，请检查下载权限后重试。");
           return false;
+      }
+      if (isIndexedDbBufferingRef.current) {
+          try {
+              await deleteIndexedDbChunksForFile(currentFileIndexRef.current);
+          } catch (e) {
+              console.warn('IndexedDB cleanup after save failed:', e);
+          }
+          indexedDbBufferedBytesRef.current = 0;
+          indexedDbChunkSeqRef.current = 0;
+          indexedDbBufferedFileIndexRef.current = null;
+          resetIndexedDbBufferRuntime();
       }
       chunksRef.current = [];
       receivedChunksCountRef.current = 0;
@@ -1067,6 +1327,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     clearHeartbeatTimer();
     
     abortStreams().then(() => {
+        deleteIndexedDbChunksForSession().catch(() => {});
         if (connRef.current) connRef.current.close();
         if (peerRef.current) peerRef.current.destroy();
         if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
@@ -1078,6 +1339,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setProgress(0);
         setDownloadSpeedBytes(0);
         setSenderDeviceName('');
+        indexedDbNotifiedRef.current = false;
         resetStateForNewTransfer();
     });
   };
@@ -1128,134 +1390,35 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const overallRemainingBytes = Math.max(0, totalBytes - overallTransferredBytes);
   const overallEta = downloadSpeedBytes > 0 ? formatEta(overallRemainingBytes / downloadSpeedBytes) : '--';
 
-  
-  
   return (
-    <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
-      {}
-      <div className="text-center mb-6">
-        <h2 className="text-2xl font-bold text-slate-800 dark:text-white">接收文件</h2>
-        <p className="text-slate-500 dark:text-slate-400">输入 4 位口令</p>
-      </div>
-
-      {}
-      {state === TransferState.IDLE && (
-         <div className="flex flex-col items-center">
-             <div className="relative mb-8 max-w-[280px] mx-auto group">
-                 <div className="flex gap-4 justify-center pointer-events-none">
-                   {[0, 1, 2, 3].map((i) => (
-                     <div key={i} className={`w-14 h-16 border-2 rounded-xl flex items-center justify-center text-3xl font-bold font-mono transition-all duration-200 ${code[i] ? 'border-brand-500 text-brand-600 dark:text-brand-400 shadow-sm bg-white dark:bg-slate-700' : 'border-slate-200 dark:border-slate-600 text-slate-300 dark:text-slate-600 bg-white dark:bg-slate-700'}`}>{code[i] || ''}</div>
-                   ))}
-                 </div>
-                 <input ref={inputRef} type="text" inputMode="numeric" maxLength={4} value={code} onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" autoFocus={!isMobileDevice} />
-             </div>
-             <div className="grid grid-cols-3 gap-3 w-full max-w-[280px] mb-8">
-                 {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-                   <button key={num} onClick={() => handleDigitClick(num.toString())} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">{num}</button>
-                 ))}
-                 <button onClick={handlePasteFromClipboard} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30"><ClipboardPaste size={20} /></button>
-                 <button onClick={() => handleDigitClick('0')} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">0</button>
-                 <button onClick={handleBackspace} onContextMenu={(e) => { e.preventDefault(); handleClear(); }} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-400 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600"><Delete size={24} /></button>
-             </div>
-         </div>
-      )}
-
-      {}
-      {state === TransferState.WAITING_FOR_PEER && (
-         <div className="flex flex-col items-center py-10 animate-pop-in">
-           <Loader2 size={40} className="animate-spin text-brand-500 mb-4" />
-           <p className="text-slate-600 dark:text-slate-300 font-medium">
-             {connectingStage === 'fetching_ice' && '正在获取网络配置...'}
-             {connectingStage === 'connecting_signaling' && '正在连接信号服务器...'}
-             {connectingStage === 'connecting_peer' && '正在建立 P2P 通道...'}
-             {connectingStage === 'waiting_response' && '正在等待发送方响应...'}
-             {!connectingStage && '正在连接发送方...'}
-           </p>
-           <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
-             {connectingStage === 'fetching_ice' && '获取 STUN/TURN 服务器信息'}
-             {connectingStage === 'connecting_signaling' && '连接 PeerJS 信令服务'}
-             {connectingStage === 'connecting_peer' && '通过 WebRTC 建立端到端连接'}
-             {connectingStage === 'waiting_response' && '已连接，等待发送方确认'}
-           </p>
-           <button onClick={reset} className="mt-8 px-6 py-2 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 rounded-full text-sm hover:bg-slate-50 dark:hover:bg-slate-600 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm active:scale-95">取消</button>
-         </div>
-      )}
-
-      {}
-      {(state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && metadata && (
-        <div className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-6 animate-slide-up">
-           {senderDeviceName && (
-             <div className="mb-4 text-sm text-slate-600 dark:text-slate-300">
-               发送方设备: <span className="font-semibold text-slate-800 dark:text-slate-100">{senderDeviceName}</span>
-             </div>
-           )}
-           <div className="flex items-start gap-4 mb-6">
-               <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
-                  {isMultiFile ? <Layers size={24} className="text-brand-500" /> : <FileIcon size={24} />}
-               </div>
-               <div className="flex-1">
-                   <h4 className="font-bold text-slate-800 dark:text-white text-lg leading-tight mb-1 truncate">{isMultiFile ? `${metadata.files.length} 个文件` : primaryFile?.name}</h4>
-                   <p className="text-sm text-slate-500 dark:text-slate-400">{formatFileSize(metadata.totalSize)}</p>
-               </div>
-           </div>
-
-           {state === TransferState.PEER_CONNECTED && (
-             <div className="space-y-3">
-                 {canResume && (
-                     <button onClick={resumeTransfer} className="w-full bg-brand-600 text-white font-bold py-3 rounded-full hover:bg-brand-700 transition-all flex items-center justify-center gap-2 shadow-md">
-                         <PlayCircle size={18} /> {isStreamingRef.current ? '重新开始' : '继续下载'}
-                     </button>
-                 )}
-                 <button onClick={acceptTransfer} className={`w-full font-bold py-3 rounded-full transition-all flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200' : 'bg-brand-600 hover:bg-brand-700 text-white shadow-lg shadow-brand-600/25 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5'}`}>
-                   <Download size={18} /> {canResume ? '重新下载所有' : '确认并下载'}
-                 </button>
-             </div>
-           )}
-
-           {state === TransferState.TRANSFERRING && (
-             <div className="space-y-3">
-               <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase">
-                  <span>当前文件进度</span>
-                  <span>{progress}%</span>
-               </div>
-               <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-3 overflow-hidden">
-                 <div className="bg-brand-500 h-full transition-all duration-300 relative" style={{ width: `${progress}%` }}></div>
-               </div>
-               <div className="flex justify-between items-center text-xs text-slate-500 pt-1">
-                  <span>{downloadSpeed}</span>
-                  <span>{eta}</span>
-               </div>
-               <div className="flex justify-between items-center text-[11px] text-slate-500 pt-1">
-                  <span>{formatFileSize(overallTransferredBytes)} / {formatFileSize(totalBytes)}</span>
-                  <span>预计剩余 {overallEta}</span>
-               </div>
-               <button onClick={reset} className="w-full py-2.5 mt-2 bg-red-50 text-red-600 rounded-full text-sm font-medium">取消</button>
-             </div>
-           )}
-        </div>
-      )}
-
-      {}
-      {state === TransferState.ERROR && (
-        <div className="text-center py-8 animate-pop-in">
-           <AlertCircle size={32} className="text-red-500 mx-auto mb-4" />
-           <h3 className="text-lg font-bold text-slate-800 dark:text-white">传输失败</h3>
-           <p className="text-slate-500 dark:text-slate-400 mt-2 mb-6">{errorMsg}</p>
-           <div className="flex gap-4 justify-center">
-               <button onClick={reset} className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-full font-medium">取消</button>
-               <button onClick={handleRetry} className="px-6 py-2.5 bg-slate-200 text-slate-700 rounded-full font-medium hover:bg-slate-300">重试</button>
-           </div>
-        </div>
-      )}
-
-      {}
-      {state === TransferState.COMPLETED && (
-        <div className="text-center py-8 animate-pop-in">
-          <HardDriveDownload size={36} className="text-green-500 mx-auto mb-6" />
-          <h3 className="text-2xl font-bold text-slate-800 dark:text-white">下载完成</h3>
-          <button onClick={reset} className="mt-8 px-6 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-full hover:bg-slate-200">接收下一个</button>
-        </div>
-      )}
-    </div>
+    <ReceiverUI
+      state={state}
+      code={code}
+      inputRef={inputRef}
+      isMobileDevice={isMobileDevice}
+      onCodeChange={(value) => setCode(value.replace(/[^0-9]/g, '').slice(0, 4))}
+      onDigitClick={handleDigitClick}
+      onPasteFromClipboard={handlePasteFromClipboard}
+      onBackspace={handleBackspace}
+      onClear={handleClear}
+      connectingStage={connectingStage}
+      onReset={reset}
+      metadata={metadata}
+      senderDeviceName={senderDeviceName}
+      isMultiFile={isMultiFile}
+      primaryFileName={primaryFile?.name}
+      canResume={canResume}
+      isStreaming={isStreamingRef.current}
+      onResumeTransfer={resumeTransfer}
+      onAcceptTransfer={acceptTransfer}
+      progress={progress}
+      downloadSpeed={downloadSpeed}
+      eta={eta}
+      overallTransferredBytes={overallTransferredBytes}
+      totalBytes={totalBytes}
+      overallEta={overallEta}
+      errorMsg={errorMsg}
+      onRetry={handleRetry}
+    />
   );
 };
