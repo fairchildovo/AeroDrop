@@ -55,6 +55,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isManualStopRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
+  const remoteShareEndedRef = useRef(false);
+  const remoteShareEndHandledRef = useRef(false);
   const MAX_RECONNECT_ATTEMPTS = 5;
   // 观看者端：连接过程的全局超时定时器
   const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -83,9 +85,51 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const bitrateLimits = useMemo(() => ({
     high: { min: 2000000, max: 100000000 },    // 原画：最大 100Mbps，起步 2Mbps
-    medium: { min: 500000, max: 4000000 },     // 高清：提升至 4Mbps
-    low: { min: 100000, max: 1000000 },        // 流畅：保持 1Mbps
+    medium: { min: 500000, max: 8000000 },     // 高清：提升至 8Mbps，减少文字边缘糊化
+    low: { min: 100000, max: 2500000 },        // 流畅：仍保留可读性，减少过度压缩
   }), []);
+
+  const qualityCaptureConstraints = useMemo(() => ({
+    high: { maxFrameRate: 60, scaleResolutionDownBy: 1 },
+    medium: { maxFrameRate: 45, scaleResolutionDownBy: 1 },
+    low: { maxFrameRate: 24, scaleResolutionDownBy: 1.25 },
+  }), []);
+
+  const buildDisplayMediaConstraints = useCallback((): DisplayMediaStreamOptions => {
+    const dpr = window.devicePixelRatio || 1;
+    const baseWidth = Math.floor(window.screen.width * dpr);
+    const baseHeight = Math.floor(window.screen.height * dpr);
+    const idealWidth = Math.min(3840, Math.max(1280, baseWidth || 1920));
+    const idealHeight = Math.min(2160, Math.max(720, baseHeight || 1080));
+
+    return {
+      video: {
+        cursor: 'always',
+        displaySurface: 'monitor',
+        width: { ideal: idealWidth },
+        height: { ideal: idealHeight },
+        frameRate: { ideal: 60, max: 60 },
+      } as MediaTrackConstraints,
+      audio: true,
+    };
+  }, []);
+
+  const applyLocalTrackConstraints = useCallback(async (
+    stream: MediaStream | null,
+    level: 'high' | 'medium' | 'low',
+  ) => {
+    if (!stream) return;
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack || !videoTrack.applyConstraints) return;
+    const preset = qualityCaptureConstraints[level];
+    try {
+      await videoTrack.applyConstraints({
+        frameRate: { ideal: preset.maxFrameRate, max: preset.maxFrameRate },
+      });
+    } catch (err) {
+      console.warn('Failed to apply local track constraints:', err);
+    }
+  }, [qualityCaptureConstraints]);
 
 
   const applyBitrateConstraints = useCallback(async (
@@ -118,7 +162,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         // 原画模式：显式设置极高码率 (100Mbps)
         // 提升至 100Mbps 以彻底消除 1080p60fps 下的动态画面涂抹，跑满局域网带宽
         params.encodings[0].maxBitrate = 100000000;
-        params.encodings[0].scaleResolutionDownBy = 1;
+        params.encodings[0].maxFramerate = qualityCaptureConstraints.high.maxFrameRate;
+        params.encodings[0].scaleResolutionDownBy = qualityCaptureConstraints.high.scaleResolutionDownBy;
 
         // 尝试设置编码优先级
         if ('networkPriority' in params.encodings[0]) {
@@ -127,12 +172,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       } else {
         const limits = bitrateLimits[level];
         params.encodings[0].maxBitrate = limits.max;
+        params.encodings[0].maxFramerate = qualityCaptureConstraints[level].maxFrameRate;
+        params.encodings[0].scaleResolutionDownBy = qualityCaptureConstraints[level].scaleResolutionDownBy;
+      }
 
-        if (level === 'low') {
-          params.encodings[0].scaleResolutionDownBy = 2;
-        } else if (level === 'medium') {
-          params.encodings[0].scaleResolutionDownBy = 1.5;
-        }
+      // 共享场景优先可读性：在带宽波动时尽量保分辨率而不是先降清晰度
+      if ('degradationPreference' in (params as any)) {
+        (params as any).degradationPreference = level === 'low' ? 'balanced' : 'maintain-resolution';
       }
 
       try {
@@ -142,7 +188,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         console.error('Failed to set bitrate parameters:', err);
       }
     }
-  }, [bitrateLimits]);
+  }, [bitrateLimits, qualityCaptureConstraints]);
 
 
   useEffect(() => {
@@ -154,7 +200,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         conn.send({ type: 'quality', value: qualityLevel });
       }
     });
-  }, [qualityLevel]);
+
+    // 画质档位切换后，立即对本地采集轨道和所有已连接观看者应用新参数，减少“切档后还模糊几秒”的体感
+    applyLocalTrackConstraints(streamRef.current, qualityLevel);
+    activeCallsRef.current.forEach((call) => {
+      if (call.peerConnection) {
+        applyBitrateConstraints(call.peerConnection, qualityLevel);
+      }
+    });
+  }, [qualityLevel, applyBitrateConstraints, applyLocalTrackConstraints]);
 
 
   // 监听连接状态，一旦结束连接过程（无论是成功还是失败），就清除超时定时器
@@ -545,6 +599,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     return combinedStream;
   }, []);
 
+  const broadcastShareEnded = useCallback((reason: 'stopped' | 'window_closed' = 'stopped') => {
+    activeDataConnectionsRef.current.forEach((conn) => {
+      if (!conn.open) return;
+      try {
+        conn.send({ type: 'share-ended', reason });
+      } catch {
+        // Ignore best-effort notify errors.
+      }
+    });
+  }, []);
+
 
   const stopViewing = useCallback((isManual = true) => {
     // 标记是否为手动停止
@@ -594,8 +659,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setTargetSharerId(null);
       setError(null);
       reconnectAttemptsRef.current = 0;
+      remoteShareEndedRef.current = false;
+      remoteShareEndHandledRef.current = false;
     }
   }, []);
+
+  const handleRemoteShareEnded = useCallback((reason = '共享已结束') => {
+    if (remoteShareEndHandledRef.current) return;
+    remoteShareEndHandledRef.current = true;
+    remoteShareEndedRef.current = true;
+    stopViewing(false);
+    setError(reason);
+    onNotification(reason, 'info');
+  }, [onNotification, stopViewing]);
 
 
   const connectToSharer = useCallback(async (sharerId: string, isRetry = false) => {
@@ -604,6 +680,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     if (!isRetry) {
       reconnectAttemptsRef.current = 0;
       isManualStopRef.current = false;
+      remoteShareEndedRef.current = false;
+      remoteShareEndHandledRef.current = false;
     }
 
     if (peerRef.current) {
@@ -679,6 +757,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         console.log('Received data:', data);
         if (data && data.type === 'quality' && data.value) {
           setRemoteQuality(data.value as 'high' | 'medium' | 'low');
+          return;
+        }
+        if (data && data.type === 'share-ended') {
+          const reasonLabel = data.reason === 'window_closed' ? '共享方已离开页面，屏幕共享已结束' : '共享方已停止共享';
+          handleRemoteShareEnded(reasonLabel);
         }
       });
 
@@ -762,6 +845,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       call.on('close', () => {
         console.log('Call closed');
 
+        if (remoteShareEndedRef.current) {
+          handleRemoteShareEnded('共享方已结束共享');
+          return;
+        }
+
         // 只有非手动停止时，才触发重连逻辑
         if (!isManualStopRef.current) {
           console.log('Unexpected disconnection, attempting reconnect...');
@@ -789,6 +877,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       call.on('error', (err) => {
         console.error('Call error:', err);
 
+        if (remoteShareEndedRef.current) {
+          handleRemoteShareEnded('共享方已结束共享');
+          return;
+        }
+
         if (!isManualStopRef.current) {
           stopViewing(false);
           // 这里也可以触发重连，逻辑同上
@@ -804,6 +897,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('error', (err) => {
       console.error('Peer error:', err);
+
+      if (remoteShareEndedRef.current) {
+        handleRemoteShareEnded('共享方已结束共享');
+        return;
+      }
 
       // 处理特定的 PeerJS 错误，尝试重连
       if (!isManualStopRef.current && (err.type === 'network' || err.type === 'peer-unavailable' || err.type === 'disconnected')) {
@@ -826,7 +924,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       setIsConnecting(false);
     });
-  }, [onNotification, createDummyStream, stopViewing]);
+  }, [onNotification, createDummyStream, stopViewing, handleRemoteShareEnded]);
 
 
   const cancelConnecting = useCallback(() => {
@@ -960,6 +1058,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     };
   }, []);
 
+  useEffect(() => {
+    const notifyShareEndOnPageExit = () => {
+      if (!isSharing) return;
+      broadcastShareEnded('window_closed');
+    };
+    window.addEventListener('pagehide', notifyShareEndOnPageExit);
+    window.addEventListener('beforeunload', notifyShareEndOnPageExit);
+    return () => {
+      window.removeEventListener('pagehide', notifyShareEndOnPageExit);
+      window.removeEventListener('beforeunload', notifyShareEndOnPageExit);
+    };
+  }, [isSharing, broadcastShareEnded]);
+
 
   const startScreenShare = async () => {
     setError(null);
@@ -973,22 +1084,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     try {
 
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: 'always',
-          displaySurface: 'monitor',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 60 }
-        } as MediaTrackConstraints,
-        audio: true,
-      });
+      const stream = await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints());
 
       // 屏幕共享以文字和细节为主，优先保证清晰度
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack && 'contentHint' in videoTrack) {
         (videoTrack as any).contentHint = 'detail';
       }
+      await applyLocalTrackConstraints(stream, qualityLevelRef.current);
 
 
 
@@ -1030,21 +1133,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const changeScreenSource = async () => {
     try {
 
-      const newStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          cursor: 'always',
-          displaySurface: 'monitor',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 60 }
-        } as MediaTrackConstraints,
-        audio: true,
-      });
+      const newStream = await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints());
 
       const videoTrack = newStream.getVideoTracks()[0];
       if (videoTrack && 'contentHint' in videoTrack) {
         (videoTrack as any).contentHint = 'detail';
       }
+      await applyLocalTrackConstraints(newStream, qualityLevelRef.current);
 
 
       if (streamRef.current) {
@@ -1097,6 +1192,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
   const stopScreenShare = () => {
+    broadcastShareEnded('stopped');
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());

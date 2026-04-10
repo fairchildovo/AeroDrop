@@ -185,7 +185,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         {!isViewing && !isConnecting && (
           <>
             {isSharing && shareLink && (
-              <div className="mb-6 p-4 bg-brand-50 dark:bg-brand-900/20 border border-brand-200 dark:border-brand-800 rounded-2xl">
+              <div className="mb-6 p-4 bg-brand-50 dark:bg-brand-900/20 border border-slate-200 dark:border-slate-700 rounded-2xl">
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-2 text-center">
                   将此链接分享给观看者
                 </p>
