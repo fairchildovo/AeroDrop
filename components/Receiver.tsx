@@ -78,6 +78,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const [downloadSpeedBytes, setDownloadSpeedBytes] = useState(0);
   const [eta, setEta] = useState<string>('--');
   const [senderDeviceName, setSenderDeviceName] = useState<string>('');
+  const [connectingStage, setConnectingStage] = useState<'fetching_ice' | 'connecting_signaling' | 'connecting_peer' | 'waiting_response' | ''>('');
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -470,6 +471,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       cleanupLosingPeer(conn);
 
       markConnectionSuccess(connectTelemetryRef.current, { peerId: conn.peer });
+      setConnectingStage('waiting_response');
       conn.send({
         type: 'DEVICE_INFO',
         payload: {
@@ -891,6 +893,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (!code || code.length !== 4) return;
     connectTelemetryRef.current = createConnectionSession('receiver', { code });
     setState(TransferState.WAITING_FOR_PEER);
+    setConnectingStage('fetching_ice');
     setErrorMsg('');
     retryCountRef.current = 0;
     happyEyeballsWonRef.current = false;
@@ -901,6 +904,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
     const iceConfig = await getIceConfig();
     markIceConfigFetched(connectTelemetryRef.current);
+    setConnectingStage('connecting_signaling');
     hasTurnRef.current = iceConfig.hasTurn;
     p2pTimeoutRetryCountRef.current = 0;
 
@@ -953,6 +957,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       peer.on('open', () => {
         if (happyEyeballsWonRef.current) { peer.destroy(); return; }
         markSignalingOpen(connectTelemetryRef.current);
+        setConnectingStage('connecting_peer');
         markSessionEvent(connectTelemetryRef.current, 'peer_open', { iceTransportPolicy: policy });
         const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
         if (policy === 'relay') {
@@ -1069,6 +1074,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setCode('');
         setState(TransferState.IDLE);
         setErrorMsg('');
+        setConnectingStage('');
         setProgress(0);
         setDownloadSpeedBytes(0);
         setSenderDeviceName('');
@@ -1158,7 +1164,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       {state === TransferState.WAITING_FOR_PEER && (
          <div className="flex flex-col items-center py-10 animate-pop-in">
            <Loader2 size={40} className="animate-spin text-brand-500 mb-4" />
-           <p className="text-slate-600 dark:text-slate-300 font-medium">正在连接发送方...</p>
+           <p className="text-slate-600 dark:text-slate-300 font-medium">
+             {connectingStage === 'fetching_ice' && '正在获取网络配置...'}
+             {connectingStage === 'connecting_signaling' && '正在连接信号服务器...'}
+             {connectingStage === 'connecting_peer' && '正在建立 P2P 通道...'}
+             {connectingStage === 'waiting_response' && '正在等待发送方响应...'}
+             {!connectingStage && '正在连接发送方...'}
+           </p>
+           <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+             {connectingStage === 'fetching_ice' && '获取 STUN/TURN 服务器信息'}
+             {connectingStage === 'connecting_signaling' && '连接 PeerJS 信令服务'}
+             {connectingStage === 'connecting_peer' && '通过 WebRTC 建立端到端连接'}
+             {connectingStage === 'waiting_response' && '已连接，等待发送方确认'}
+           </p>
            <button onClick={reset} className="mt-8 px-6 py-2 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 rounded-full text-sm hover:bg-slate-50 dark:hover:bg-slate-600 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm active:scale-95">取消</button>
          </div>
       )}
