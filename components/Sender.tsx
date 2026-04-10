@@ -103,6 +103,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerSyncStartAtRef = useRef<Map<string, number>>(new Map());
   const peerSyncBaseBytesRef = useRef<Map<string, number>>(new Map());
   const peerTransferEpochRef = useRef<Map<string, number>>(new Map());
+  const pendingSendPeersRef = useRef<Set<string>>(new Set());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -676,6 +677,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerSyncStartAtRef.current.clear();
     peerSyncBaseBytesRef.current.clear();
     peerTransferEpochRef.current.clear();
+    pendingSendPeersRef.current.clear();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -752,6 +754,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       peerSyncStartAtRef.current.delete(conn.peer);
       peerSyncBaseBytesRef.current.delete(conn.peer);
       peerTransferEpochRef.current.delete(conn.peer);
+      pendingSendPeersRef.current.delete(conn.peer);
       activeSendingPeersRef.current.delete(conn.peer);
       ghostCandidateSinceRef.current.delete(conn.peer);
       peerConnectionTypeRef.current.delete(conn.peer);
@@ -768,7 +771,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       updateConnectionStatusUI();
 
       if (isDestroyingRef.current) return;
-      if (activeSendingPeersRef.current.size === 0) {
+      if (activeSendingPeersRef.current.size === 0 && pendingSendPeersRef.current.size === 0) {
           if (activeConnections.current.size > 0) {
               setState(TransferState.PEER_CONNECTED);
               return;
@@ -847,8 +850,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       const nextEpoch = (peerTransferEpochRef.current.get(conn.peer) || 0) + 1;
       peerTransferEpochRef.current.set(conn.peer, nextEpoch);
 
-      // Do NOT add to activeSendingPeersRef here — sendFileSequence adds itself
-      // after the wait-loop confirms the previous sequence has exited.
+      // Track as pending so cleanupConnectionState knows a transfer is
+      // scheduled even before sendFileSequence starts executing.
+      pendingSendPeersRef.current.add(conn.peer);
       setTimeout(() => {
           sendFileSequence(conn, startFileIndex, startByteOffset, nextEpoch);
       }, 100);
@@ -1045,6 +1049,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         if (!conn.open) return;
     }
 
+    // Transition from pending → active now that the previous sequence exited.
+    pendingSendPeersRef.current.delete(conn.peer);
     activeSendingPeersRef.current.add(conn.peer);
 
     const currentSessionId = transferSessionId.current;
@@ -1307,6 +1313,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     });
     activeConnections.current.clear();
     activeSendingPeersRef.current.clear();
+    pendingSendPeersRef.current.clear();
     peerAwaitingFinalizeAckRef.current.clear();
     peerHasProgressSyncRef.current.clear();
     peerTransferredBytesRef.current.clear();
