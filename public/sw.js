@@ -111,7 +111,8 @@ self.onfetch = event => {
   }
 
   // PWA Caching Strategy: Network First, fallback to Cache
-  if (event.request.method !== 'GET' || !url.startsWith('http')) {
+  // Skip caching for API endpoints (may contain sensitive data like TURN credentials)
+  if (event.request.method !== 'GET' || !url.startsWith('http') || new URL(url).pathname.startsWith('/api/')) {
       return;
   }
 
