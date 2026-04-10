@@ -453,6 +453,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('close', () => {
+       // Ignore close events from the losing happy-eyeballs connection.
+       if (happyEyeballsWonRef.current && connRef.current !== conn) return;
        const currentState = stateRef.current;
        if (currentState === TransferState.WAITING_FOR_PEER && scheduleFastReconnect()) {
          return;
@@ -472,6 +474,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('error', () => {
+      // Ignore error events from the losing happy-eyeballs connection.
+      if (happyEyeballsWonRef.current && connRef.current !== conn) return;
       if (scheduleFastReconnect()) {
         return;
       }
@@ -669,14 +673,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       peer.on('error', (err) => {
         if (happyEyeballsWonRef.current) return;
         if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
+          // Skip peer-unavailable retries for the background relay attempt
+          // to avoid burning the shared retry budget and routing through the wrong peer.
+          if (policy === 'relay') return;
           retryCountRef.current++;
           const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
           markConnectionRetry(connectTelemetryRef.current, 'peer_unavailable');
           window.setTimeout(() => {
             if (happyEyeballsWonRef.current) return;
-            if (peerRef.current && !peerRef.current.destroyed) {
+            if (peer && !peer.destroyed) {
               startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
-              const conn = peerRef.current.connect(`aerodrop-${code}`, { serialization: 'binary' });
+              const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
               setupConnListeners(conn);
             }
           }, delay);
