@@ -13,38 +13,61 @@ type IceConfigResponse = {
   hasTurn?: boolean;
 };
 
-export const getIceConfig = async (): Promise<{
+export type IceConfigResult = {
   iceServers: IceServerConfig[];
   secure: boolean;
   iceCandidatePoolSize: number;
   iceTransportPolicy: RTCIceTransportPolicy;
   hasTurn: boolean;
-}> => {
-  const fallback = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' }
-    ],
-    secure: true,
-    iceCandidatePoolSize: 20,
-    iceTransportPolicy: 'all' as RTCIceTransportPolicy,
-    hasTurn: false
-  };
+};
 
+const ICE_CACHE_TTL_MS = 30_000;
+let cachedConfig: IceConfigResult | null = null;
+let cachedAt = 0;
+let inflightRequest: Promise<IceConfigResult> | null = null;
+
+export const getIceConfig = async (): Promise<IceConfigResult> => {
+  const now = Date.now();
+  if (cachedConfig && now - cachedAt < ICE_CACHE_TTL_MS) {
+    return cachedConfig;
+  }
+
+  if (inflightRequest) {
+    return inflightRequest;
+  }
+
+  inflightRequest = fetchIceConfig().finally(() => {
+    inflightRequest = null;
+  });
+  return inflightRequest;
+};
+
+const fallbackConfig: IceConfigResult = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ],
+  secure: true,
+  iceCandidatePoolSize: 20,
+  iceTransportPolicy: 'all' as RTCIceTransportPolicy,
+  hasTurn: false
+};
+
+const fetchIceConfig = async (): Promise<IceConfigResult> => {
   try {
     const res = await fetch('/api/ice-config', { cache: 'no-store' });
-    if (!res.ok) return fallback;
+    if (!res.ok) return fallbackConfig;
     const data = (await res.json()) as IceConfigResponse;
 
     if (!Array.isArray(data.iceServers) || data.iceServers.length === 0) {
-      return fallback;
+      return fallbackConfig;
     }
 
-    return {
+    const result: IceConfigResult = {
       iceServers: data.iceServers,
-      secure: typeof data.secure === 'boolean' ? data.secure : fallback.secure,
-      iceCandidatePoolSize: typeof data.iceCandidatePoolSize === 'number' ? data.iceCandidatePoolSize : fallback.iceCandidatePoolSize,
+      secure: typeof data.secure === 'boolean' ? data.secure : fallbackConfig.secure,
+      iceCandidatePoolSize: typeof data.iceCandidatePoolSize === 'number' ? data.iceCandidatePoolSize : fallbackConfig.iceCandidatePoolSize,
       iceTransportPolicy: data.iceTransportPolicy === 'relay' ? 'relay' : 'all',
       hasTurn: typeof data.hasTurn === 'boolean'
         ? data.hasTurn
@@ -53,18 +76,17 @@ export const getIceConfig = async (): Promise<{
             return urls.some(url => url.startsWith('turn:') || url.startsWith('turns:'));
           })
     };
+    cachedConfig = result;
+    cachedAt = Date.now();
+    return result;
   } catch {
-    return fallback;
+    return fallbackConfig;
   }
+};
 
-  /*
-   * Server endpoint format:
-   * {
-   *   "iceServers": [{ "urls": "...", "username": "...", "credential": "..." }],
-   *   "secure": true,
-   *   "iceCandidatePoolSize": 10
-   * }
-   */
+/** Prefetch ICE config so subsequent getIceConfig() calls return instantly. */
+export const prefetchIceConfig = (): void => {
+  getIceConfig().catch(() => {});
 };
 
 /*

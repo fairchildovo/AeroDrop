@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload } from '../types';
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
-import { getIceConfig } from '../services/stunService';
+import { getIceConfig, prefetchIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
 import {
   attachIceRouteToSession,
@@ -11,6 +11,8 @@ import {
   createConnectionSession,
   markConnectionFailure,
   markConnectionSuccess,
+  markIceConfigFetched,
+  markSignalingOpen,
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
@@ -87,7 +89,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const localDeviceNameRef = useRef<string>(deviceName);
   const peerNamesRef = useRef<Record<string, string>>(peerNames);
   const GHOST_SWEEP_INTERVAL_MS = 4000;
-  const GHOST_GRACE_MS = 4000;
+  const GHOST_GRACE_MS = 10000;
+  const lastStatsPollIndexRef = useRef(0);
 
   const totalProgressRef = useRef(0);
   useEffect(() => {
@@ -168,7 +171,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               now - lastConnectionStatsPollRef.current >= 3000
             ) {
               lastConnectionStatsPollRef.current = now;
-              activeConnections.current.forEach(conn => updateConnectionStats(conn));
+              // Stagger: poll one connection per tick instead of all at once.
+              const conns = Array.from(activeConnections.current);
+              if (conns.length > 0) {
+                const idx = lastStatsPollIndexRef.current % conns.length;
+                lastStatsPollIndexRef.current = idx + 1;
+                updateConnectionStats(conns[idx]);
+              }
             }
         }, 800);
     }
@@ -297,6 +306,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   useEffect(() => {
     isMountedRef.current = true;
+    prefetchIceConfig();
     return () => {
       isMountedRef.current = false;
       stopSharing();
@@ -519,6 +529,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const metadataWithConstraints: FileMetadata = { ...metadata, constraints: { expiresAt } };
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
+    markIceConfigFetched(shareTelemetryRef.current);
     const finalCode = customCodeInput.length === 4 ? customCodeInput : (() => {
       const arr = new Uint32Array(1);
       crypto.getRandomValues(arr);
@@ -596,6 +607,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   const firstSeen = ghostCandidateSinceRef.current.get(conn.peer) ?? now;
                   ghostCandidateSinceRef.current.set(conn.peer, firstSeen);
                   if (now - firstSeen >= GHOST_GRACE_MS) {
+                      markSessionEvent(shareTelemetryRef.current, 'ghost_sweep_kill', {
+                        peer: conn.peer,
+                        pcState: pcState ?? 'unknown',
+                        dcState: dcState ?? 'unknown',
+                        graceDurationMs: now - firstSeen,
+                      });
                       try { if (conn.open) conn.close(); } catch {}
                       cleanupConnectionState(conn);
                   }
@@ -624,6 +641,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const setupPeerListeners = (peer: Peer, code: string, sessionMetadata: FileMetadata) => {
       peerRef.current = peer;
       peer.on('open', () => {
+          markSignalingOpen(shareTelemetryRef.current);
           markConnectionSuccess(shareTelemetryRef.current, { code });
           setTransferCode(code);
           setState(TransferState.WAITING_FOR_PEER);
@@ -734,25 +752,30 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
 
-    const route = await updateConnectionStats(conn);
-
-    const CHUNK_SIZE = route.isLan
-      ? TRANSFER_CONFIG.CHUNK_SIZE_LAN
-      : route.isRelay
-        ? TRANSFER_CONFIG.CHUNK_SIZE_RELAY
-        : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
+    // Default to WAN parameters so transfer starts immediately; adjust async.
+    let CHUNK_SIZE = TRANSFER_CONFIG.CHUNK_SIZE_WAN;
     const READ_BUFFER_SIZE = TRANSFER_CONFIG.READ_BUFFER_SIZE;
+    let HIGH_WATER_MARK = FLOW_CONTROL.HIGH_WATER_MARK_WAN;
+    let LOW_WATER_MARK = FLOW_CONTROL.LOW_WATER_MARK_WAN;
 
-    const HIGH_WATER_MARK = route.isLan
-      ? FLOW_CONTROL.HIGH_WATER_MARK_LAN
-      : route.isRelay
-        ? FLOW_CONTROL.HIGH_WATER_MARK_RELAY
-        : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
-    const LOW_WATER_MARK = route.isLan
-      ? FLOW_CONTROL.LOW_WATER_MARK_LAN
-      : route.isRelay
-        ? FLOW_CONTROL.LOW_WATER_MARK_RELAY
-        : FLOW_CONTROL.LOW_WATER_MARK_WAN;
+    // Fire-and-forget: detect route and upgrade parameters in the background.
+    updateConnectionStats(conn).then((route) => {
+      CHUNK_SIZE = route.isLan
+        ? TRANSFER_CONFIG.CHUNK_SIZE_LAN
+        : route.isRelay
+          ? TRANSFER_CONFIG.CHUNK_SIZE_RELAY
+          : TRANSFER_CONFIG.CHUNK_SIZE_WAN;
+      HIGH_WATER_MARK = route.isLan
+        ? FLOW_CONTROL.HIGH_WATER_MARK_LAN
+        : route.isRelay
+          ? FLOW_CONTROL.HIGH_WATER_MARK_RELAY
+          : FLOW_CONTROL.HIGH_WATER_MARK_WAN;
+      LOW_WATER_MARK = route.isLan
+        ? FLOW_CONTROL.LOW_WATER_MARK_LAN
+        : route.isRelay
+          ? FLOW_CONTROL.LOW_WATER_MARK_RELAY
+          : FLOW_CONTROL.LOW_WATER_MARK_WAN;
+    }).catch(() => {});
 
     let totalBytesSent = 0;
     let transferSucceeded = false;
