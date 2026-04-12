@@ -51,6 +51,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const IOS_IDB_DB_NAME = 'aerodrop-receiver-buffer-v1';
   const IOS_IDB_STORE = 'fileChunks';
   const IOS_IDB_STALE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+  const IOS_IDB_PRUNE_LOCK_KEY = 'aerodrop_idb_prune_lock_v1';
+  const IOS_IDB_PRUNE_LOCK_TTL_MS = 45 * 1000;
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
@@ -142,6 +144,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const indexedDbBufferedFileIndexRef = useRef<number | null>(null);
   const indexedDbNotifiedRef = useRef<boolean>(false);
   const indexedDbCleanupStartedRef = useRef<boolean>(false);
+  const indexedDbCleanupLockIdRef = useRef<string>(
+    `idb-prune-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  );
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -241,9 +246,50 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     return indexedDbOpenPromiseRef.current;
   };
 
+  const acquireIndexedDbPruneLock = (): boolean => {
+    try {
+      const now = Date.now();
+      const owner = indexedDbCleanupLockIdRef.current;
+      const currentRaw = window.localStorage.getItem(IOS_IDB_PRUNE_LOCK_KEY);
+      if (currentRaw) {
+        const current = JSON.parse(currentRaw) as { owner?: string; expiresAt?: number };
+        const currentOwner = typeof current?.owner === 'string' ? current.owner : '';
+        const expiresAt = typeof current?.expiresAt === 'number' ? current.expiresAt : 0;
+        if (currentOwner && currentOwner !== owner && expiresAt > now) {
+          return false;
+        }
+      }
+
+      const next = { owner, expiresAt: now + IOS_IDB_PRUNE_LOCK_TTL_MS };
+      window.localStorage.setItem(IOS_IDB_PRUNE_LOCK_KEY, JSON.stringify(next));
+      const confirmRaw = window.localStorage.getItem(IOS_IDB_PRUNE_LOCK_KEY);
+      if (!confirmRaw) return false;
+      const confirm = JSON.parse(confirmRaw) as { owner?: string };
+      return confirm.owner === owner;
+    } catch {
+      // If localStorage is unavailable (privacy mode), fall back to single-tab guard.
+      return true;
+    }
+  };
+
+  const releaseIndexedDbPruneLock = () => {
+    try {
+      const owner = indexedDbCleanupLockIdRef.current;
+      const currentRaw = window.localStorage.getItem(IOS_IDB_PRUNE_LOCK_KEY);
+      if (!currentRaw) return;
+      const current = JSON.parse(currentRaw) as { owner?: string };
+      if (current?.owner === owner) {
+        window.localStorage.removeItem(IOS_IDB_PRUNE_LOCK_KEY);
+      }
+    } catch {
+      // Ignore lock release errors.
+    }
+  };
+
   const pruneStaleIndexedDbSessions = async (): Promise<void> => {
     if (!isIndexedDbSupported()) return;
     if (indexedDbCleanupStartedRef.current) return;
+    if (!acquireIndexedDbPruneLock()) return;
     indexedDbCleanupStartedRef.current = true;
 
     try {
@@ -306,6 +352,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       });
     } catch (err) {
       console.warn('IndexedDB stale session cleanup failed:', err);
+    } finally {
+      releaseIndexedDbPruneLock();
     }
   };
 
