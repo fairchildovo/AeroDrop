@@ -23,6 +23,10 @@ import {
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
+import { createResumeRequestMessage, normalizeFileRequest } from '../services/protocol';
+import { decidePersistenceStrategy } from '../services/receive/persistenceStrategy';
+import { useTransferStore } from '../stores/transferStore';
+import { createReceiverSessionService } from '../services/receiverSessionService';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
 
 const sanitizeFileName = (name: string): string => {
@@ -41,6 +45,8 @@ interface ReceiverProps {
 }
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
+  const setReceiverSnapshot = useTransferStore((store) => store.setReceiverSnapshot);
+  const resetReceiverSnapshot = useTransferStore((store) => store.resetReceiverSnapshot);
   const INITIAL_TIMEOUT_MS = 8000;
   const RELAY_TIMEOUT_MS = 15000;
   const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
@@ -738,14 +744,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
 
       try {
-          conn.send({
-            type: 'RESUME_REQUEST',
-            payload: {
-              fileIndex,
-              byteOffset: 0,
-              silent: true
-            }
-          });
+          conn.send(createResumeRequestMessage(normalizeFileRequest({
+            fileIndex,
+            byteOffset: 0,
+            silent: true,
+          })));
       } catch {
           failTransferPersistence("自动修复请求发送失败，请重试。");
           return false;
@@ -933,11 +936,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         isTransferActiveRef.current = true;
         const { fileSize, fileIndex } = msg.payload;
         const fileName = sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`);
+        const usePreparedNativeWriter =
+          preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
+        const persistenceStrategy = decidePersistenceStrategy({
+          isIOS,
+          isSafari,
+          supportsNativeFs: usePreparedNativeWriter,
+          supportsStreamSaver: !!streamSaver,
+          supportsIndexedDb: isIndexedDbSupported(),
+          fileSize,
+          indexedDbThresholdBytes: IOS_IDB_BUFFER_THRESHOLD_BYTES,
+        });
 
-        const shouldUseIndexedDbBuffering =
-          (isIOS || isSafari) &&
-          fileSize >= IOS_IDB_BUFFER_THRESHOLD_BYTES &&
-          isIndexedDbSupported();
+        const shouldUseIndexedDbBuffering = persistenceStrategy === 'indexeddb-buffer';
         isIndexedDbBufferingRef.current = shouldUseIndexedDbBuffering;
 
         if (shouldUseIndexedDbBuffering && !indexedDbNotifiedRef.current && onNotification) {
@@ -953,8 +964,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         const resumingSameFile =
           currentFileIndexRef.current === fileIndex &&
           (chunksRef.current.length > 0 || hasIndexedDbBufferedData);
-        const usePreparedNativeWriter =
-          preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
 
         if (!resumingSameFile) {
             if (!usePreparedNativeWriter) {
@@ -984,9 +993,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                 isStreamingRef.current = true;
                 preparedNativeWriterFileIndexRef.current = null;
             } else if (!nativeWriterRef.current) {
-                if (isIndexedDbBufferingRef.current || isIOS || isSafari) {
+                if (persistenceStrategy === 'indexeddb-buffer' || persistenceStrategy === 'memory-blob') {
                     isStreamingRef.current = false;
-                } else if (streamSaver) {
+                } else if (persistenceStrategy === 'stream-saver') {
                      try {
                          const streamPathname =
                            `${STREAMSAVER_PATH_PREFIX}${Date.now().toString(36)}-` +
@@ -1540,9 +1549,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           preparedNativeWriterFileIndexRef.current = null;
 
           if (completedFileIndicesRef.current.has(currentIdx)) {
-              connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx + 1, byteOffset: 0 } });
+              connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
+                fileIndex: currentIdx + 1,
+                byteOffset: 0,
+              })));
           } else {
-              connRef.current.send({ type: 'RESUME_REQUEST', payload: { fileIndex: currentIdx, byteOffset } });
+              connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
+                fileIndex: currentIdx,
+                byteOffset,
+              })));
           }
           setState(TransferState.TRANSFERRING);
       } else {
@@ -1574,6 +1589,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setSenderDeviceName('');
         indexedDbNotifiedRef.current = false;
         resetStateForNewTransfer();
+        resetReceiverSnapshot();
     });
   };
 
@@ -1623,6 +1639,61 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const overallRemainingBytes = Math.max(0, totalBytes - overallTransferredBytes);
   const overallEta = downloadSpeedBytes > 0 ? formatEta(overallRemainingBytes / downloadSpeedBytes) : '--';
 
+  useEffect(() => {
+    setReceiverSnapshot({
+      state,
+      errorMsg,
+      code,
+      connectingStage,
+      metadata,
+      senderDeviceName,
+      canResume,
+      isStreaming: isStreamingRef.current,
+      progress,
+      downloadSpeed,
+      downloadSpeedBytes,
+      eta,
+      overallTransferredBytes,
+      totalBytes,
+      overallEta,
+      currentFileIndex: currentFileIndexRef.current,
+      totalFiles,
+      currentFileName,
+    });
+  }, [
+    canResume,
+    code,
+    connectingStage,
+    currentFileName,
+    downloadSpeed,
+    downloadSpeedBytes,
+    errorMsg,
+    eta,
+    metadata,
+    overallEta,
+    overallTransferredBytes,
+    progress,
+    senderDeviceName,
+    setReceiverSnapshot,
+    state,
+    totalBytes,
+    totalFiles,
+  ]);
+
+  const receiverSessionService = createReceiverSessionService({
+    connect: async (nextCode: string) => {
+      if (nextCode !== code) {
+        setCode(nextCode);
+        return;
+      }
+      await handleConnect();
+    },
+    acceptTransfer,
+    resumeTransfer,
+    resetReceiverSession: reset,
+    getReceiverSessionSnapshot: () => useTransferStore.getState().receiver,
+  });
+
   return (
     <ReceiverUI
       state={state}
@@ -1635,15 +1706,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       onBackspace={handleBackspace}
       onClear={handleClear}
       connectingStage={connectingStage}
-      onReset={reset}
+      onReset={receiverSessionService.resetReceiverSession}
       metadata={metadata}
       senderDeviceName={senderDeviceName}
       isMultiFile={isMultiFile}
       primaryFileName={primaryFile?.name}
       canResume={canResume}
       isStreaming={isStreamingRef.current}
-      onResumeTransfer={resumeTransfer}
-      onAcceptTransfer={acceptTransfer}
+      onResumeTransfer={receiverSessionService.resumeTransfer}
+      onAcceptTransfer={receiverSessionService.acceptTransfer}
       progress={progress}
       downloadSpeed={downloadSpeed}
       eta={eta}

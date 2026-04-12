@@ -1,12 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type Peer from 'peerjs';
 import type { DataConnection } from 'peerjs';
-import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload, P2P_PROTOCOL_VERSION } from '../types';
+import {
+  TransferState,
+  FileMetadata,
+  P2PMessage,
+  FileStartPayload,
+  FileCompletePayload,
+  P2P_PROTOCOL_VERSION,
+  type ConnectionTypeLabel,
+  type PeerConnectionSnapshot,
+} from '../types';
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
 import { createCrc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
-import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
+import { TRANSFER_CONFIG } from '../constants/transfer'; 
 import {
   attachIceRouteToSession,
   collectIceRouteWithRetry,
@@ -19,6 +28,16 @@ import {
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
+import { normalizeTransferMessage } from '../services/protocol';
+import {
+  deriveAdaptiveFlow,
+  isPrivateIP,
+  type AdaptiveFlowProfile,
+  type ConnectionMetrics,
+  type ConnectionRoute,
+} from '../services/transfer/adaptiveFlow';
+import { useTransferStore } from '../stores/transferStore';
+import { createSenderSessionService } from '../services/senderSessionService';
 import { SenderUI } from './sender/SenderUI';
 
 interface SenderProps {
@@ -29,34 +48,16 @@ interface SenderProps {
 type PeerTransferStat = {
   peerId: string;
   deviceName: string;
-  connectionType: '直连' | '点对点' | '中继（速度会变慢）' | '检测中';
+  connectionType: ConnectionTypeLabel;
   speed: string;
   progress: number;
   status: 'waiting' | 'transferring' | 'completed';
 };
 
-type ConnectionRoute = {
-  isLan: boolean;
-  isRelay: boolean;
-  protocol: string;
-};
-
-type ConnectionMetrics = {
-  rttMs: number | null;
-  lossPct: number | null;
-  availableOutgoingBitrate: number | null;
-};
-
-type AdaptiveFlowProfile = {
-  chunkSize: number;
-  highWaterMark: number;
-  lowWaterMark: number;
-  lastUpdatedAt: number;
-  metrics: ConnectionMetrics;
-};
-
 export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
   type PreparingStage = 'fetching_ice' | 'connecting_signaling';
+  const setSenderSnapshot = useTransferStore((store) => store.setSenderSnapshot);
+  const resetSenderSnapshot = useTransferStore((store) => store.resetSenderSnapshot);
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [fileList, setFileList] = useState<File[]>([]);
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
@@ -252,105 +253,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     }
   };
 
-  const isPrivateIP = (ip: string) => {
-      if (!ip) return false;
-      const cleanIp = ip.replace(/^\[|\](:[0-9]+)?$/g, '').split(':')[0];
-
-      if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.toLowerCase() === 'localhost') return true;
-
-      if (cleanIp.toLowerCase().startsWith('fe80:')) return true;
-
-      const parts = cleanIp.split('.');
-      if (parts.length === 4) {
-          const p0 = parseInt(parts[0], 10);
-          const p1 = parseInt(parts[1], 10);
-
-          if (p0 === 10) return true; 
-          if (p0 === 172 && p1 >= 16 && p1 <= 31) return true; 
-          if (p0 === 192 && p1 === 168) return true; 
-      }
-
-      return false;
-  };
-
   const peerIsLAN = useRef<Map<string, boolean>>(new Map());
   const peerAdaptiveFlowRef = useRef<Map<string, AdaptiveFlowProfile>>(new Map());
-
-  const toStep = (value: number, step = 16 * 1024) => {
-    return Math.max(step, Math.round(value / step) * step);
-  };
-
-  const getBaseFlowByRoute = (route: ConnectionRoute) => {
-    if (route.isLan) {
-      return {
-        chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_LAN,
-        highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_LAN,
-        lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_LAN,
-      };
-    }
-    if (route.isRelay) {
-      return {
-        chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_RELAY,
-        highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_RELAY,
-        lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_RELAY,
-      };
-    }
-    return {
-      chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_WAN,
-      highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_WAN,
-      lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_WAN,
-    };
-  };
-
-  const deriveAdaptiveFlow = (route: ConnectionRoute, metrics: ConnectionMetrics) => {
-    const base = getBaseFlowByRoute(route);
-    let chunkSize = base.chunkSize;
-    let highWaterMark = base.highWaterMark;
-    let lowWaterMark = base.lowWaterMark;
-
-    const rtt = metrics.rttMs ?? 0;
-    const loss = metrics.lossPct ?? 0;
-    const bitrate = metrics.availableOutgoingBitrate ?? 0;
-
-    if (route.isLan) {
-      if (loss > 1 || rtt > 80) {
-        chunkSize = Math.max(128 * 1024, Math.floor(base.chunkSize / 2));
-        highWaterMark = Math.max(8 * 1024 * 1024, Math.floor(base.highWaterMark * 0.75));
-        lowWaterMark = Math.max(2 * 1024 * 1024, Math.floor(base.lowWaterMark * 0.75));
-      } else if (loss < 0.2 && rtt > 0 && rtt < 25) {
-        highWaterMark = Math.min(24 * 1024 * 1024, Math.floor(base.highWaterMark * 1.25));
-        lowWaterMark = Math.min(6 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.25));
-      }
-    } else if (route.isRelay) {
-      if (loss > 4 || rtt > 350 || (bitrate > 0 && bitrate < 8_000_000)) {
-        chunkSize = Math.max(32 * 1024, Math.floor(base.chunkSize / 2));
-        highWaterMark = Math.max(1 * 1024 * 1024, Math.floor(base.highWaterMark * 0.6));
-        lowWaterMark = Math.max(256 * 1024, Math.floor(base.lowWaterMark * 0.6));
-      } else if (loss < 1 && rtt > 0 && rtt < 120 && bitrate > 20_000_000) {
-        chunkSize = Math.min(128 * 1024, Math.floor(base.chunkSize * 1.5));
-        highWaterMark = Math.min(4 * 1024 * 1024, Math.floor(base.highWaterMark * 1.5));
-        lowWaterMark = Math.min(1 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.5));
-      }
-    } else {
-      if (loss > 3 || rtt > 260 || (bitrate > 0 && bitrate < 12_000_000)) {
-        chunkSize = Math.max(128 * 1024, Math.floor(base.chunkSize / 2));
-        highWaterMark = Math.max(4 * 1024 * 1024, Math.floor(base.highWaterMark * 0.6));
-        lowWaterMark = Math.max(1 * 1024 * 1024, Math.floor(base.lowWaterMark * 0.6));
-      } else if (loss < 0.5 && rtt > 0 && rtt < 90) {
-        highWaterMark = Math.min(16 * 1024 * 1024, Math.floor(base.highWaterMark * 1.5));
-        lowWaterMark = Math.min(4 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.5));
-      }
-    }
-
-    const finalHigh = toStep(highWaterMark);
-    const finalLow = toStep(Math.min(lowWaterMark, Math.floor(finalHigh * 0.5)));
-    const finalChunk = toStep(chunkSize, 4 * 1024);
-    return {
-      chunkSize: finalChunk,
-      highWaterMark: finalHigh,
-      lowWaterMark: finalLow,
-    };
-  };
 
   const updateAdaptiveFlow = (peerId: string, route: ConnectionRoute, metrics: ConnectionMetrics) => {
     const next = deriveAdaptiveFlow(route, metrics);
@@ -955,7 +859,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           });
           
           conn.on('data', (data: any) => {
-              const msg = data as P2PMessage;
+              const incoming = data as P2PMessage;
+              const msg = normalizeTransferMessage(incoming, TRANSFER_CONFIG.CHUNK_SIZE_WAN);
               if (msg.type === 'DEVICE_INFO') {
                   const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName : '';
                   updatePeerName(conn.peer, remoteName);
@@ -975,10 +880,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               } else if (msg.type === 'ACCEPT_TRANSFER') {
                   setState(TransferState.TRANSFERRING);
                   scheduleSendFileSequence(conn, 0, 0);
-              } else if (msg.type === 'RESUME_REQUEST') {
-                  const payload = msg.payload as ResumePayload;
-                  const legacyChunkIndex = typeof payload.chunkIndex === 'number' ? Math.max(0, payload.chunkIndex) : 0;
-                  const resumedByteOffset = typeof payload.byteOffset === 'number' ? Math.max(0, payload.byteOffset) : legacyChunkIndex * TRANSFER_CONFIG.CHUNK_SIZE_WAN;
+              } else if (msg.type === 'FILE_REQUEST') {
+                  const payload = msg.payload;
                   if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
                     activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
                   }
@@ -986,7 +889,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     onNotification(`检测到断点，正在从第 ${payload.fileIndex + 1} 个文件恢复...`, 'info');
                   }
                   setState(TransferState.TRANSFERRING);
-                  scheduleSendFileSequence(conn, payload.fileIndex, resumedByteOffset);
+                  scheduleSendFileSequence(conn, payload.fileIndex, payload.byteOffset);
               } else if (msg.type === 'TRANSFER_CANCELLED') {
                   const remoteName = peerNamesRef.current[conn.peer] || `设备 ${conn.peer.slice(0, 5)}...`;
                   onNotification(`${remoteName} 取消了下载`, 'info');
@@ -1097,9 +1000,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
     // Start with WAN profile, then auto-adapt by live RTT/loss/bitrate stats.
     const defaultFlow: AdaptiveFlowProfile = {
-      chunkSize: TRANSFER_CONFIG.CHUNK_SIZE_WAN,
-      highWaterMark: FLOW_CONTROL.HIGH_WATER_MARK_WAN,
-      lowWaterMark: FLOW_CONTROL.LOW_WATER_MARK_WAN,
+      ...deriveAdaptiveFlow(
+        { isLan: false, isRelay: false, protocol: 'udp' },
+        { rttMs: null, lossPct: null, availableOutgoingBitrate: null },
+      ),
       lastUpdatedAt: Date.now(),
       metrics: { rttMs: null, lossPct: null, availableOutgoingBitrate: null },
     };
@@ -1453,6 +1357,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setAvgSpeedBytes(0);
     fileListRef.current = [];
     if (timerRef.current) clearInterval(timerRef.current);
+    resetSenderSnapshot();
   };
 
   const handleCopyCode = async () => {
@@ -1507,6 +1412,66 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       }
   };
 
+  useEffect(() => {
+    const peers: PeerConnectionSnapshot[] = individualStats.map((peer) => ({
+      peerId: peer.peerId,
+      deviceName: peer.deviceName,
+      connectionType: peer.connectionType,
+      speed: peer.speed,
+      progress: peer.progress,
+      status: peer.status,
+    }));
+
+    setSenderSnapshot({
+      state,
+      errorMsg,
+      transferCode,
+      shareLink,
+      connectionStatus,
+      remainingTime,
+      totalProgress,
+      currentFileIndex,
+      currentSpeed,
+      avgSpeed,
+      currentSpeedBytes,
+      avgSpeedBytes,
+      activeTransfersCount: activeTransfersCount.current,
+      activeConnectionsCount: activeConnections.current.size,
+      totalBytes,
+      transferredBytes,
+      overallEta,
+      metadata,
+      peers,
+    });
+  }, [
+    avgSpeed,
+    avgSpeedBytes,
+    connectionStatus,
+    currentFileIndex,
+    currentSpeed,
+    currentSpeedBytes,
+    errorMsg,
+    individualStats,
+    metadata,
+    overallEta,
+    remainingTime,
+    setSenderSnapshot,
+    shareLink,
+    state,
+    totalBytes,
+    totalProgress,
+    transferCode,
+    transferredBytes,
+  ]);
+
+  const senderSessionService = createSenderSessionService({
+    startShare: startSharing,
+    stopShare: stopSharing,
+    copyShareCode: handleCopyCode,
+    copyShareLink: handleCopyLink,
+    getSenderSessionSnapshot: () => useTransferStore.getState().sender,
+  });
+
   return (
     <SenderUI
       state={state}
@@ -1516,20 +1481,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       metadata={metadata}
       showFileList={showFileList}
       onToggleFileList={() => setShowFileList((prev) => !prev)}
-      stopSharing={stopSharing}
+      stopSharing={senderSessionService.stopShare}
       expiryOption={expiryOption}
       setExpiryOption={setExpiryOption}
       customCodeInput={customCodeInput}
       setCustomCodeInput={setCustomCodeInput}
       errorMsg={errorMsg}
-      startSharing={startSharing}
+      startSharing={senderSessionService.startShare}
       preparingStage={preparingStage}
-      handleCopyCode={handleCopyCode}
+      handleCopyCode={senderSessionService.copyShareCode}
       copied={copied}
       transferCode={transferCode}
       linkCopied={linkCopied}
       shareLink={shareLink}
-      handleCopyLink={handleCopyLink}
+      handleCopyLink={senderSessionService.copyShareLink}
       remainingTime={remainingTime}
       connectionStatus={connectionStatus}
       individualStats={individualStats}

@@ -29,6 +29,69 @@ export interface FileMetadata {
   protocolVersion?: number;
 }
 
+export type ConnectionTypeLabel = '直连' | '点对点' | '中继（速度会变慢）' | '检测中';
+
+export type PeerTransferStatus = 'waiting' | 'transferring' | 'completed';
+
+export interface PeerConnectionSnapshot {
+  peerId: string;
+  deviceName: string;
+  connectionType: ConnectionTypeLabel;
+  speed: string;
+  progress: number;
+  status: PeerTransferStatus;
+}
+
+export interface TransferSessionState {
+  state: TransferState;
+  errorMsg: string;
+}
+
+export interface SenderSessionSnapshot extends TransferSessionState {
+  transferCode: string;
+  shareLink: string;
+  connectionStatus: string;
+  remainingTime: string;
+  totalProgress: number;
+  currentFileIndex: number;
+  currentSpeed: string;
+  avgSpeed: string;
+  currentSpeedBytes: number;
+  avgSpeedBytes: number;
+  activeTransfersCount: number;
+  activeConnectionsCount: number;
+  totalBytes: number;
+  transferredBytes: number;
+  overallEta: string;
+  metadata: FileMetadata | null;
+  peers: PeerConnectionSnapshot[];
+}
+
+export interface ReceiverSessionSnapshot extends TransferSessionState {
+  code: string;
+  connectingStage: 'fetching_ice' | 'connecting_signaling' | 'connecting_peer' | 'waiting_response' | '';
+  metadata: FileMetadata | null;
+  senderDeviceName: string;
+  canResume: boolean;
+  isStreaming: boolean;
+  progress: number;
+  downloadSpeed: string;
+  downloadSpeedBytes: number;
+  eta: string;
+  overallTransferredBytes: number;
+  totalBytes: number;
+  overallEta: string;
+  currentFileIndex: number;
+  totalFiles: number;
+  currentFileName: string;
+}
+
+export interface NormalizedFileRequest {
+  fileIndex: number;
+  byteOffset: number;
+  silent?: boolean;
+}
+
 export interface ChunkPayload {
   data: ArrayBuffer;
   index: number;
@@ -107,6 +170,10 @@ export type P2PMessage = {
       ? { type: K; payload?: undefined }
       : { type: K; payload: P2PMessageMap[K] }
 }[keyof P2PMessageMap];
+
+export type NormalizedTransferMessage =
+  | { type: 'FILE_REQUEST'; payload: NormalizedFileRequest }
+  | P2PMessage;
 
 export type TypedP2PMessage<T extends keyof P2PMessageMap> =
   P2PMessageMap[T] extends undefined
