@@ -18,15 +18,6 @@ export default defineConfig({
     target: 'esnext',
     minify: 'esbuild',
     cssCodeSplit: true,
-    chunkSizeWarningLimit: 1000,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
-          'peer-vendor': ['peerjs'],
-          'ui-vendor': ['lucide-react']
-        }
-      }
-    }
+    chunkSizeWarningLimit: 1000
   }
 });

@@ -1,13 +1,85 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Sender } from './components/Sender';
-import { Receiver } from './components/Receiver';
+import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Share, DownloadCloud, Bell, Monitor, Package, ShieldAlert, X } from 'lucide-react';
-import { ScreenShare } from './components/ScreenShare';
 import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
+
+type Mode = 'send' | 'receive' | 'screen';
+
+type InitialRouteState = {
+  code: string;
+  hadDeepLink: boolean;
+  mode: Mode;
+  viewId: string;
+};
+
+type IdleCapableWindow = Window & {
+  cancelIdleCallback?: (handle: number) => void;
+  requestIdleCallback?: (
+    callback: IdleRequestCallback,
+    options?: IdleRequestOptions
+  ) => number;
+};
+
+const loadSender = () => import('./components/Sender').then((mod) => ({ default: mod.Sender }));
+const loadReceiver = () => import('./components/Receiver').then((mod) => ({ default: mod.Receiver }));
+const loadScreenShare = () => import('./components/ScreenShare').then((mod) => ({ default: mod.ScreenShare }));
+
+const Sender = lazy(loadSender);
+const Receiver = lazy(loadReceiver);
+const ScreenShare = lazy(loadScreenShare);
+
+const getInitialRouteState = (): InitialRouteState => {
+  if (typeof window === 'undefined') {
+    return { mode: 'send', code: '', viewId: '', hadDeepLink: false };
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code') ?? '';
+  const viewId = params.get('view') ?? '';
+
+  if (code) {
+    return { mode: 'receive', code, viewId: '', hadDeepLink: true };
+  }
+
+  if (viewId) {
+    return { mode: 'screen', code: '', viewId, hadDeepLink: true };
+  }
+
+  return { mode: 'send', code: '', viewId: '', hadDeepLink: false };
+};
+
+const scheduleIdleTask = (callback: () => void, timeout = 2000): (() => void) => {
+  if (typeof window === 'undefined') {
+    callback();
+    return () => {};
+  }
+
+  const idleWindow = window as IdleCapableWindow;
+  if (typeof idleWindow.requestIdleCallback === 'function') {
+    const handle = idleWindow.requestIdleCallback(() => callback(), { timeout });
+    return () => idleWindow.cancelIdleCallback?.(handle);
+  }
+
+  const handle = window.setTimeout(callback, Math.min(timeout, 1500));
+  return () => window.clearTimeout(handle);
+};
+
+const preloadModePanel = (mode: Mode) => {
+  if (mode === 'send') {
+    void loadSender();
+  } else if (mode === 'receive') {
+    void loadReceiver();
+  } else {
+    void loadScreenShare();
+  }
+
+  void import('./services/peerRuntime').then(({ preloadPeerRuntime }) => {
+    preloadPeerRuntime();
+  });
+};
 
 interface NetworkCheckResponse {
   isRisk: boolean;
@@ -20,16 +92,17 @@ interface NetworkCheckResponse {
 const RISK_BANNER_DISMISS_UNTIL_KEY = 'aerodrop-risk-banner-dismiss-until';
 
 const App: React.FC = () => {
-  const [mode, setMode] = useState<'send' | 'receive' | 'screen'>('send');
+  const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
+  const [mode, setMode] = useState<Mode>(initialRoute.mode);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [initialCode, setInitialCode] = useState<string>('');
-  const [initialViewId, setInitialViewId] = useState<string>('');
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
   const [swUpdateReady, setSwUpdateReady] = useState(false);
   const [isApplyingSwUpdate, setIsApplyingSwUpdate] = useState(false);
   const [deviceName] = useState<string>(() => getInitialDeviceName());
   const swUpdateReloadTimerRef = useRef<number | null>(null);
+  const initialCode = initialRoute.code;
+  const initialViewId = initialRoute.viewId;
 
   const isRiskBannerDismissed = () => {
     try {
@@ -172,11 +245,17 @@ const App: React.FC = () => {
         console.error('Failed to check network status:', error);
       }
     };
-    checkNetwork();
+
+    const cancelIdleTask = scheduleIdleTask(() => {
+      void checkNetwork();
+    }, 2500);
+
+    return cancelIdleTask;
   }, []);
 
   useEffect(() => {
     let isUnmounted = false;
+    let timer: number | null = null;
 
     const sendHeartbeat = async () => {
       try {
@@ -201,32 +280,26 @@ const App: React.FC = () => {
       }
     };
 
-    sendHeartbeat();
-    const timer = window.setInterval(sendHeartbeat, 30_000);
+    const cancelIdleTask = scheduleIdleTask(() => {
+      if (isUnmounted) return;
+      void sendHeartbeat();
+      timer = window.setInterval(sendHeartbeat, 30_000);
+    }, 4000);
 
     return () => {
       isUnmounted = true;
-      window.clearInterval(timer);
+      cancelIdleTask();
+      if (timer !== null) {
+        window.clearInterval(timer);
+      }
     };
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get('code');
-    const viewId = params.get('view');
-
-    if (code) {
-      setMode('receive');
-      setInitialCode(code);
-    } else if (viewId) {
-      setMode('screen');
-      setInitialViewId(viewId);
-    }
-
-    if (code || viewId) {
+    if (initialRoute.hadDeepLink) {
       window.history.replaceState({}, document.title, window.location.pathname);
     }
-  }, []);
+  }, [initialRoute.hadDeepLink]);
 
   useEffect(() => {
     // Touch/coarse-pointer devices don't benefit from mouse glow tracking.
@@ -271,6 +344,41 @@ const App: React.FC = () => {
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 4000);
+  };
+
+  const renderLoadingPanel = () => (
+    <div className="block animate-flip-in h-full transform-style-3d">
+      <div className="min-h-[420px] rounded-[2rem] border border-slate-200/80 bg-white/85 shadow-[0_20px_60px_rgba(15,23,42,0.08)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/90 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-slate-500 dark:text-slate-400">
+          <div className="h-10 w-10 rounded-full border-2 border-brand-200 border-t-brand-600 animate-spin" />
+          <span className="text-sm font-medium">正在加载功能模块...</span>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderModePanel = () => {
+    if (mode === 'send') {
+      return (
+        <div className="block animate-flip-in h-full transform-style-3d">
+          <Sender onNotification={addNotification} deviceName={deviceName} />
+        </div>
+      );
+    }
+
+    if (mode === 'receive') {
+      return (
+        <div className="block animate-flip-in h-full transform-style-3d">
+          <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
+        </div>
+      );
+    }
+
+    return (
+      <div className="block animate-flip-in h-full transform-style-3d">
+        <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
+      </div>
+    );
   };
 
   return (
@@ -405,6 +513,8 @@ const App: React.FC = () => {
 
               <button
                 onClick={() => setMode('send')}
+                onFocus={() => preloadModePanel('send')}
+                onMouseEnter={() => preloadModePanel('send')}
                 className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
                   mode === 'send'
                     ? 'text-white'
@@ -416,6 +526,8 @@ const App: React.FC = () => {
               </button>
               <button
                 onClick={() => setMode('receive')}
+                onFocus={() => preloadModePanel('receive')}
+                onMouseEnter={() => preloadModePanel('receive')}
                 className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
                   mode === 'receive'
                     ? 'text-white'
@@ -427,6 +539,8 @@ const App: React.FC = () => {
               </button>
               <button
                 onClick={() => setMode('screen')}
+                onFocus={() => preloadModePanel('screen')}
+                onMouseEnter={() => preloadModePanel('screen')}
                 className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
                   mode === 'screen'
                     ? 'text-white'
@@ -441,21 +555,9 @@ const App: React.FC = () => {
 
         <div className="w-full flex-1 flex flex-col perspective-[2000px]">
           <ErrorBoundary>
-            {mode === 'send' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
-                <Sender onNotification={addNotification} deviceName={deviceName} />
-              </div>
-            )}
-            {mode === 'receive' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
-                <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
-              </div>
-            )}
-            {mode === 'screen' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
-                <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
-              </div>
-            )}
+            <Suspense fallback={renderLoadingPanel()}>
+              {renderModePanel()}
+            </Suspense>
           </ErrorBoundary>
         </div>
         

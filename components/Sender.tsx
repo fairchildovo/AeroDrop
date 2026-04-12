@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import Peer, { DataConnection } from 'peerjs';
+import type Peer from 'peerjs';
+import type { DataConnection } from 'peerjs';
 import { TransferState, FileMetadata, P2PMessage, FileStartPayload, FileCompletePayload, ResumePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
 import { createCrc32Hasher } from '../services/crc32WorkerClient';
-import { getIceConfig, prefetchIceConfig } from '../services/stunService';
+import { loadPeerRuntime } from '../services/peerRuntime';
+import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG, FLOW_CONTROL } from '../constants/transfer'; 
 import {
   attachIceRouteToSession,
@@ -458,7 +460,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   useEffect(() => {
     isMountedRef.current = true;
-    prefetchIceConfig();
     return () => {
       isMountedRef.current = false;
       stopSharing();
@@ -698,22 +699,35 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       }
     };
 
-    const createSharePeer = (attempt: number) => {
+    const createSharePeer = async (attempt: number) => {
       const finalCode = customCodeInput.length === 4 ? customCodeInput : (() => {
         const arr = new Uint32Array(1);
         crypto.getRandomValues(arr);
         return (1000 + (arr[0] % 9000)).toString();
       })();
 
-      const customPeer = new Peer(`aerodrop-${finalCode}`, {
-        debug: peerDebugLevel,
-        pingInterval: 5000,
-        config: {
-          iceServers: iceConfig.iceServers,
-          iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
-          iceTransportPolicy: iceConfig.iceTransportPolicy,
-        }
-      });
+      let customPeer: Peer;
+      try {
+        const { default: PeerRuntime } = await loadPeerRuntime();
+        customPeer = new PeerRuntime(`aerodrop-${finalCode}`, {
+          debug: peerDebugLevel,
+          pingInterval: 5000,
+          config: {
+            iceServers: iceConfig.iceServers,
+            iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+            iceTransportPolicy: iceConfig.iceTransportPolicy,
+          }
+        });
+      } catch {
+        setErrorMsg('加载连接模块失败，请重试');
+        setState(TransferState.ERROR);
+        return;
+      }
+
+      if (isDestroyingRef.current || !isMountedRef.current) {
+        try { customPeer.destroy(); } catch {}
+        return;
+      }
 
       clearSignalingOpenTimeout();
       signalingOpenTimeoutRef.current = window.setTimeout(() => {
@@ -723,7 +737,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         try { customPeer.destroy(); } catch {}
         if (attempt < MAX_SIGNALING_OPEN_RETRY) {
           setPreparingStage('connecting_signaling');
-          createSharePeer(attempt + 1);
+          void createSharePeer(attempt + 1);
           return;
         }
         setErrorMsg('准备传输节点超时，请重试');
@@ -735,7 +749,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
     };
 
-    createSharePeer(0);
+    void createSharePeer(0);
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {

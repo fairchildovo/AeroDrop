@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Peer, { DataConnection } from 'peerjs';
+import type Peer from 'peerjs';
+import type { DataConnection } from 'peerjs';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
-import { getIceConfig, prefetchIceConfig } from '../services/stunService';
+import { loadPeerRuntime } from '../services/peerRuntime';
+import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
   attachIceRouteToSession,
@@ -187,7 +189,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   useEffect(() => {
     isMountedRef.current = true;
-    prefetchIceConfig();
     pruneStaleIndexedDbSessions().catch(() => {});
     return () => {
       isMountedRef.current = false;
@@ -1414,7 +1415,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }, timeoutMs);
     };
 
-    const createAndConnectPeer = (policy: RTCIceTransportPolicy, timeoutMs: number) => {
+    const createAndConnectPeer = async (policy: RTCIceTransportPolicy, timeoutMs: number) => {
       currentIcePolicyRef.current = policy;
 
       // For relay fallback via happy-eyeballs, keep the P2P peer alive.
@@ -1422,15 +1423,29 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         peerRef.current.destroy();
       }
 
-      const peer = new Peer({
-        debug: peerDebugLevel,
-        pingInterval: 5000,
-        config: {
-          iceServers: iceConfig.iceServers,
-          iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
-          iceTransportPolicy: policy,
-        }
-      });
+      let peer: Peer;
+      try {
+        const { default: PeerRuntime } = await loadPeerRuntime();
+        peer = new PeerRuntime({
+          debug: peerDebugLevel,
+          pingInterval: 5000,
+          config: {
+            iceServers: iceConfig.iceServers,
+            iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+            iceTransportPolicy: policy,
+          }
+        });
+      } catch {
+        clearConnectionTimeout();
+        setErrorMsg('加载连接模块失败，请重试');
+        setState(TransferState.ERROR);
+        return;
+      }
+
+      if (stateRef.current !== TransferState.WAITING_FOR_PEER) {
+        try { peer.destroy(); } catch {}
+        return;
+      }
 
       peer.on('open', () => {
         if (happyEyeballsWonRef.current) { peer.destroy(); return; }
@@ -1477,10 +1492,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         peerRef.current = peer;
       }
       applyConnectTimeout(timeoutMs);
-    };
+      };
 
-    // Start P2P attempt.
-    createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy, INITIAL_TIMEOUT_MS);
+      // Start P2P attempt.
+    void createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy, INITIAL_TIMEOUT_MS);
 
     // Happy-eyeballs: launch relay attempt in parallel after a short delay.
     if (iceConfig.hasTurn) {
@@ -1489,7 +1504,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
         markSessionEvent(connectTelemetryRef.current, 'happy_eyeballs_relay_start');
         startConnectionAttempt(connectTelemetryRef.current, 'relay_parallel');
-        createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
+        void createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
       }, 3000);
     }
   };
