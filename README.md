@@ -30,16 +30,10 @@ npm run build
 
 ## Deploy
 
-Cloudflare Pages:
-
-```bash
-npm run deploy
-```
-
 Cloudflare Worker:
 
 ```bash
-npm run deploy:worker
+npm run deploy
 ```
 
 ## TURN Configuration (Recommended)
@@ -75,7 +69,7 @@ turn:your-turn.example.com:3478?transport=udp,turn:your-turn.example.com:3478?tr
 ```text
 components/      UI 与传输逻辑
 constants/       传输与超时参数
-functions/api/   后端接口（ice-config 等）
+src/worker.ts    Worker 入口（API + 资源头部策略）
 services/        STUN/TURN 与诊断服务
 types/           类型定义
 ```
