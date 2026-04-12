@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Peer, { DataConnection } from 'peerjs';
+import type Peer from 'peerjs';
+import type { DataConnection } from 'peerjs';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
-import { getIceConfig, prefetchIceConfig } from '../services/stunService';
+import { loadPeerRuntime } from '../services/peerRuntime';
+import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
   attachIceRouteToSession,
@@ -51,6 +53,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const IOS_IDB_DB_NAME = 'aerodrop-receiver-buffer-v1';
   const IOS_IDB_STORE = 'fileChunks';
   const IOS_IDB_STALE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+  const IOS_IDB_PRUNE_LOCK_KEY = 'aerodrop_idb_prune_lock_v1';
+  const IOS_IDB_PRUNE_LOCK_TTL_MS = 45 * 1000;
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
@@ -142,6 +146,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const indexedDbBufferedFileIndexRef = useRef<number | null>(null);
   const indexedDbNotifiedRef = useRef<boolean>(false);
   const indexedDbCleanupStartedRef = useRef<boolean>(false);
+  const indexedDbCleanupLockIdRef = useRef<string>(
+    `idb-prune-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  );
 
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
@@ -182,7 +189,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   useEffect(() => {
     isMountedRef.current = true;
-    prefetchIceConfig();
     pruneStaleIndexedDbSessions().catch(() => {});
     return () => {
       isMountedRef.current = false;
@@ -241,9 +247,50 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     return indexedDbOpenPromiseRef.current;
   };
 
+  const acquireIndexedDbPruneLock = (): boolean => {
+    try {
+      const now = Date.now();
+      const owner = indexedDbCleanupLockIdRef.current;
+      const currentRaw = window.localStorage.getItem(IOS_IDB_PRUNE_LOCK_KEY);
+      if (currentRaw) {
+        const current = JSON.parse(currentRaw) as { owner?: string; expiresAt?: number };
+        const currentOwner = typeof current?.owner === 'string' ? current.owner : '';
+        const expiresAt = typeof current?.expiresAt === 'number' ? current.expiresAt : 0;
+        if (currentOwner && currentOwner !== owner && expiresAt > now) {
+          return false;
+        }
+      }
+
+      const next = { owner, expiresAt: now + IOS_IDB_PRUNE_LOCK_TTL_MS };
+      window.localStorage.setItem(IOS_IDB_PRUNE_LOCK_KEY, JSON.stringify(next));
+      const confirmRaw = window.localStorage.getItem(IOS_IDB_PRUNE_LOCK_KEY);
+      if (!confirmRaw) return false;
+      const confirm = JSON.parse(confirmRaw) as { owner?: string };
+      return confirm.owner === owner;
+    } catch {
+      // If localStorage is unavailable (privacy mode), fall back to single-tab guard.
+      return true;
+    }
+  };
+
+  const releaseIndexedDbPruneLock = () => {
+    try {
+      const owner = indexedDbCleanupLockIdRef.current;
+      const currentRaw = window.localStorage.getItem(IOS_IDB_PRUNE_LOCK_KEY);
+      if (!currentRaw) return;
+      const current = JSON.parse(currentRaw) as { owner?: string };
+      if (current?.owner === owner) {
+        window.localStorage.removeItem(IOS_IDB_PRUNE_LOCK_KEY);
+      }
+    } catch {
+      // Ignore lock release errors.
+    }
+  };
+
   const pruneStaleIndexedDbSessions = async (): Promise<void> => {
     if (!isIndexedDbSupported()) return;
     if (indexedDbCleanupStartedRef.current) return;
+    if (!acquireIndexedDbPruneLock()) return;
     indexedDbCleanupStartedRef.current = true;
 
     try {
@@ -306,6 +353,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       });
     } catch (err) {
       console.warn('IndexedDB stale session cleanup failed:', err);
+    } finally {
+      releaseIndexedDbPruneLock();
     }
   };
 
@@ -1366,7 +1415,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }, timeoutMs);
     };
 
-    const createAndConnectPeer = (policy: RTCIceTransportPolicy, timeoutMs: number) => {
+    const createAndConnectPeer = async (policy: RTCIceTransportPolicy, timeoutMs: number) => {
       currentIcePolicyRef.current = policy;
 
       // For relay fallback via happy-eyeballs, keep the P2P peer alive.
@@ -1374,15 +1423,29 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         peerRef.current.destroy();
       }
 
-      const peer = new Peer({
-        debug: peerDebugLevel,
-        pingInterval: 5000,
-        config: {
-          iceServers: iceConfig.iceServers,
-          iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
-          iceTransportPolicy: policy,
-        }
-      });
+      let peer: Peer;
+      try {
+        const { default: PeerRuntime } = await loadPeerRuntime();
+        peer = new PeerRuntime({
+          debug: peerDebugLevel,
+          pingInterval: 5000,
+          config: {
+            iceServers: iceConfig.iceServers,
+            iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
+            iceTransportPolicy: policy,
+          }
+        });
+      } catch {
+        clearConnectionTimeout();
+        setErrorMsg('加载连接模块失败，请重试');
+        setState(TransferState.ERROR);
+        return;
+      }
+
+      if (stateRef.current !== TransferState.WAITING_FOR_PEER) {
+        try { peer.destroy(); } catch {}
+        return;
+      }
 
       peer.on('open', () => {
         if (happyEyeballsWonRef.current) { peer.destroy(); return; }
@@ -1429,10 +1492,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         peerRef.current = peer;
       }
       applyConnectTimeout(timeoutMs);
-    };
+      };
 
-    // Start P2P attempt.
-    createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy, INITIAL_TIMEOUT_MS);
+      // Start P2P attempt.
+    void createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy, INITIAL_TIMEOUT_MS);
 
     // Happy-eyeballs: launch relay attempt in parallel after a short delay.
     if (iceConfig.hasTurn) {
@@ -1441,7 +1504,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
         markSessionEvent(connectTelemetryRef.current, 'happy_eyeballs_relay_start');
         startConnectionAttempt(connectTelemetryRef.current, 'relay_parallel');
-        createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
+        void createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
       }, 3000);
     }
   };

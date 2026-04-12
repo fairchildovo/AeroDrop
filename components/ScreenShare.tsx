@@ -1,5 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import Peer, { MediaConnection, DataConnection } from 'peerjs';
+import type Peer from 'peerjs';
+import type { MediaConnection, DataConnection } from 'peerjs';
+import { loadPeerRuntime } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
 
@@ -699,9 +701,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
 
     const iceConfig = await getIceConfig();
+    const { default: PeerRuntime } = await loadPeerRuntime();
     const id = generatePeerId();
     const useSecurePeerServer = window.location.protocol === 'https:';
-    const peer = new Peer(id, {
+    const peer = new PeerRuntime(id, {
       debug: 0,
       secure: useSecurePeerServer,
       pingInterval: 5000, // 缩短心跳间隔以保持 VPN 隧道活跃
@@ -1102,7 +1105,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const iceConfig = await getIceConfig();
     setViewerConnectingStage('connecting_signaling');
     const useSecurePeerServer = window.location.protocol === 'https:';
-    const peer = new Peer({
+    const { default: PeerRuntime } = await loadPeerRuntime();
+    const peer = new PeerRuntime({
       debug: 0,
       secure: useSecurePeerServer,
       pingInterval: 5000,
