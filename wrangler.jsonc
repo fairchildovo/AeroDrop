@@ -6,6 +6,14 @@
   "observability": {
     "enabled": true
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SIGNALING_HUB",
+        "class_name": "SignalingHub"
+      }
+    ]
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
@@ -14,5 +22,13 @@
   },
   "compatibility_flags": [
     "nodejs_compat"
+  ],
+  "migrations": [
+    {
+      "tag": "v1-signaling-hub",
+      "new_sqlite_classes": [
+        "SignalingHub"
+      ]
+    }
   ]
 }

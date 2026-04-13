@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:signaling": "node ./backend/server.mjs",
+    "dev:worker": "wrangler dev --config wrangler.jsonc",
     "build": "vite build",
     "preview": "npm run build && wrangler dev --config wrangler.jsonc",
     "typecheck": "tsc --noEmit",
@@ -13,12 +13,9 @@
     "deploy:worker": "npm run deploy"
   },
   "dependencies": {
-    "express": "^5.2.1",
     "lucide-react": "^0.555.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3",
     "streamsaver": "^2.0.6",
     "zustand": "^5.0.12"
   },

@@ -23,6 +23,7 @@ export type IceConfigResult = {
 
 const ICE_CACHE_TTL_MS = 30_000;
 const ICE_FETCH_TIMEOUT_MS = 2000;
+const ICE_CONFIG_LOG_KEY = '__AERODROP_ICE_CONFIG_LOGS__';
 let cachedConfig: IceConfigResult | null = null;
 let cachedAt = 0;
 let inflightRequest: Promise<IceConfigResult> | null = null;
@@ -55,15 +56,73 @@ const fallbackConfig: IceConfigResult = {
   hasTurn: false
 };
 
+const pushIceConfigLog = (payload: unknown) => {
+  try {
+    const win = window as Window & { [ICE_CONFIG_LOG_KEY]?: unknown[] };
+    if (!Array.isArray(win[ICE_CONFIG_LOG_KEY])) {
+      win[ICE_CONFIG_LOG_KEY] = [];
+    }
+    win[ICE_CONFIG_LOG_KEY]!.push(payload);
+    if (win[ICE_CONFIG_LOG_KEY]!.length > 100) {
+      win[ICE_CONFIG_LOG_KEY] = win[ICE_CONFIG_LOG_KEY]!.slice(-100);
+    }
+  } catch {
+    // Ignore debug storage failures.
+  }
+};
+
+const logIceConfig = (
+  level: 'info' | 'warn' | 'error',
+  event: string,
+  data?: Record<string, unknown>
+) => {
+  const payload = {
+    tag: 'ice-config',
+    event,
+    ts: Date.now(),
+    data,
+  };
+  if (level === 'warn') {
+    console.warn('[ice-config]', payload);
+  } else if (level === 'error') {
+    console.error('[ice-config]', payload);
+  } else {
+    console.info('[ice-config]', payload);
+  }
+  pushIceConfigLog(payload);
+};
+
+const summarizeIceConfig = (result: IceConfigResult) => ({
+  hasTurn: result.hasTurn,
+  iceTransportPolicy: result.iceTransportPolicy,
+  iceCandidatePoolSize: result.iceCandidatePoolSize,
+  serverCount: result.iceServers.length,
+  turnServerCount: result.iceServers.filter((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => url.startsWith('turn:') || url.startsWith('turns:'));
+  }).length,
+});
+
 const fetchIceConfig = async (): Promise<IceConfigResult> => {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), ICE_FETCH_TIMEOUT_MS);
+  const startedAt = performance.now();
   try {
+    logIceConfig('info', 'fetch_start', { path: '/api/ice-config' });
     const res = await fetch('/api/ice-config', { cache: 'no-store', signal: controller.signal });
-    if (!res.ok) return fallbackConfig;
+    if (!res.ok) {
+      logIceConfig('warn', 'fetch_non_ok', {
+        status: res.status,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
+      return fallbackConfig;
+    }
     const data = (await res.json()) as IceConfigResponse;
 
     if (!Array.isArray(data.iceServers) || data.iceServers.length === 0) {
+      logIceConfig('warn', 'fetch_invalid_payload', {
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
       return fallbackConfig;
     }
 
@@ -79,10 +138,18 @@ const fetchIceConfig = async (): Promise<IceConfigResult> => {
             return urls.some(url => url.startsWith('turn:') || url.startsWith('turns:'));
           })
     };
+    logIceConfig('info', 'fetch_success', {
+      elapsedMs: Math.round(performance.now() - startedAt),
+      ...summarizeIceConfig(result),
+    });
     cachedConfig = result;
     cachedAt = Date.now();
     return result;
-  } catch {
+  } catch (error) {
+    logIceConfig('warn', 'fetch_failed_using_fallback', {
+      elapsedMs: Math.round(performance.now() - startedAt),
+      reason: error instanceof Error ? error.message : String(error),
+    });
     return fallbackConfig;
   } finally {
     window.clearTimeout(timeoutId);

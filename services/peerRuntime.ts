@@ -1,5 +1,3 @@
-import { io, type Socket } from 'socket.io-client';
-
 type Listener = (...args: any[]) => void;
 
 type PeerRuntimeErrorType =
@@ -13,28 +11,6 @@ type PeerRuntimeErrorType =
   | 'webrtc-error';
 
 type ChannelKind = 'data' | 'media';
-
-type RegisterAck =
-  | { ok: true; peerId: string }
-  | { ok: false; code: PeerRuntimeErrorType | string };
-
-type SignalAck =
-  | { ok: true }
-  | { ok: false; code: PeerRuntimeErrorType | string };
-
-type SignalPayload = {
-  connectionId: string;
-  kind: ChannelKind;
-  sourcePeerId: string;
-  targetPeerId: string;
-  description?: RTCSessionDescriptionInit;
-  candidate?: RTCIceCandidateInit;
-};
-
-type SocketSignalEvent = SignalPayload & {
-  sourcePeerId: string;
-  targetPeerId: string;
-};
 
 type PeerOptions = {
   debug?: number;
@@ -51,7 +27,7 @@ type DataConnectionOptions = {
 };
 
 type PeerRuntimeModule = {
-  default: typeof SocketSignaledPeer;
+  default: typeof WorkerSignaledPeer;
 };
 
 type PeerEvents = {
@@ -75,15 +51,57 @@ type MediaConnectionEvents = {
   error: (error: PeerRuntimeError) => void;
 };
 
+type RegisteredEnvelope = { type: 'registered'; peerId: string };
+type ErrorEnvelope = {
+  type: 'error';
+  code: PeerRuntimeErrorType | string;
+  message?: string;
+  connectionId?: string;
+  targetPeerId?: string;
+  kind?: ChannelKind;
+};
+type OfferEnvelope = {
+  type: 'offer';
+  connectionId: string;
+  kind: ChannelKind;
+  sourcePeerId: string;
+  targetPeerId: string;
+  description: RTCSessionDescriptionInit;
+};
+type AnswerEnvelope = {
+  type: 'answer';
+  connectionId: string;
+  kind: ChannelKind;
+  sourcePeerId: string;
+  targetPeerId: string;
+  description: RTCSessionDescriptionInit;
+};
+type IceCandidateEnvelope = {
+  type: 'ice-candidate';
+  connectionId: string;
+  kind: ChannelKind;
+  sourcePeerId: string;
+  targetPeerId: string;
+  candidate: RTCIceCandidateInit;
+};
+
+type SignalingEnvelope =
+  | RegisteredEnvelope
+  | ErrorEnvelope
+  | OfferEnvelope
+  | AnswerEnvelope
+  | IceCandidateEnvelope;
+
 const JSON_ENVELOPE = '__aerodrop_json__';
 const TEXT_ENVELOPE = '__aerodrop_text__';
-const DEFAULT_SIGNALING_URL = import.meta.env.DEV ? 'http://localhost:3001' : window.location.origin;
-const SIGNALING_URL =
-  (import.meta.env.VITE_SIGNALING_SERVER_URL as string | undefined)?.trim() ||
-  (import.meta.env.VITE_SIGNALING_URL as string | undefined)?.trim() ||
-  DEFAULT_SIGNALING_URL;
+const SIGNALING_LOG_KEY = '__AERODROP_SIGNALING_METRICS__';
+const DEFAULT_DEV_SIGNALING_BASE = 'http://127.0.0.1:8787';
+const SIGNALING_BASE =
+  (import.meta.env.VITE_SIGNALING_WS_URL as string | undefined)?.trim() ||
+  (import.meta.env.VITE_SIGNALING_BASE_URL as string | undefined)?.trim() ||
+  (import.meta.env.DEV ? DEFAULT_DEV_SIGNALING_BASE : window.location.origin);
 const SIGNALING_PATH =
-  ((import.meta.env.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/socket.io/').replace(/\/?$/, '/');
+  ((import.meta.env.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/ws-signaling').replace(/\/?$/, '');
 
 const createRuntimeError = (
   type: PeerRuntimeErrorType,
@@ -106,6 +124,63 @@ const createId = (prefix: string): string => {
 };
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const toWebSocketUrl = (base: string): string => {
+  if (base.startsWith('ws://') || base.startsWith('wss://')) {
+    return base;
+  }
+  if (base.startsWith('https://')) {
+    return `wss://${base.slice('https://'.length)}`;
+  }
+  if (base.startsWith('http://')) {
+    return `ws://${base.slice('http://'.length)}`;
+  }
+  return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${base}`;
+};
+
+const createSignalingUrl = (peerId: string): string => {
+  const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
+  const wsUrl = new URL(SIGNALING_PATH, baseUrl);
+  wsUrl.searchParams.set('peerId', peerId);
+  return wsUrl.toString();
+};
+
+const parseCandidateDetails = (candidate: RTCIceCandidateInit) => {
+  const candidateLine = candidate.candidate || '';
+  const parts = candidateLine.split(' ');
+  const protocol = parts[2] || undefined;
+  const candidateTypeIndex = parts.findIndex((part) => part === 'typ');
+  const candidateType =
+    candidateTypeIndex >= 0 && candidateTypeIndex + 1 < parts.length
+      ? parts[candidateTypeIndex + 1]
+      : undefined;
+  return {
+    protocol,
+    candidateType,
+    sdpMid: candidate.sdpMid,
+    sdpMLineIndex: candidate.sdpMLineIndex,
+  };
+};
+
+const summarizeDescription = (description?: RTCSessionDescriptionInit) => ({
+  type: description?.type,
+  sdpLength: description?.sdp?.length ?? 0,
+});
+
+const pushSignalLog = (payload: unknown) => {
+  try {
+    const win = window as Window & { [SIGNALING_LOG_KEY]?: unknown[] };
+    if (!Array.isArray(win[SIGNALING_LOG_KEY])) {
+      win[SIGNALING_LOG_KEY] = [];
+    }
+    win[SIGNALING_LOG_KEY]!.push(payload);
+    if (win[SIGNALING_LOG_KEY]!.length > 300) {
+      win[SIGNALING_LOG_KEY] = win[SIGNALING_LOG_KEY]!.slice(-300);
+    }
+  } catch {
+    // Ignore debug storage failures.
+  }
+};
 
 class TinyEmitter<EventMap extends Record<string, Listener>> {
   private listeners = new Map<keyof EventMap, Set<Listener>>();
@@ -137,7 +212,7 @@ class TinyEmitter<EventMap extends Record<string, Listener>> {
 
 class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmitter<EventMap> {
   public readonly peer: string;
-  public readonly provider: SocketSignaledPeer;
+  public readonly provider: WorkerSignaledPeer;
   public readonly peerConnection: RTCPeerConnection;
   public readonly connectionId: string;
   public open = false;
@@ -146,7 +221,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
   constructor(
-    provider: SocketSignaledPeer,
+    provider: WorkerSignaledPeer,
     peerId: string,
     connectionId: string,
     peerConnection: RTCPeerConnection
@@ -158,13 +233,30 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     this.peerConnection = peerConnection;
     this.peerConnection.onicecandidate = (event) => {
       if (!event.candidate) return;
+      this.provider.logConnectionEvent(this, 'ice_candidate_local', parseCandidateDetails(event.candidate.toJSON()));
       this.provider.forwardIceCandidate(this, event.candidate.toJSON());
     };
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection.connectionState;
+      this.provider.logConnectionEvent(this, 'pc_connection_state', { state });
       if (state === 'failed' || state === 'closed' || state === 'disconnected') {
         this.handleTransportClosed();
       }
+    };
+    this.peerConnection.oniceconnectionstatechange = () => {
+      this.provider.logConnectionEvent(this, 'pc_ice_connection_state', {
+        state: this.peerConnection.iceConnectionState,
+      });
+    };
+    this.peerConnection.onicegatheringstatechange = () => {
+      this.provider.logConnectionEvent(this, 'pc_ice_gathering_state', {
+        state: this.peerConnection.iceGatheringState,
+      });
+    };
+    this.peerConnection.onsignalingstatechange = () => {
+      this.provider.logConnectionEvent(this, 'pc_signaling_state', {
+        state: this.peerConnection.signalingState,
+      });
     };
   }
 
@@ -234,15 +326,28 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
   bindDataChannel(channel: RTCDataChannel): void {
     this.dataChannel = channel;
     this.dataChannel.binaryType = 'arraybuffer';
+    this.provider.logConnectionEvent(this, 'data_channel_bound', {
+      label: channel.label,
+      ordered: channel.ordered,
+    });
     this.dataChannel.onopen = () => {
       this.markOpen();
+      this.provider.logConnectionEvent(this, 'data_channel_open', {
+        readyState: this.dataChannel?.readyState,
+      });
       this.emit('open');
     };
     this.dataChannel.onclose = () => {
       this.handleTransportClosed();
+      this.provider.logConnectionEvent(this, 'data_channel_close', {
+        readyState: this.dataChannel?.readyState,
+      });
       this.emit('close');
     };
     this.dataChannel.onerror = () => {
+      this.provider.logConnectionEvent(this, 'data_channel_error', {
+        readyState: this.dataChannel?.readyState,
+      });
       this.handleError(createRuntimeError('webrtc-error', 'Data channel error'));
     };
     this.dataChannel.onmessage = async (event) => {
@@ -318,7 +423,7 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
   private answered = false;
 
   constructor(
-    provider: SocketSignaledPeer,
+    provider: WorkerSignaledPeer,
     peerId: string,
     connectionId: string,
     peerConnection: RTCPeerConnection
@@ -336,10 +441,16 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
         this.remoteStream.addTrack(event.track);
       }
       this.markOpen();
+      this.provider.logConnectionEvent(this, 'media_track', {
+        trackId: event.track?.id,
+        kind: event.track?.kind,
+        streamCount: event.streams.length,
+      });
       this.emit('stream', this.remoteStream);
     };
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection.connectionState;
+      this.provider.logConnectionEvent(this, 'media_pc_connection_state', { state });
       if (state === 'connected' && !this.open) {
         this.markOpen();
       }
@@ -358,7 +469,7 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
     });
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
-    await this.provider.forwardAnswer(this, answer);
+    this.provider.forwardAnswer(this, answer);
   }
 
   override close(): void {
@@ -374,102 +485,198 @@ export type PeerRuntimeError = Error & {
   type: PeerRuntimeErrorType;
 };
 
-export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
+export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   public id: string;
   public destroyed = false;
   public disconnected = false;
   public readonly connections: Record<string, Array<DataConnection | MediaConnection>> = {};
+
   private readonly config: RTCConfiguration;
-  private readonly socket: Socket;
   private readonly options: PeerOptions;
-  private readonly connectionIndex = new Map<string, DataConnection | MediaConnection>();
+  private readonly createdAt = performance.now();
+  private connectionIndex = new Map<string, DataConnection | MediaConnection>();
+  private websocket: WebSocket | null = null;
   private openedOnce = false;
   private readyPromiseResolve: (() => void) | null = null;
+  private readyPromiseReject: ((reason?: unknown) => void) | null = null;
   private readyPromise: Promise<void>;
-  private socketConnectFailed = false;
+  private isManualClose = false;
 
   constructor(id?: string, options?: PeerOptions);
   constructor(options?: PeerOptions);
   constructor(idOrOptions?: string | PeerOptions, maybeOptions?: PeerOptions) {
     super();
-    const suppliedId = typeof idOrOptions === 'string' ? idOrOptions : createId('peer');
+    this.id = typeof idOrOptions === 'string' ? idOrOptions : createId('peer');
     this.options = (typeof idOrOptions === 'string' ? maybeOptions : idOrOptions) ?? {};
-    this.id = suppliedId;
     this.config = this.options.config ?? {};
-    this.readyPromise = new Promise<void>((resolve) => {
+    this.readyPromise = new Promise<void>((resolve, reject) => {
       this.readyPromiseResolve = resolve;
+      this.readyPromiseReject = reject;
     });
-    this.socket = io(SIGNALING_URL, {
-      path: SIGNALING_PATH,
-      transports: ['websocket', 'polling'],
-      autoConnect: true,
-      reconnection: true,
-    });
-    this.bindSocketEvents();
+    this.connectSignaling();
   }
 
-  private bindSocketEvents(): void {
-    this.socket.on('connect', () => {
-      this.disconnected = false;
-      this.socketConnectFailed = false;
-      void this.registerPeer();
-    });
+  private log(level: 'info' | 'warn' | 'error', event: string, data?: Record<string, unknown>): void {
+    const payload = {
+      tag: 'signal-metrics',
+      peerId: this.id,
+      status: this.destroyed ? 'destroyed' : this.disconnected ? 'disconnected' : this.openedOnce ? 'registered' : 'connecting',
+      event,
+      elapsedMs: Math.max(0, Math.round(performance.now() - this.createdAt)),
+      data,
+    };
+    if (level === 'warn') {
+      console.warn('[signal-metrics]', payload);
+    } else if (level === 'error') {
+      console.error('[signal-metrics]', payload);
+    } else {
+      console.info('[signal-metrics]', payload);
+    }
+    pushSignalLog(payload);
+  }
 
-    this.socket.on('disconnect', () => {
-      if (this.destroyed) return;
-      this.disconnected = true;
-      this.emit('disconnected');
-    });
-
-    this.socket.on('connect_error', (error) => {
-      if (this.destroyed) return;
-      this.socketConnectFailed = true;
-      this.emit('error', createRuntimeError('socket-error', 'Signaling socket connection failed', error));
-    });
-
-    this.socket.on('webrtc:offer', (payload: SocketSignalEvent) => {
-      void this.handleIncomingOffer(payload);
-    });
-
-    this.socket.on('webrtc:answer', (payload: SocketSignalEvent) => {
-      void this.handleIncomingAnswer(payload);
-    });
-
-    this.socket.on('webrtc:ice-candidate', (payload: SocketSignalEvent) => {
-      this.handleIncomingIceCandidate(payload);
-    });
-
-    this.socket.on('webrtc:peer-unavailable', (payload: SocketSignalEvent) => {
-      const error = createRuntimeError(
-        'peer-unavailable',
-        `Target peer is unavailable: ${payload.targetPeerId || payload.sourcePeerId}`
-      );
-      this.emit('error', error);
-      const connection = this.connectionIndex.get(payload.connectionId);
-      if (connection) {
-        this.emitConnectionError(connection, error);
-        connection.close();
-      }
+  logConnectionEvent(connection: BaseConnection<any>, event: string, data?: Record<string, unknown>): void {
+    this.log('info', event, {
+      connectionId: connection.connectionId,
+      kind: connection instanceof DataConnection ? 'data' : 'media',
+      targetPeerId: connection.peer,
+      ...data,
     });
   }
 
-  private async registerPeer(): Promise<void> {
+  private resetReadyPromise(): void {
+    this.readyPromise = new Promise<void>((resolve, reject) => {
+      this.readyPromiseResolve = resolve;
+      this.readyPromiseReject = reject;
+    });
+  }
+
+  private connectSignaling(): void {
     if (this.destroyed) return;
-    const result = await this.emitWithAck<RegisterAck>('peer:register', { peerId: this.id });
-    if (!result?.ok) {
-      this.emit('error', createRuntimeError((result?.code as PeerRuntimeErrorType) ?? 'server-error', 'Failed to register peer id'));
+    const url = createSignalingUrl(this.id);
+    this.log('info', 'signaling_ws_connect_start', {
+      url,
+      signalingBase: SIGNALING_BASE,
+      signalingPath: SIGNALING_PATH,
+    });
+    this.websocket = new WebSocket(url);
+    this.websocket.onopen = () => {
+      this.disconnected = false;
+      this.log('info', 'signaling_ws_open', { url });
+    };
+    this.websocket.onmessage = (event) => {
+      this.handleSignalingMessage(event.data);
+    };
+    this.websocket.onerror = () => {
+      if (this.destroyed) return;
+      const error = createRuntimeError('socket-error', 'Signaling WebSocket connection failed');
+      this.log('error', 'signaling_ws_error');
+      this.readyPromiseReject?.(error);
+      this.emit('error', error);
+    };
+    this.websocket.onclose = (event) => {
+      const wasOpened = this.openedOnce;
+      this.websocket = null;
+      if (this.destroyed || this.isManualClose) {
+        return;
+      }
+      this.disconnected = true;
+      this.log(wasOpened ? 'warn' : 'error', 'signaling_ws_close', {
+        code: event.code,
+        reason: event.reason || undefined,
+        wasOpened,
+      });
+      if (!wasOpened) {
+        this.readyPromiseReject?.(createRuntimeError('disconnected', 'Signaling WebSocket closed before registration'));
+      }
+      if (wasOpened) {
+        this.emit('disconnected');
+      }
+    };
+  }
+
+  private handleSignalingMessage(raw: unknown): void {
+    let message: SignalingEnvelope;
+    try {
+      message = JSON.parse(String(raw)) as SignalingEnvelope;
+    } catch (error) {
+      this.emit('error', createRuntimeError('server-error', 'Received invalid signaling payload', error));
       return;
     }
-    this.id = result.peerId;
-    if (!this.openedOnce) {
-      this.openedOnce = true;
-      this.readyPromiseResolve?.();
-      this.readyPromiseResolve = null;
-      this.emit('open', this.id);
+
+    if (message.type === 'registered') {
+      this.disconnected = false;
+      this.id = message.peerId;
+      this.log('info', 'signaling_registered', { registeredPeerId: message.peerId });
+      if (!this.openedOnce) {
+        this.openedOnce = true;
+        this.readyPromiseResolve?.();
+        this.readyPromiseResolve = null;
+        this.readyPromiseReject = null;
+        this.emit('open', this.id);
+      }
+      return;
+    }
+
+    if (message.type === 'error') {
+      this.log('warn', 'signaling_error_envelope', {
+        code: message.code,
+        message: message.message,
+        connectionId: message.connectionId,
+        targetPeerId: message.targetPeerId,
+        kind: message.kind,
+      });
+      const error = createRuntimeError(
+        (message.code as PeerRuntimeErrorType) ?? 'server-error',
+        message.message || String(message.code || 'Signaling error')
+      );
+      if (message.connectionId) {
+        const connection = this.connectionIndex.get(message.connectionId);
+        if (connection) {
+          this.emitConnectionError(connection, error);
+          if (message.code === 'peer-unavailable' || message.code === 'invalid-id') {
+            connection.close();
+          }
+        }
+      }
+      this.emit('error', error);
+      return;
+    }
+
+    if (message.type === 'offer') {
+      this.log('info', 'signaling_offer_received', {
+        connectionId: message.connectionId,
+        kind: message.kind,
+        sourcePeerId: message.sourcePeerId,
+        description: summarizeDescription(message.description),
+      });
+      void this.handleIncomingOffer(message);
+      return;
+    }
+
+    if (message.type === 'answer') {
+      this.log('info', 'signaling_answer_received', {
+        connectionId: message.connectionId,
+        kind: message.kind,
+        sourcePeerId: message.sourcePeerId,
+        description: summarizeDescription(message.description),
+      });
+      void this.handleIncomingAnswer(message);
+      return;
+    }
+
+    if (message.type === 'ice-candidate') {
+      this.log('info', 'signaling_ice_candidate_received', {
+        connectionId: message.connectionId,
+        kind: message.kind,
+        sourcePeerId: message.sourcePeerId,
+        candidate: parseCandidateDetails(message.candidate),
+      });
+      this.handleIncomingIceCandidate(message);
     }
   }
 
-  private async handleIncomingOffer(payload: SocketSignalEvent): Promise<void> {
+  private async handleIncomingOffer(payload: OfferEnvelope): Promise<void> {
     if (this.destroyed) return;
     if (payload.kind === 'data') {
       const peerConnection = new RTCPeerConnection(this.config);
@@ -480,10 +687,10 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
       this.addConnection(connection);
       this.emit('connection', connection);
       try {
-        await connection.applyRemoteDescription(payload.description!);
+        await connection.applyRemoteDescription(payload.description);
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        await this.forwardAnswer(connection, answer);
+        this.forwardAnswer(connection, answer);
       } catch (error) {
         this.emitConnectionError(connection, createRuntimeError('webrtc-error', 'Failed to handle incoming data offer', error));
         connection.close();
@@ -495,7 +702,7 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
     const call = new MediaConnection(this, payload.sourcePeerId, payload.connectionId, peerConnection);
     this.addConnection(call);
     try {
-      await call.applyRemoteDescription(payload.description!);
+      await call.applyRemoteDescription(payload.description);
       this.emit('call', call);
     } catch (error) {
       this.emitConnectionError(call, createRuntimeError('webrtc-error', 'Failed to handle incoming media offer', error));
@@ -503,9 +710,9 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
     }
   }
 
-  private async handleIncomingAnswer(payload: SocketSignalEvent): Promise<void> {
+  private async handleIncomingAnswer(payload: AnswerEnvelope): Promise<void> {
     const connection = this.connectionIndex.get(payload.connectionId);
-    if (!connection || !payload.description) return;
+    if (!connection) return;
     try {
       await connection.applyRemoteDescription(payload.description);
     } catch (error) {
@@ -514,10 +721,18 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
     }
   }
 
-  private handleIncomingIceCandidate(payload: SocketSignalEvent): void {
+  private handleIncomingIceCandidate(payload: IceCandidateEnvelope): void {
     const connection = this.connectionIndex.get(payload.connectionId);
-    if (!connection || !payload.candidate) return;
+    if (!connection) return;
     connection.queueOrAddIceCandidate(payload.candidate);
+  }
+
+  private emitConnectionError(connection: DataConnection | MediaConnection, error: PeerRuntimeError): void {
+    if (connection instanceof DataConnection) {
+      connection.emit('error', error);
+      return;
+    }
+    connection.emit('error', error);
   }
 
   private addConnection(connection: DataConnection | MediaConnection): void {
@@ -537,41 +752,35 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
     }
   }
 
-  private emitConnectionError(connection: DataConnection | MediaConnection, error: PeerRuntimeError): void {
-    if (connection instanceof DataConnection) {
-      connection.emit('error', error);
-      return;
-    }
-    connection.emit('error', error);
-  }
-
   private async ensureReady(): Promise<void> {
-    if (this.openedOnce) return;
-    if (this.socketConnectFailed) {
-      throw createRuntimeError('socket-error', 'Signaling socket is not connected');
+    if (this.openedOnce && !this.disconnected) {
+      return;
     }
     await this.readyPromise;
   }
 
-  private async emitWithAck<T>(eventName: string, payload: unknown, timeoutMs = 5000): Promise<T | null> {
-    return new Promise<T | null>((resolve) => {
-      let settled = false;
-      const timeoutId = window.setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        resolve(null);
-      }, timeoutMs);
-      this.socket.emit(eventName, payload, (response: T) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timeoutId);
-        resolve(response);
-      });
-    });
+  private sendSignaling(message: SignalingEnvelope): void {
+    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+      throw createRuntimeError('socket-error', 'Signaling WebSocket is not open');
+    }
+    const baseData: Record<string, unknown> = {
+      connectionId: 'connectionId' in message ? message.connectionId : undefined,
+      kind: 'kind' in message ? message.kind : undefined,
+      targetPeerId: 'targetPeerId' in message ? message.targetPeerId : undefined,
+    };
+    if (message.type === 'offer' || message.type === 'answer') {
+      baseData.description = summarizeDescription(message.description);
+    }
+    if (message.type === 'ice-candidate') {
+      baseData.candidate = parseCandidateDetails(message.candidate);
+    }
+    this.log('info', `signaling_${message.type}_sent`, baseData);
+    this.websocket.send(JSON.stringify(message));
   }
 
-  async forwardAnswer(connection: BaseConnection<any>, description: RTCSessionDescriptionInit): Promise<void> {
-    await this.emitWithAck<SignalAck>('webrtc:answer', {
+  forwardAnswer(connection: BaseConnection<any>, description: RTCSessionDescriptionInit): void {
+    this.sendSignaling({
+      type: 'answer',
       connectionId: connection.connectionId,
       kind: connection instanceof DataConnection ? 'data' : 'media',
       sourcePeerId: this.id,
@@ -581,7 +790,8 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
   }
 
   forwardIceCandidate(connection: BaseConnection<any>, candidate: RTCIceCandidateInit): void {
-    void this.emitWithAck<SignalAck>('webrtc:ice-candidate', {
+    this.sendSignaling({
+      type: 'ice-candidate',
       connectionId: connection.connectionId,
       kind: connection instanceof DataConnection ? 'data' : 'media',
       sourcePeerId: this.id,
@@ -593,9 +803,7 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
   connect(targetPeerId: string, _options?: DataConnectionOptions): DataConnection {
     const peerConnection = new RTCPeerConnection(this.config);
     const connection = new DataConnection(this, targetPeerId, createId('data'), peerConnection);
-    const channel = peerConnection.createDataChannel('data', {
-      ordered: true,
-    });
+    const channel = peerConnection.createDataChannel('data', { ordered: true });
     connection.bindDataChannel(channel);
     this.addConnection(connection);
     void this.startOutgoingOffer(connection, 'data');
@@ -618,21 +826,18 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
       await this.ensureReady();
       const offer = await connection.peerConnection.createOffer();
       await connection.peerConnection.setLocalDescription(offer);
-      const result = await this.emitWithAck<SignalAck>('webrtc:offer', {
+      this.logConnectionEvent(connection, 'offer_created', {
+        kind,
+        description: summarizeDescription(offer),
+      });
+      this.sendSignaling({
+        type: 'offer',
         connectionId: connection.connectionId,
         kind,
         sourcePeerId: this.id,
         targetPeerId: connection.peer,
         description: offer,
       });
-
-      if (!result?.ok) {
-        const errorType = (result?.code as PeerRuntimeErrorType) ?? 'peer-unavailable';
-        const error = createRuntimeError(errorType, `Failed to reach peer ${connection.peer}`);
-        this.emit('error', error);
-        this.emitConnectionError(connection, error);
-        connection.close();
-      }
     } catch (error) {
       const runtimeError =
         error instanceof Error && 'type' in error
@@ -646,30 +851,42 @@ export default class SocketSignaledPeer extends TinyEmitter<PeerEvents> {
 
   reconnect(): void {
     if (this.destroyed) return;
-    if (this.socket.connected) {
-      void this.registerPeer();
+    if (this.websocket && (this.websocket.readyState === WebSocket.OPEN || this.websocket.readyState === WebSocket.CONNECTING)) {
       return;
     }
-    this.socket.connect();
+    this.disconnected = false;
+    this.resetReadyPromise();
+    this.log('warn', 'signaling_reconnect');
+    this.connectSignaling();
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.isManualClose = true;
+    this.log('info', 'peer_destroy');
     Object.values(this.connections).flat().forEach((connection) => connection.close());
-    this.socket.removeAllListeners();
-    this.socket.disconnect();
+    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+      this.websocket.close(1000, 'Peer destroyed');
+    } else if (this.websocket) {
+      try {
+        this.websocket.close();
+      } catch {
+        // Ignore close errors.
+      }
+    }
+    this.websocket = null;
   }
 }
 
-export type Peer = SocketSignaledPeer;
+export type Peer = WorkerSignaledPeer;
 
 let peerRuntimePromise: Promise<PeerRuntimeModule> | null = null;
 
 export const loadPeerRuntime = (): Promise<PeerRuntimeModule> => {
   if (!peerRuntimePromise) {
     peerRuntimePromise = Promise.resolve({
-      default: SocketSignaledPeer,
+      default: WorkerSignaledPeer,
     });
   }
   return peerRuntimePromise;

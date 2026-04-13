@@ -1,9 +1,12 @@
+import { DurableObject } from 'cloudflare:workers';
+
 interface AssetBinding {
   fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
 }
 
 interface Env {
   ASSETS: AssetBinding;
+  SIGNALING_HUB: DurableObjectNamespace;
   CF_TURN_TOKEN_ID?: string;
   CF_TURN_KEY_ID?: string;
   CF_TURN_API_TOKEN?: string;
@@ -31,6 +34,26 @@ type CloudflareTurnApiResponse = {
   iceServers?: IceServerConfig[];
 };
 
+type SignalingEnvelope =
+  | { type: 'registered'; peerId: string }
+  | { type: 'error'; code: string; message?: string; connectionId?: string; targetPeerId?: string; kind?: 'data' | 'media' }
+  | {
+      type: 'offer' | 'answer';
+      connectionId: string;
+      kind: 'data' | 'media';
+      sourcePeerId: string;
+      targetPeerId: string;
+      description: RTCSessionDescriptionInit;
+    }
+  | {
+      type: 'ice-candidate';
+      connectionId: string;
+      kind: 'data' | 'media';
+      sourcePeerId: string;
+      targetPeerId: string;
+      candidate: RTCIceCandidateInit;
+    };
+
 const IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const HTML_CACHE_CONTROL = 'no-cache';
 const SW_CACHE_CONTROL = 'no-cache';
@@ -50,6 +73,9 @@ const STUN_SERVERS: IceServerConfig[] = [
 let cachedCfIceConfig: IceConfigPayload | null = null;
 let cachedCfIceConfigExpiresAt = 0;
 let inflightCfIceConfig: Promise<IceConfigPayload | null> | null = null;
+
+const SIGNALING_DO_NAME = 'global-signaling-hub';
+const SIGNALING_PATH = '/ws-signaling';
 
 const setSecurityHeaders = (headers: Headers) => {
   headers.set('X-Content-Type-Options', 'nosniff');
@@ -162,6 +188,31 @@ const createStaticIceConfigPayload = (env: Env): IceConfigPayload => {
   return createIceConfigPayload(iceServers);
 };
 
+const isAllowedSameOriginRequest = (request: Request): boolean => {
+  const requestOrigin = request.headers.get('Origin');
+  const requestReferer = request.headers.get('Referer');
+  const secFetchSite = request.headers.get('Sec-Fetch-Site');
+  const requestUrl = new URL(request.url);
+  const allowedOrigin = requestUrl.origin;
+  let refererOrigin: string | null = null;
+
+  if (requestReferer) {
+    try {
+      refererOrigin = new URL(requestReferer).origin;
+    } catch {
+      refererOrigin = null;
+    }
+  }
+
+  return (
+    requestOrigin === allowedOrigin ||
+    (!requestOrigin && refererOrigin === allowedOrigin) ||
+    (!requestOrigin &&
+      !refererOrigin &&
+      (secFetchSite === 'same-origin' || secFetchSite === 'same-site'))
+  );
+};
+
 const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload | null> => {
   const turnTokenId = getCloudflareTurnTokenId(env);
   const apiToken = env.CF_TURN_API_TOKEN?.trim();
@@ -230,29 +281,7 @@ const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload 
 };
 
 const handleIceConfig = async (request: Request, env: Env): Promise<Response> => {
-  const requestOrigin = request.headers.get('Origin');
-  const requestReferer = request.headers.get('Referer');
-  const secFetchSite = request.headers.get('Sec-Fetch-Site');
-  const requestUrl = new URL(request.url);
-  const allowedOrigin = requestUrl.origin;
-  let refererOrigin: string | null = null;
-
-  if (requestReferer) {
-    try {
-      refererOrigin = new URL(requestReferer).origin;
-    } catch {
-      refererOrigin = null;
-    }
-  }
-
-  const isFromAllowedOrigin =
-    requestOrigin === allowedOrigin ||
-    (!requestOrigin && refererOrigin === allowedOrigin) ||
-    (!requestOrigin &&
-      !refererOrigin &&
-      (secFetchSite === 'same-origin' || secFetchSite === 'same-site'));
-
-  if (!isFromAllowedOrigin) {
+  if (!isAllowedSameOriginRequest(request)) {
     return json(
       { error: 'Forbidden' },
       {
@@ -276,6 +305,31 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
       },
     }
   );
+};
+
+const handleSignalingUpgrade = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== 'GET') {
+    return new Response('Worker expected GET method', { status: 400 });
+  }
+
+  const upgradeHeader = request.headers.get('Upgrade');
+  if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
+    return new Response('Worker expected Upgrade: websocket', { status: 426 });
+  }
+
+  if (!isAllowedSameOriginRequest(request)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+
+  const url = new URL(request.url);
+  const peerId = url.searchParams.get('peerId')?.trim() || '';
+  if (!peerId) {
+    return new Response('Missing peerId', { status: 400 });
+  }
+
+  const hubId = env.SIGNALING_HUB.idFromName(SIGNALING_DO_NAME);
+  const stub = env.SIGNALING_HUB.get(hubId);
+  return await stub.fetch(request);
 };
 
 const handleNetworkCheck = (request: Request): Response => {
@@ -397,6 +451,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
 
+    if (pathname === SIGNALING_PATH) {
+      return await handleSignalingUpgrade(request, env);
+    }
+
     if (pathname.startsWith('/api/')) {
       const response = await handleApiRequest(request, env, pathname);
       return applyResponsePolicies(request, response);
@@ -406,3 +464,137 @@ export default {
     return applyResponsePolicies(request, assetResponse);
   },
 };
+
+type SessionAttachment = {
+  peerId: string;
+};
+
+export class SignalingHub extends DurableObject {
+  private sessionsByPeer = new Map<string, WebSocket>();
+  private peerBySocket = new Map<WebSocket, string>();
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as SessionAttachment | null;
+      if (!attachment?.peerId) continue;
+      this.sessionsByPeer.set(attachment.peerId, ws);
+      this.peerBySocket.set(ws, attachment.peerId);
+    }
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
+      return new Response('Expected websocket', { status: 426 });
+    }
+
+    const url = new URL(request.url);
+    const peerId = url.searchParams.get('peerId')?.trim() || '';
+    if (!peerId) {
+      return new Response('Missing peerId', { status: 400 });
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+
+    server.serializeAttachment({ peerId } satisfies SessionAttachment);
+    this.ctx.acceptWebSocket(server);
+
+    const existing = this.sessionsByPeer.get(peerId);
+    if (existing && existing !== server) {
+      server.send(
+        JSON.stringify({
+          type: 'error',
+          code: 'unavailable-id',
+          message: 'Peer ID already in use',
+        } satisfies SignalingEnvelope)
+      );
+      server.close(4009, 'Peer ID already in use');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    this.sessionsByPeer.set(peerId, server);
+    this.peerBySocket.set(server, peerId);
+    server.send(JSON.stringify({ type: 'registered', peerId } satisfies SignalingEnvelope));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    if (typeof message !== 'string') {
+      this.sendError(ws, 'invalid-message', 'Only text signaling messages are supported');
+      return;
+    }
+
+    let payload: SignalingEnvelope;
+    try {
+      payload = JSON.parse(message) as SignalingEnvelope;
+    } catch {
+      this.sendError(ws, 'invalid-message', 'Invalid JSON signaling payload');
+      return;
+    }
+
+    if (payload.type !== 'offer' && payload.type !== 'answer' && payload.type !== 'ice-candidate') {
+      this.sendError(ws, 'invalid-message', `Unsupported signaling type: ${(payload as { type?: string }).type ?? 'unknown'}`);
+      return;
+    }
+
+    const sourcePeerId = this.peerBySocket.get(ws) || '';
+    if (!sourcePeerId) {
+      this.sendError(ws, 'disconnected', 'Socket is not registered');
+      return;
+    }
+
+    const target = this.sessionsByPeer.get(payload.targetPeerId);
+    if (!target) {
+      this.sendError(ws, 'peer-unavailable', 'Target peer is unavailable', payload.connectionId, payload.targetPeerId, payload.kind);
+      return;
+    }
+
+    target.send(
+      JSON.stringify({
+        ...payload,
+        sourcePeerId,
+      } satisfies SignalingEnvelope)
+    );
+  }
+
+  webSocketClose(ws: WebSocket): void {
+    this.unregisterSocket(ws);
+  }
+
+  webSocketError(ws: WebSocket): void {
+    this.unregisterSocket(ws);
+  }
+
+  private unregisterSocket(ws: WebSocket): void {
+    const peerId = this.peerBySocket.get(ws);
+    if (!peerId) return;
+    this.peerBySocket.delete(ws);
+    if (this.sessionsByPeer.get(peerId) === ws) {
+      this.sessionsByPeer.delete(peerId);
+    }
+  }
+
+  private sendError(
+    ws: WebSocket,
+    code: string,
+    message: string,
+    connectionId?: string,
+    targetPeerId?: string,
+    kind?: 'data' | 'media'
+  ): void {
+    ws.send(
+      JSON.stringify({
+        type: 'error',
+        code,
+        message,
+        connectionId,
+        targetPeerId,
+        kind,
+      } satisfies SignalingEnvelope)
+    );
+  }
+}

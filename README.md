@@ -20,7 +20,7 @@
 ```bash
 npm install
 npm run dev
-npm run dev:signaling
+npm run dev:worker
 ```
 
 Build:
@@ -37,31 +37,38 @@ Cloudflare Worker:
 npm run deploy
 ```
 
-## Signaling Server
+## Signaling
 
-项目已从 PeerJS 默认信令迁移为自管 `Express + Socket.IO` 信令。
+项目已从 PeerJS 默认信令迁移为 **Cloudflare Worker + Durable Object + WebSocket** 自管信令。
 
-本地默认启动方式：
+生产环境下前端默认连接当前站点同源的：
+
+- `wss://<your-domain>/ws-signaling`
+
+Worker 会把该 WebSocket 请求转发到 `SignalingHub` Durable Object，由它负责：
+
+- 注册 `peerId`
+- 拒绝重复口令
+- 转发 `offer / answer / ice-candidate`
+
+本地开发建议同时启动：
 
 ```bash
-npm run dev:signaling
+npm run dev
+npm run dev:worker
 ```
 
-默认监听：
+其中：
 
-- `http://localhost:3001`
-- `GET /health`
-- `Socket.IO path: /socket.io/`
+- Vite 默认在 `http://127.0.0.1:3000`
+- Wrangler 默认在 `http://127.0.0.1:8787`
+- `vite.config.ts` 已代理 `/api` 和 `/ws-signaling` 到本地 Worker
 
-可选环境变量：
+可选前端环境变量：
 
-- `SIGNALING_PORT`
-- `SIGNALING_HOST`
-- `SIGNALING_ALLOWED_ORIGINS`
-- `VITE_SIGNALING_SERVER_URL`
+- `VITE_SIGNALING_WS_URL`
+- `VITE_SIGNALING_BASE_URL`
 - `VITE_SIGNALING_PATH`
-
-开发环境下前端默认连接 `http://localhost:3001`；生产环境下默认连接当前页面同源地址，可用 `VITE_SIGNALING_SERVER_URL` 覆盖。
 
 ## TURN Configuration (Recommended)
 
