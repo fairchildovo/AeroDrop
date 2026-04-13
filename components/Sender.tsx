@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import type Peer from 'peerjs';
-import type { DataConnection } from 'peerjs';
 import {
   TransferState,
   FileMetadata,
@@ -13,7 +11,7 @@ import {
 } from '../types';
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
 import { createCrc32Hasher } from '../services/crc32WorkerClient';
-import { loadPeerRuntime } from '../services/peerRuntime';
+import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer'; 
 import {

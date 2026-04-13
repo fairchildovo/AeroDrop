@@ -1,7 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import type Peer from 'peerjs';
-import type { MediaConnection, DataConnection } from 'peerjs';
-import { loadPeerRuntime } from '../services/peerRuntime';
+import { loadPeerRuntime, type Peer, type MediaConnection, type DataConnection } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
 

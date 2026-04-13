@@ -4,6 +4,10 @@ interface AssetBinding {
 
 interface Env {
   ASSETS: AssetBinding;
+  CF_TURN_TOKEN_ID?: string;
+  CF_TURN_KEY_ID?: string;
+  CF_TURN_API_TOKEN?: string;
+  CF_TURN_TTL_SECONDS?: string;
   TURN_URLS?: string;
   TURN_USERNAME?: string;
   TURN_CREDENTIAL?: string;
@@ -15,16 +19,37 @@ type IceServerConfig = {
   credential?: string;
 };
 
+type IceConfigPayload = {
+  iceServers: IceServerConfig[];
+  secure: boolean;
+  iceCandidatePoolSize: number;
+  iceTransportPolicy: 'all' | 'relay';
+  hasTurn: boolean;
+};
+
+type CloudflareTurnApiResponse = {
+  iceServers?: IceServerConfig[];
+};
+
 const IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const HTML_CACHE_CONTROL = 'no-cache';
 const SW_CACHE_CONTROL = 'no-cache';
 const MANIFEST_CACHE_CONTROL = 'no-cache';
+const DEFAULT_CF_TURN_TTL_SECONDS = 3600;
+const MIN_CF_TURN_TTL_SECONDS = 60;
+const MAX_CF_TURN_TTL_SECONDS = 86400;
+const CF_TURN_CACHE_SAFETY_WINDOW_SECONDS = 60;
+const CF_TURN_FETCH_TIMEOUT_MS = 4000;
 
 const STUN_SERVERS: IceServerConfig[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
 ];
+
+let cachedCfIceConfig: IceConfigPayload | null = null;
+let cachedCfIceConfigExpiresAt = 0;
+let inflightCfIceConfig: Promise<IceConfigPayload | null> | null = null;
 
 const setSecurityHeaders = (headers: Headers) => {
   headers.set('X-Content-Type-Options', 'nosniff');
@@ -86,7 +111,125 @@ const parseTurnUrls = (raw: string | undefined): string[] => {
     .filter(Boolean);
 };
 
-const handleIceConfig = (request: Request, env: Env): Response => {
+const parsePositiveInt = (value: string | undefined, fallback: number): number => {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const getCloudflareTurnTokenId = (env: Env): string => {
+  return env.CF_TURN_TOKEN_ID?.trim() || env.CF_TURN_KEY_ID?.trim() || '';
+};
+
+const getCloudflareTurnTtlSeconds = (env: Env): number => {
+  const requestedTtl = parsePositiveInt(env.CF_TURN_TTL_SECONDS, DEFAULT_CF_TURN_TTL_SECONDS);
+  return Math.min(MAX_CF_TURN_TTL_SECONDS, Math.max(MIN_CF_TURN_TTL_SECONDS, requestedTtl));
+};
+
+const createIceConfigPayload = (
+  iceServers: IceServerConfig[],
+  iceTransportPolicy: 'all' | 'relay' = 'all'
+): IceConfigPayload => ({
+  iceServers,
+  secure: true,
+  iceCandidatePoolSize: 20,
+  iceTransportPolicy,
+  hasTurn: iceServers.some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => url.startsWith('turn:') || url.startsWith('turns:'));
+  }),
+});
+
+const createStaticIceConfigPayload = (env: Env): IceConfigPayload => {
+  const turnUrls = parseTurnUrls(env.TURN_URLS);
+  const turnUsername = env.TURN_USERNAME?.trim();
+  const turnCredential = env.TURN_CREDENTIAL?.trim();
+
+  const iceServers: IceServerConfig[] = [...STUN_SERVERS];
+  const hasTurn = turnUrls.length > 0 && !!turnUsername && !!turnCredential;
+
+  if (hasTurn) {
+    iceServers.push({
+      urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls,
+      username: turnUsername,
+      credential: turnCredential,
+    });
+  }
+
+  return createIceConfigPayload(iceServers);
+};
+
+const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload | null> => {
+  const turnTokenId = getCloudflareTurnTokenId(env);
+  const apiToken = env.CF_TURN_API_TOKEN?.trim();
+
+  if (!turnTokenId || !apiToken) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (cachedCfIceConfig && now < cachedCfIceConfigExpiresAt) {
+    return cachedCfIceConfig;
+  }
+
+  if (inflightCfIceConfig) {
+    return inflightCfIceConfig;
+  }
+
+  inflightCfIceConfig = (async () => {
+    const ttlSeconds = getCloudflareTurnTtlSeconds(env);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CF_TURN_FETCH_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${turnTokenId}/credentials/generate-ice-servers`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ttl: ttlSeconds }),
+          signal: controller.signal,
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Cloudflare TURN API returned ${response.status}`);
+      }
+
+      const data = (await response.json()) as CloudflareTurnApiResponse;
+      if (!Array.isArray(data.iceServers) || data.iceServers.length === 0) {
+        throw new Error('Cloudflare TURN API returned no iceServers');
+      }
+
+      const payload = createIceConfigPayload(data.iceServers);
+      cachedCfIceConfig = payload;
+
+      const cacheTtlSeconds = Math.max(
+        30,
+        Math.min(300, ttlSeconds - CF_TURN_CACHE_SAFETY_WINDOW_SECONDS)
+      );
+      cachedCfIceConfigExpiresAt = Date.now() + cacheTtlSeconds * 1000;
+      return payload;
+    } catch (error) {
+      console.error('Failed to fetch Cloudflare TURN credentials', error);
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  })().finally(() => {
+    inflightCfIceConfig = null;
+  });
+
+  return inflightCfIceConfig;
+};
+
+const handleIceConfig = async (request: Request, env: Env): Promise<Response> => {
   const requestOrigin = request.headers.get('Origin');
   const requestReferer = request.headers.get('Referer');
   const secFetchSite = request.headers.get('Sec-Fetch-Site');
@@ -121,29 +264,11 @@ const handleIceConfig = (request: Request, env: Env): Response => {
     );
   }
 
-  const turnUrls = parseTurnUrls(env.TURN_URLS);
-  const turnUsername = env.TURN_USERNAME?.trim();
-  const turnCredential = env.TURN_CREDENTIAL?.trim();
-
-  const iceServers: IceServerConfig[] = [...STUN_SERVERS];
-  const hasTurn = turnUrls.length > 0 && !!turnUsername && !!turnCredential;
-
-  if (hasTurn) {
-    iceServers.push({
-      urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls,
-      username: turnUsername,
-      credential: turnCredential,
-    });
-  }
+  const cfIceConfig = await fetchCloudflareTurnIceConfig(env);
+  const payload = cfIceConfig ?? createStaticIceConfigPayload(env);
 
   return json(
-    {
-      iceServers,
-      secure: true,
-      iceCandidatePoolSize: 20,
-      iceTransportPolicy: 'all',
-      hasTurn,
-    },
+    payload,
     {
       headers: {
         'Cache-Control': 'no-store',

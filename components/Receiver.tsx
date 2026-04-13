@@ -1,13 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type Peer from 'peerjs';
-import type { DataConnection } from 'peerjs';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
 import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
-import { loadPeerRuntime } from '../services/peerRuntime';
+import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {

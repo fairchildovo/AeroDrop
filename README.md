@@ -20,6 +20,7 @@
 ```bash
 npm install
 npm run dev
+npm run dev:signaling
 ```
 
 Build:
@@ -36,9 +37,49 @@ Cloudflare Worker:
 npm run deploy
 ```
 
+## Signaling Server
+
+项目已从 PeerJS 默认信令迁移为自管 `Express + Socket.IO` 信令。
+
+本地默认启动方式：
+
+```bash
+npm run dev:signaling
+```
+
+默认监听：
+
+- `http://localhost:3001`
+- `GET /health`
+- `Socket.IO path: /socket.io/`
+
+可选环境变量：
+
+- `SIGNALING_PORT`
+- `SIGNALING_HOST`
+- `SIGNALING_ALLOWED_ORIGINS`
+- `VITE_SIGNALING_SERVER_URL`
+- `VITE_SIGNALING_PATH`
+
+开发环境下前端默认连接 `http://localhost:3001`；生产环境下默认连接当前页面同源地址，可用 `VITE_SIGNALING_SERVER_URL` 覆盖。
+
 ## TURN Configuration (Recommended)
 
-在运行环境配置以下变量：
+推荐优先使用 Cloudflare 官方 TURN 短期凭证模式，在 Worker 运行环境配置：
+
+- `CF_TURN_TOKEN_ID`
+- `CF_TURN_API_TOKEN`
+- `CF_TURN_TTL_SECONDS` 可选，默认 `3600`
+
+Worker 会按照 Cloudflare 官方方式，在服务端调用：
+
+```text
+POST https://rtc.live.cloudflare.com/v1/turn/keys/<CF_TURN_TOKEN_ID>/credentials/generate-ice-servers
+```
+
+并将返回的短期 `iceServers` 提供给前端，避免在前端暴露长期 TURN 凭证。
+
+如果没有配置 Cloudflare TURN，项目仍兼容旧的静态 TURN 变量：
 
 - `TURN_URLS`
 - `TURN_USERNAME`
@@ -49,12 +90,6 @@ npm run deploy
 - `turn:...:3478?transport=udp`
 - `turn:...:3478?transport=tcp`
 - `turns:...:443?transport=tcp`
-
-示例：
-
-```text
-turn:your-turn.example.com:3478?transport=udp,turn:your-turn.example.com:3478?transport=tcp,turns:your-turn.example.com:443?transport=tcp
-```
 
 ## Diagnostics
 

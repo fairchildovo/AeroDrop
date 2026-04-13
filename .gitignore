@@ -32,3 +32,6 @@ figma/*
 !.dev.vars.example
 .env*
 !.env.example
+
+# Local private documents
+private-docs/
