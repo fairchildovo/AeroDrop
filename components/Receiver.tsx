@@ -45,8 +45,8 @@ interface ReceiverProps {
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
   const setReceiverSnapshot = useTransferStore((store) => store.setReceiverSnapshot);
   const resetReceiverSnapshot = useTransferStore((store) => store.resetReceiverSnapshot);
-  const INITIAL_TIMEOUT_MS = 8000;
-  const RELAY_TIMEOUT_MS = 15000;
+  const INITIAL_TIMEOUT_MS = 15000;
+  const RELAY_TIMEOUT_MS = 25000;
   const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
   const FAST_RETRY_BASE_MS = 700;
   const FAST_RETRY_MAX_MS = 5000;
