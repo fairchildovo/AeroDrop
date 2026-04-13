@@ -84,18 +84,34 @@ type IceCandidateEnvelope = {
   targetPeerId: string;
   candidate: RTCIceCandidateInit;
 };
+type PingEnvelope = {
+  type: 'ping';
+  ts: number;
+  sourcePeerId?: string;
+};
+type PongEnvelope = {
+  type: 'pong';
+  ts: number;
+  sourcePeerId?: string;
+};
 
 type SignalingEnvelope =
   | RegisteredEnvelope
   | ErrorEnvelope
   | OfferEnvelope
   | AnswerEnvelope
-  | IceCandidateEnvelope;
+  | IceCandidateEnvelope
+  | PingEnvelope
+  | PongEnvelope;
 
 const JSON_ENVELOPE = '__aerodrop_json__';
 const TEXT_ENVELOPE = '__aerodrop_text__';
 const SIGNALING_LOG_KEY = '__AERODROP_SIGNALING_METRICS__';
 const DEFAULT_DEV_SIGNALING_BASE = 'http://127.0.0.1:8787';
+const DEFAULT_SIGNALING_PING_INTERVAL_MS = 20_000;
+const DEFAULT_SIGNALING_PONG_TIMEOUT_MS = 10_000;
+const DEFAULT_SIGNALING_RECONNECT_BASE_MS = 1_000;
+const MAX_SIGNALING_RECONNECT_DELAY_MS = 10_000;
 const SIGNALING_BASE =
   (import.meta.env.VITE_SIGNALING_WS_URL as string | undefined)?.trim() ||
   (import.meta.env.VITE_SIGNALING_BASE_URL as string | undefined)?.trim() ||
@@ -501,6 +517,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   private readyPromiseReject: ((reason?: unknown) => void) | null = null;
   private readyPromise: Promise<void>;
   private isManualClose = false;
+  private heartbeatTimer: number | null = null;
+  private pongTimeoutTimer: number | null = null;
+  private reconnectTimer: number | null = null;
+  private reconnectAttempts = 0;
+  private awaitingPong = false;
 
   constructor(id?: string, options?: PeerOptions);
   constructor(options?: PeerOptions);
@@ -553,6 +574,10 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
 
   private connectSignaling(): void {
     if (this.destroyed) return;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     const url = createSignalingUrl(this.id);
     this.log('info', 'signaling_ws_connect_start', {
       url,
@@ -562,6 +587,8 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.websocket = new WebSocket(url);
     this.websocket.onopen = () => {
       this.disconnected = false;
+      this.reconnectAttempts = 0;
+      this.startHeartbeat();
       this.log('info', 'signaling_ws_open', { url });
     };
     this.websocket.onmessage = (event) => {
@@ -571,12 +598,12 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       if (this.destroyed) return;
       const error = createRuntimeError('socket-error', 'Signaling WebSocket connection failed');
       this.log('error', 'signaling_ws_error');
-      this.readyPromiseReject?.(error);
       this.emit('error', error);
     };
     this.websocket.onclose = (event) => {
       const wasOpened = this.openedOnce;
       this.websocket = null;
+      this.stopHeartbeat();
       if (this.destroyed || this.isManualClose) {
         return;
       }
@@ -587,12 +614,83 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         wasOpened,
       });
       if (!wasOpened) {
-        this.readyPromiseReject?.(createRuntimeError('disconnected', 'Signaling WebSocket closed before registration'));
+        this.emit('error', createRuntimeError('disconnected', 'Signaling WebSocket closed before registration'));
       }
       if (wasOpened) {
         this.emit('disconnected');
       }
+      this.scheduleReconnect();
     };
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    const intervalMs = Math.max(5_000, this.options.pingInterval ?? DEFAULT_SIGNALING_PING_INTERVAL_MS);
+    this.heartbeatTimer = window.setInterval(() => {
+      if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (this.awaitingPong) {
+        this.log('warn', 'signaling_ping_timeout');
+        try {
+          this.websocket.close(4000, 'Signaling ping timeout');
+        } catch {
+          // Ignore close errors.
+        }
+        return;
+      }
+      this.awaitingPong = true;
+      const nowTs = Date.now();
+      try {
+        this.sendSignaling({ type: 'ping', ts: nowTs });
+      } catch (error) {
+        this.awaitingPong = false;
+        this.log('warn', 'signaling_ping_send_failed', {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      this.pongTimeoutTimer = window.setTimeout(() => {
+        if (!this.awaitingPong) return;
+        this.log('warn', 'signaling_pong_timeout', { pingTs: nowTs });
+        try {
+          this.websocket?.close(4001, 'Signaling pong timeout');
+        } catch {
+          // Ignore close errors.
+        }
+      }, DEFAULT_SIGNALING_PONG_TIMEOUT_MS);
+    }, intervalMs);
+  }
+
+  private stopHeartbeat(): void {
+    this.awaitingPong = false;
+    if (this.heartbeatTimer !== null) {
+      window.clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.pongTimeoutTimer !== null) {
+      window.clearTimeout(this.pongTimeoutTimer);
+      this.pongTimeoutTimer = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.destroyed || this.isManualClose || this.reconnectTimer !== null) {
+      return;
+    }
+    this.reconnectAttempts += 1;
+    const delay = Math.min(
+      DEFAULT_SIGNALING_RECONNECT_BASE_MS * Math.pow(2, Math.max(0, this.reconnectAttempts - 1)),
+      MAX_SIGNALING_RECONNECT_DELAY_MS
+    );
+    this.log('warn', 'signaling_reconnect_scheduled', {
+      attempt: this.reconnectAttempts,
+      delayMs: delay,
+    });
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnect();
+    }, delay);
   }
 
   private handleSignalingMessage(raw: unknown): void {
@@ -615,6 +713,22 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         this.readyPromiseReject = null;
         this.emit('open', this.id);
       }
+      return;
+    }
+
+    if (message.type === 'ping') {
+      this.log('info', 'signaling_ping_received', { ts: message.ts });
+      this.sendSignaling({ type: 'pong', ts: message.ts });
+      return;
+    }
+
+    if (message.type === 'pong') {
+      this.awaitingPong = false;
+      if (this.pongTimeoutTimer !== null) {
+        window.clearTimeout(this.pongTimeoutTimer);
+        this.pongTimeoutTimer = null;
+      }
+      this.log('info', 'signaling_pong_received', { ts: message.ts });
       return;
     }
 
@@ -774,6 +888,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     if (message.type === 'ice-candidate') {
       baseData.candidate = parseCandidateDetails(message.candidate);
     }
+    if (message.type === 'ping' || message.type === 'pong') {
+      baseData.ts = message.ts;
+    }
     this.log('info', `signaling_${message.type}_sent`, baseData);
     this.websocket.send(JSON.stringify(message));
   }
@@ -855,7 +972,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       return;
     }
     this.disconnected = false;
-    this.resetReadyPromise();
+    if (!this.openedOnce) {
+      this.resetReadyPromise();
+    }
     this.log('warn', 'signaling_reconnect');
     this.connectSignaling();
   }
@@ -865,6 +984,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.destroyed = true;
     this.isManualClose = true;
     this.log('info', 'peer_destroy');
+    this.stopHeartbeat();
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     Object.values(this.connections).flat().forEach((connection) => connection.close());
     if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
       this.websocket.close(1000, 'Peer destroyed');

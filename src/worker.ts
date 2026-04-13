@@ -36,6 +36,7 @@ type CloudflareTurnApiResponse = {
 
 type SignalingEnvelope =
   | { type: 'registered'; peerId: string }
+  | { type: 'ping' | 'pong'; ts: number; sourcePeerId?: string }
   | { type: 'error'; code: string; message?: string; connectionId?: string; targetPeerId?: string; kind?: 'data' | 'media' }
   | {
       type: 'offer' | 'answer';
@@ -533,6 +534,21 @@ export class SignalingHub extends DurableObject {
       payload = JSON.parse(message) as SignalingEnvelope;
     } catch {
       this.sendError(ws, 'invalid-message', 'Invalid JSON signaling payload');
+      return;
+    }
+
+    if (payload.type === 'ping') {
+      ws.send(
+        JSON.stringify({
+          type: 'pong',
+          ts: payload.ts,
+          sourcePeerId: this.peerBySocket.get(ws) || undefined,
+        } satisfies SignalingEnvelope)
+      );
+      return;
+    }
+
+    if (payload.type === 'pong') {
       return;
     }
 

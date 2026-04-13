@@ -82,7 +82,9 @@ function createStream(port) {
 
 self.onfetch = event => {
   const url = event.request.url;
-  const { pathname } = new URL(url);
+  const requestUrl = new URL(url);
+  const { pathname, origin } = requestUrl;
+  const isSameOrigin = origin === self.location.origin;
 
   // StreamSaver Handling
   if (url.endsWith('/ping')) {
@@ -153,6 +155,7 @@ self.onfetch = event => {
   if (
     event.request.method !== 'GET' ||
     !url.startsWith('http') ||
+    !isSameOrigin ||
     pathname.startsWith('/api/') ||
     event.request.headers.has('range')
   ) {
@@ -177,8 +180,12 @@ self.onfetch = event => {
 
         return response;
       })
-      .catch(() => {
-        return caches.match(event.request);
+      .catch(async () => {
+        const cached = await caches.match(event.request);
+        if (cached) {
+          return cached;
+        }
+        return Response.error();
       })
   );
 };
