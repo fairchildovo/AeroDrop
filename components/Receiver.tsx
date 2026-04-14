@@ -149,6 +149,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const preparedNativeWriterFileIndexRef = useRef<number | null>(null);
 
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const fileFinalizePromiseRef = useRef<Promise<void> | null>(null);
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
   const BUFFER_FLUSH_THRESHOLD = TRANSFER_CONFIG.WRITE_BUFFER_FLUSH_THRESHOLD;
@@ -1043,10 +1044,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         const fileName = sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`);
         const usePreparedNativeWriter =
           preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
+        const canUseNativeFs =
+          !isIOS &&
+          !isSafari &&
+          !!window.showSaveFilePicker &&
+          (metadataRef.current?.files?.length ?? 0) === 1 &&
+          (usePreparedNativeWriter || !!nativeFileHandleRef.current);
         const persistenceStrategy = decidePersistenceStrategy({
           isIOS,
           isSafari,
-          supportsNativeFs: usePreparedNativeWriter,
+          supportsNativeFs: canUseNativeFs,
           supportsStreamSaver: !!streamSaver,
           supportsIndexedDb: isIndexedDbSupported(),
           fileSize,
@@ -1090,6 +1097,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             if (usePreparedNativeWriter) {
                 isStreamingRef.current = true;
                 preparedNativeWriterFileIndexRef.current = null;
+            } else if (persistenceStrategy === 'native-fs' && nativeFileHandleRef.current) {
+                try {
+                    const writable = await nativeFileHandleRef.current.createWritable({ keepExistingData: false });
+                    nativeWriterRef.current = writable;
+                    streamSaverWriterRef.current = null;
+                    isStreamingRef.current = true;
+                } catch {
+                    nativeWriterRef.current = null;
+                    isStreamingRef.current = false;
+                }
             } else if (!nativeWriterRef.current) {
                 if (persistenceStrategy === 'indexeddb-buffer' || persistenceStrategy === 'memory-blob') {
                     isStreamingRef.current = false;
@@ -1175,6 +1192,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
          }
 
          if (isStreamingRef.current || isIndexedDbBufferingRef.current) {
+              const finalizePromise = (async () => {
               if (isIndexedDbBufferingRef.current) {
                   const finalBatch = indexedDbBatchRef.current;
                   const finalSize = indexedDbBatchBytesRef.current;
@@ -1219,6 +1237,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               }).catch(e => console.error("File Complete Error", e));
 
               await writeQueueRef.current;
+              })();
+              fileFinalizePromiseRef.current = finalizePromise;
+              try {
+                await finalizePromise;
+              } finally {
+                if (fileFinalizePromiseRef.current === finalizePromise) {
+                  fileFinalizePromiseRef.current = null;
+                }
+              }
           } else {
               if (!await saveCurrentFile()) {
                 return;
@@ -1232,6 +1259,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       else if (msg.type === 'ALL_FILES_COMPLETE') {
          if (!isTransferActiveRef.current) return;
          if (pendingAutoRepairFileRef.current !== null) return;
+         if (fileFinalizePromiseRef.current) {
+           await fileFinalizePromiseRef.current;
+         }
          await writeQueueRef.current;
          const expectedFiles = metadataRef.current?.files?.length ?? 0;
          const savedFiles = completedFileIndicesRef.current.size;
@@ -1677,6 +1707,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (isIOS || isSafari) {
           isStreamingRef.current = false;
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
+      } else if ((metadataRef.current?.files?.length ?? 0) === 1 && window.showSaveFilePicker && !nativeFileHandleRef.current) {
+          const prepared = await prepareNativeWriterForSingleFile(0);
+          if (!prepared) {
+            if (onNotification) onNotification("未选择原生保存位置，将回退到浏览器下载流。", 'info');
+          }
       }
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
