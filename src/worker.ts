@@ -11,9 +11,6 @@ interface Env {
   CF_TURN_KEY_ID?: string;
   CF_TURN_API_TOKEN?: string;
   CF_TURN_TTL_SECONDS?: string;
-  TURN_URLS?: string;
-  TURN_USERNAME?: string;
-  TURN_CREDENTIAL?: string;
 }
 
 type IceServerConfig = {
@@ -28,10 +25,22 @@ type IceConfigPayload = {
   iceCandidatePoolSize: number;
   iceTransportPolicy: 'all' | 'relay';
   hasTurn: boolean;
+  relayRecommended?: boolean;
+  relayReason?: 'isp' | 'score' | 'location' | null;
 };
 
 type CloudflareTurnApiResponse = {
   iceServers?: IceServerConfig[];
+};
+
+type NetworkRiskReason = 'isp' | 'score' | 'location' | null;
+
+type NetworkRiskAssessment = {
+  isRisk: boolean;
+  reason: NetworkRiskReason;
+  details: string;
+  isp: string;
+  country: string;
 };
 
 type SignalingEnvelope =
@@ -127,17 +136,6 @@ const json = (data: unknown, init: ResponseInit = {}): Response => {
   });
 };
 
-const parseTurnUrls = (raw: string | undefined): string[] => {
-  if (!raw) {
-    return [];
-  }
-
-  return raw
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-};
-
 const parsePositiveInt = (value: string | undefined, fallback: number): number => {
   if (!value) {
     return fallback;
@@ -158,7 +156,8 @@ const getCloudflareTurnTtlSeconds = (env: Env): number => {
 
 const createIceConfigPayload = (
   iceServers: IceServerConfig[],
-  iceTransportPolicy: 'all' | 'relay' = 'all'
+  iceTransportPolicy: 'all' | 'relay' = 'all',
+  relayReason: NetworkRiskReason = null
 ): IceConfigPayload => ({
   iceServers,
   secure: true,
@@ -168,26 +167,9 @@ const createIceConfigPayload = (
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
     return urls.some((url) => url.startsWith('turn:') || url.startsWith('turns:'));
   }),
+  relayRecommended: iceTransportPolicy === 'relay',
+  relayReason,
 });
-
-const createStaticIceConfigPayload = (env: Env): IceConfigPayload => {
-  const turnUrls = parseTurnUrls(env.TURN_URLS);
-  const turnUsername = env.TURN_USERNAME?.trim();
-  const turnCredential = env.TURN_CREDENTIAL?.trim();
-
-  const iceServers: IceServerConfig[] = [...STUN_SERVERS];
-  const hasTurn = turnUrls.length > 0 && !!turnUsername && !!turnCredential;
-
-  if (hasTurn) {
-    iceServers.push({
-      urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls,
-      username: turnUsername,
-      credential: turnCredential,
-    });
-  }
-
-  return createIceConfigPayload(iceServers);
-};
 
 const isAllowedSameOriginRequest = (request: Request): boolean => {
   const requestOrigin = request.headers.get('Origin');
@@ -212,6 +194,67 @@ const isAllowedSameOriginRequest = (request: Request): boolean => {
       !refererOrigin &&
       (secFetchSite === 'same-origin' || secFetchSite === 'same-site'))
   );
+};
+
+const assessNetworkRisk = (request: Request): NetworkRiskAssessment => {
+  const cf = request.cf;
+
+  if (!cf) {
+    return {
+      isRisk: false,
+      reason: null,
+      details: 'Local development or CF object missing',
+      isp: 'Local Dev',
+      country: 'CN',
+    };
+  }
+
+  const riskKeywords = [
+    'google',
+    'amazon',
+    'aws',
+    'microsoft',
+    'azure',
+    'digitalocean',
+    'linode',
+    'vultr',
+    'alibaba',
+    'tencent',
+    'oracle',
+    'cloudflare',
+    'cdn',
+    'server',
+  ];
+
+  const originalIsp = (cf.asOrganization as string) || 'Unknown';
+  const isp = originalIsp.toLowerCase();
+  const country = (cf.country as string) || 'Unknown';
+  const threatScore = (cf.threatScore as number) || 0;
+
+  let isRisk = false;
+  let reason: NetworkRiskReason = null;
+  let details = '';
+
+  if (riskKeywords.some((keyword) => isp.includes(keyword))) {
+    isRisk = true;
+    reason = 'isp';
+    details = originalIsp;
+  } else if (threatScore > 10) {
+    isRisk = true;
+    reason = 'score';
+    details = `Threat Score: ${threatScore}`;
+  } else if (country !== 'CN') {
+    reason = 'location';
+    details = `Location: ${country}`;
+  }
+
+  return {
+    isRisk,
+    reason,
+    details,
+    isp: originalIsp,
+    country,
+  };
 };
 
 const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload | null> => {
@@ -294,8 +337,14 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
     );
   }
 
+  const networkRisk = assessNetworkRisk(request);
   const cfIceConfig = await fetchCloudflareTurnIceConfig(env);
-  const payload = cfIceConfig ?? createStaticIceConfigPayload(env);
+  const basePayload = cfIceConfig ?? createIceConfigPayload(STUN_SERVERS);
+  const payload = createIceConfigPayload(
+    basePayload.iceServers,
+    basePayload.hasTurn && networkRisk.isRisk ? 'relay' : 'all',
+    networkRisk.isRisk ? networkRisk.reason : null
+  );
 
   return json(
     payload,
@@ -334,70 +383,14 @@ const handleSignalingUpgrade = async (request: Request, env: Env): Promise<Respo
 };
 
 const handleNetworkCheck = (request: Request): Response => {
-  const cf = request.cf;
-
-  if (!cf) {
-    return json(
-      {
-        isRisk: false,
-        reason: null,
-        details: 'Local development or CF object missing',
-        isp: 'Local Dev',
-        country: 'CN',
-      },
-      {
-        headers: {
-          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-        },
-      }
-    );
-  }
-
-  const riskKeywords = [
-    'google',
-    'amazon',
-    'aws',
-    'microsoft',
-    'azure',
-    'digitalocean',
-    'linode',
-    'vultr',
-    'alibaba',
-    'tencent',
-    'oracle',
-    'cloudflare',
-    'cdn',
-    'server',
-  ];
-
-  const originalIsp = (cf.asOrganization as string) || 'Unknown';
-  const isp = originalIsp.toLowerCase();
-  const country = (cf.country as string) || 'Unknown';
-  const threatScore = (cf.threatScore as number) || 0;
-
-  let isRisk = false;
-  let reason: 'isp' | 'score' | 'location' | null = null;
-  let details = '';
-
-  if (riskKeywords.some((keyword) => isp.includes(keyword))) {
-    isRisk = true;
-    reason = 'isp';
-    details = originalIsp;
-  } else if (threatScore > 10) {
-    isRisk = true;
-    reason = 'score';
-    details = `Threat Score: ${threatScore}`;
-  } else if (country !== 'CN') {
-    details = `Location: ${country}`;
-  }
-
+  const networkRisk = assessNetworkRisk(request);
   return json(
     {
-      isRisk,
-      reason,
-      details,
-      isp: originalIsp,
-      country,
+      isRisk: networkRisk.isRisk,
+      reason: networkRisk.reason,
+      details: networkRisk.details,
+      isp: networkRisk.isp,
+      country: networkRisk.country,
     },
     {
       headers: {

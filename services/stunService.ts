@@ -11,6 +11,8 @@ type IceConfigResponse = {
   iceCandidatePoolSize?: number;
   iceTransportPolicy?: RTCIceTransportPolicy;
   hasTurn?: boolean;
+  relayRecommended?: boolean;
+  relayReason?: 'isp' | 'score' | 'location' | null;
 };
 
 export type IceConfigResult = {
@@ -19,6 +21,8 @@ export type IceConfigResult = {
   iceCandidatePoolSize: number;
   iceTransportPolicy: RTCIceTransportPolicy;
   hasTurn: boolean;
+  relayRecommended: boolean;
+  relayReason: 'isp' | 'score' | 'location' | null;
 };
 
 const ICE_CACHE_TTL_MS = 30_000;
@@ -53,7 +57,9 @@ const fallbackConfig: IceConfigResult = {
   secure: true,
   iceCandidatePoolSize: 20,
   iceTransportPolicy: 'all' as RTCIceTransportPolicy,
-  hasTurn: false
+  hasTurn: false,
+  relayRecommended: false,
+  relayReason: null,
 };
 
 const pushIceConfigLog = (payload: unknown) => {
@@ -95,6 +101,8 @@ const logIceConfig = (
 const summarizeIceConfig = (result: IceConfigResult) => ({
   hasTurn: result.hasTurn,
   iceTransportPolicy: result.iceTransportPolicy,
+  relayRecommended: result.relayRecommended,
+  relayReason: result.relayReason,
   iceCandidatePoolSize: result.iceCandidatePoolSize,
   serverCount: result.iceServers.length,
   turnServerCount: result.iceServers.filter((server) => {
@@ -131,6 +139,10 @@ const fetchIceConfig = async (): Promise<IceConfigResult> => {
       secure: typeof data.secure === 'boolean' ? data.secure : fallbackConfig.secure,
       iceCandidatePoolSize: typeof data.iceCandidatePoolSize === 'number' ? data.iceCandidatePoolSize : fallbackConfig.iceCandidatePoolSize,
       iceTransportPolicy: data.iceTransportPolicy === 'relay' ? 'relay' : 'all',
+      relayRecommended: typeof data.relayRecommended === 'boolean'
+        ? data.relayRecommended
+        : data.iceTransportPolicy === 'relay',
+      relayReason: data.relayReason ?? null,
       hasTurn: typeof data.hasTurn === 'boolean'
         ? data.hasTurn
         : data.iceServers.some(server => {

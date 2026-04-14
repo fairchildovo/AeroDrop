@@ -72,7 +72,7 @@ npm run dev:worker
 
 ## TURN Configuration (Recommended)
 
-推荐优先使用 Cloudflare 官方 TURN 短期凭证模式，在 Worker 运行环境配置：
+当前仅保留 Cloudflare 官方 TURN 短期凭证模式，在 Worker 运行环境配置：
 
 - `CF_TURN_TOKEN_ID`
 - `CF_TURN_API_TOKEN`
@@ -84,19 +84,7 @@ Worker 会按照 Cloudflare 官方方式，在服务端调用：
 POST https://rtc.live.cloudflare.com/v1/turn/keys/<CF_TURN_TOKEN_ID>/credentials/generate-ice-servers
 ```
 
-并将返回的短期 `iceServers` 提供给前端，避免在前端暴露长期 TURN 凭证。
-
-如果没有配置 Cloudflare TURN，项目仍兼容旧的静态 TURN 变量：
-
-- `TURN_URLS`
-- `TURN_USERNAME`
-- `TURN_CREDENTIAL`
-
-建议 `TURN_URLS` 同时包含：
-
-- `turn:...:3478?transport=udp`
-- `turn:...:3478?transport=tcp`
-- `turns:...:443?transport=tcp`
+并将返回的短期 `iceServers` 提供给前端，避免在前端暴露长期 TURN 凭证。未配置 Cloudflare TURN 时，Worker 会自动回退到内置 STUN-only 配置，不再保留旧的静态 TURN 用户名/密码方案。
 
 ## Diagnostics
 

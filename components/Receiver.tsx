@@ -47,6 +47,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const resetReceiverSnapshot = useTransferStore((store) => store.resetReceiverSnapshot);
   const INITIAL_TIMEOUT_MS = 15000;
   const RELAY_TIMEOUT_MS = 25000;
+  const RELAY_PARALLEL_DELAY_MS = 1200;
+  const P2P_BACKFILL_DELAY_MS = 2200;
   const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
   const FAST_RETRY_BASE_MS = 700;
   const FAST_RETRY_MAX_MS = 5000;
@@ -106,7 +108,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receiverSessionIdRef = useRef<string>(getReceiverSessionId());
   const connectTelemetryRef = useRef<ConnectionSession | null>(null);
   const hasTurnRef = useRef(false);
-  const currentIcePolicyRef = useRef<RTCIceTransportPolicy>('all');
+  const preferredIcePolicyRef = useRef<RTCIceTransportPolicy>('all');
   const relayPeerRef = useRef<Peer | null>(null);
   const relayConnRef = useRef<DataConnection | null>(null);
   const happyEyeballsWonRef = useRef(false);
@@ -1392,6 +1394,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     markIceConfigFetched(connectTelemetryRef.current);
     setConnectingStage('connecting_signaling');
     hasTurnRef.current = iceConfig.hasTurn;
+    preferredIcePolicyRef.current =
+      iceConfig.hasTurn && iceConfig.iceTransportPolicy === 'relay' ? 'relay' : 'all';
     p2pTimeoutRetryCountRef.current = 0;
 
     const applyConnectTimeout = (timeoutMs: number) => {
@@ -1402,7 +1406,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         // If happy-eyeballs already connected, ignore the timeout.
         if (happyEyeballsWonRef.current) return;
 
-        if (hasTurnRef.current && currentIcePolicyRef.current !== 'relay') {
+        if (hasTurnRef.current && preferredIcePolicyRef.current === 'all') {
           if (p2pTimeoutRetryCountRef.current < 1) {
             p2pTimeoutRetryCountRef.current += 1;
             markSessionEvent(connectTelemetryRef.current, 'p2p_timeout_retry');
@@ -1423,8 +1427,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     };
 
     const createAndConnectPeer = async (policy: RTCIceTransportPolicy, timeoutMs: number) => {
-      currentIcePolicyRef.current = policy;
-
       // For relay fallback via happy-eyeballs, keep the P2P peer alive.
       if (policy !== 'relay' && peerRef.current && !peerRef.current.destroyed) {
         peerRef.current.destroy();
@@ -1501,18 +1503,34 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       applyConnectTimeout(timeoutMs);
       };
 
-      // Start P2P attempt.
-    void createAndConnectPeer(iceConfig.hasTurn ? 'all' : iceConfig.iceTransportPolicy, INITIAL_TIMEOUT_MS);
+    const initialPolicy = preferredIcePolicyRef.current;
+    const backgroundPolicy: RTCIceTransportPolicy = initialPolicy === 'relay' ? 'all' : 'relay';
+    const initialTimeoutMs = initialPolicy === 'relay' ? RELAY_TIMEOUT_MS : INITIAL_TIMEOUT_MS;
+    const backgroundDelayMs = initialPolicy === 'relay' ? P2P_BACKFILL_DELAY_MS : RELAY_PARALLEL_DELAY_MS;
+    const backgroundTimeoutMs = backgroundPolicy === 'relay' ? RELAY_TIMEOUT_MS : INITIAL_TIMEOUT_MS;
 
-    // Happy-eyeballs: launch relay attempt in parallel after a short delay.
-    if (iceConfig.hasTurn) {
+    markSessionEvent(connectTelemetryRef.current, 'ice_strategy_selected', {
+      initialPolicy,
+      backgroundPolicy: iceConfig.hasTurn ? backgroundPolicy : null,
+      relayRecommended: iceConfig.relayRecommended,
+      relayReason: iceConfig.relayReason,
+    });
+    void createAndConnectPeer(initialPolicy, initialTimeoutMs);
+
+    if (iceConfig.hasTurn && backgroundPolicy !== initialPolicy) {
       window.setTimeout(() => {
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
-        markSessionEvent(connectTelemetryRef.current, 'happy_eyeballs_relay_start');
-        startConnectionAttempt(connectTelemetryRef.current, 'relay_parallel');
-        void createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
-      }, 3000);
+        markSessionEvent(
+          connectTelemetryRef.current,
+          backgroundPolicy === 'relay' ? 'happy_eyeballs_relay_start' : 'happy_eyeballs_p2p_backfill_start'
+        );
+        startConnectionAttempt(
+          connectTelemetryRef.current,
+          backgroundPolicy === 'relay' ? 'relay_parallel' : 'p2p_backfill_parallel'
+        );
+        void createAndConnectPeer(backgroundPolicy, backgroundTimeoutMs);
+      }, backgroundDelayMs);
     }
   };
 
