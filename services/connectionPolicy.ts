@@ -25,11 +25,11 @@ const shouldPreferRelayFirst = (
     return null;
   }
 
-  if (iceConfig.iceTransportPolicy === 'relay' || iceConfig.relayRecommended) {
+  if (iceConfig.iceTransportPolicy === 'relay') {
     return 'relay_recommended';
   }
 
-  if (profile.isLikelyMobileNetwork) {
+  if (profile.isLikelyMobileNetwork && profile.isConstrained) {
     return 'mobile_network';
   }
 
@@ -46,6 +46,15 @@ export const createHappyEyeballsPlan = (
   options: ConnectionPolicyOptions
 ): HappyEyeballsPlan => {
   const relayReason = shouldPreferRelayFirst(iceConfig, profile);
+  const shouldStartRelayFallbackEarly =
+    iceConfig.hasTurn &&
+    (
+      iceConfig.relayRecommended ||
+      profile.isLikelyMobileNetwork ||
+      profile.isConstrained ||
+      (iceConfig.fetchLatencyMs !== null && iceConfig.fetchLatencyMs >= 1200)
+    );
+
   if (!iceConfig.hasTurn) {
     return {
       initialPolicy: 'all',
@@ -72,8 +81,16 @@ export const createHappyEyeballsPlan = (
     initialPolicy: 'all',
     backgroundPolicy: 'relay',
     initialTimeoutMs: options.defaultInitialTimeoutMs,
-    backgroundDelayMs: profile.isConstrained ? 800 : options.relayParallelDelayMs,
+    backgroundDelayMs: shouldStartRelayFallbackEarly
+      ? Math.min(600, options.relayParallelDelayMs)
+      : (profile.isConstrained ? 800 : options.relayParallelDelayMs),
     backgroundTimeoutMs: options.relayInitialTimeoutMs,
-    reason: 'default',
+    reason: shouldStartRelayFallbackEarly
+      ? (iceConfig.relayRecommended
+          ? 'relay_recommended'
+          : profile.isLikelyMobileNetwork
+            ? 'mobile_network'
+            : 'constrained_network')
+      : 'default',
   };
 };

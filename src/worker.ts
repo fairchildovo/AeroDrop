@@ -210,7 +210,8 @@ const normalizeIceServers = (iceServers: IceServerConfig[]): IceServerConfig[] =
 const createIceConfigPayload = (
   iceServers: IceServerConfig[],
   iceTransportPolicy: 'all' | 'relay' = 'all',
-  relayReason: NetworkRiskReason = null
+  relayReason: NetworkRiskReason = null,
+  relayRecommended = iceTransportPolicy === 'relay',
 ): IceConfigPayload => ({
   iceServers: normalizeIceServers(iceServers),
   secure: true,
@@ -220,7 +221,7 @@ const createIceConfigPayload = (
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
     return urls.some((url) => url.startsWith('turn:') || url.startsWith('turns:'));
   }),
-  relayRecommended: iceTransportPolicy === 'relay',
+  relayRecommended,
   relayReason,
 });
 
@@ -427,8 +428,9 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
   const basePayload = cfIceConfig ?? createIceConfigPayload(STUN_SERVERS);
   const payload = createIceConfigPayload(
     basePayload.iceServers,
-    basePayload.hasTurn && networkRisk.isRisk ? 'relay' : 'all',
-    networkRisk.isRisk ? networkRisk.reason : null
+    'all',
+    networkRisk.isRisk ? networkRisk.reason : null,
+    basePayload.hasTurn && networkRisk.isRisk,
   );
 
   return json(

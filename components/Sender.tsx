@@ -257,6 +257,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const peerIsLAN = useRef<Map<string, boolean>>(new Map());
   const peerAdaptiveFlowRef = useRef<Map<string, AdaptiveFlowProfile>>(new Map());
+  const peerRouteLogSignatureRef = useRef<Map<string, string>>(new Map());
 
   const updateAdaptiveFlow = (peerId: string, route: ConnectionRoute, metrics: ConnectionMetrics) => {
     const next = deriveAdaptiveFlow(route, metrics);
@@ -332,6 +333,42 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               const isLanConnection = !isRelayConnection && isPrivateIP(localIP) && isPrivateIP(remoteIP);
               route = { isLan: isLanConnection, isRelay: isRelayConnection, protocol };
               updateAdaptiveFlow(conn.peer, route, { rttMs, lossPct, availableOutgoingBitrate });
+
+              const turnUrl = typeof localCandidate?.url === 'string' && localCandidate.url.startsWith('turn')
+                ? localCandidate.url
+                : typeof remoteCandidate?.url === 'string' && remoteCandidate.url.startsWith('turn')
+                  ? remoteCandidate.url
+                  : '';
+              const relayProtocol = localCandidate?.relayProtocol || remoteCandidate?.relayProtocol || '';
+              const routeSignature = [
+                protocol,
+                localCandidateType,
+                remoteCandidateType,
+                localIP,
+                remoteIP,
+                turnUrl,
+                relayProtocol,
+              ].join('|');
+              if (peerRouteLogSignatureRef.current.get(conn.peer) !== routeSignature) {
+                peerRouteLogSignatureRef.current.set(conn.peer, routeSignature);
+                console.info('[ice-route:selected]', {
+                  role: 'sender',
+                  peerId: conn.peer,
+                  protocol,
+                  localCandidateType,
+                  remoteCandidateType,
+                  localIP,
+                  remoteIP,
+                  localNetworkType: localCandidate?.networkType || '',
+                  remoteNetworkType: remoteCandidate?.networkType || '',
+                  relayProtocol,
+                  turnUrlType: turnUrl ? (turnUrl.startsWith('turns:') ? 'turns' : 'turn') : 'none',
+                  turnUrl: turnUrl || undefined,
+                  rttMs,
+                  availableOutgoingBitrate,
+                  pathHint: isLanConnection ? 'lan' : isRelayConnection ? 'relay' : 'p2p',
+                });
+              }
 
               peerIsLAN.current.set(conn.peer, isLanConnection);
               const networkType = isRelayConnection ? '中继（速度会变慢）' : isLanConnection ? '直连' : '点对点';
@@ -700,6 +737,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       peerConnectionTypeRef.current.delete(conn.peer);
       peerHeartbeatAtRef.current.delete(conn.peer);
       peerAdaptiveFlowRef.current.delete(conn.peer);
+      peerRouteLogSignatureRef.current.delete(conn.peer);
       removePeerName(conn.peer);
 
       const removedSessionId = peerSessionIdsRef.current.get(conn.peer);

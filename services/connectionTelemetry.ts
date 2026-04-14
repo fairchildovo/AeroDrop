@@ -21,6 +21,9 @@ type IceRoute = {
   remoteCandidateType?: string;
   localNetworkType?: string;
   remoteNetworkType?: string;
+  localUrl?: string;
+  remoteUrl?: string;
+  relayProtocol?: string;
   pathType?: 'LAN' | 'WAN' | 'UNKNOWN';
   rttMs?: number;
 };
@@ -48,12 +51,21 @@ type CandidateLike = {
   candidateType?: string;
   protocol?: string;
   networkType?: string;
+  url?: string;
+  relayProtocol?: string;
 };
 
 type StatsLike = Map<string, any>;
 
 const sessionPrefix = 'conn';
 const globalKey = '__AERODROP_CONN_METRICS__';
+const QUIET_INFO_EVENTS = new Set([
+  'session_start',
+  'attempt_start',
+  'attempt_retry',
+  'ice_config_fetched',
+  'signaling_open',
+]);
 
 const now = () => performance.now();
 
@@ -88,7 +100,7 @@ const log = (level: 'info' | 'warn', session: ConnectionSession, event: string, 
   };
   if (level === 'warn') {
     console.warn('[conn-metrics]', payload);
-  } else {
+  } else if (!QUIET_INFO_EVENTS.has(event)) {
     console.info('[conn-metrics]', payload);
   }
   pushGlobal(payload);
@@ -264,6 +276,9 @@ export const getIceRoute = async (pc: RTCPeerConnection): Promise<IceRoute | nul
     remoteCandidateType: remote?.candidateType,
     localNetworkType: local?.networkType,
     remoteNetworkType: remote?.networkType,
+    localUrl: local?.url,
+    remoteUrl: remote?.url,
+    relayProtocol: local?.relayProtocol || remote?.relayProtocol,
     pathType: localPrivate && remotePrivate ? 'LAN' : 'WAN',
     rttMs: typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : undefined,
   };

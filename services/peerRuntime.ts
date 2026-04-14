@@ -118,6 +118,29 @@ const SIGNALING_BASE =
   (import.meta.env.DEV ? DEFAULT_DEV_SIGNALING_BASE : window.location.origin);
 const SIGNALING_PATH =
   ((import.meta.env.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/ws-signaling').replace(/\/?$/, '');
+const QUIET_SIGNAL_EVENTS = new Set([
+  'signaling_ping_received',
+  'signaling_pong_received',
+  'signaling_ping_sent',
+  'signaling_pong_sent',
+  'ice_candidate_local',
+  'signaling_ice_candidate_sent',
+  'signaling_ice_candidate_received',
+  'pc_ice_gathering_state',
+  'pc_signaling_state',
+  'pc_ice_connection_state',
+  'pc_connection_state',
+]);
+const IMPORTANT_SIGNAL_INFO_EVENTS = new Set([
+  'signaling_ws_connect_start',
+  'signaling_ws_open',
+  'signaling_registered',
+  'offer_created',
+  'signaling_offer_received',
+  'signaling_answer_received',
+  'data_channel_open',
+  'data_channel_close',
+]);
 
 const createRuntimeError = (
   type: PeerRuntimeErrorType,
@@ -549,7 +572,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       console.warn('[signal-metrics]', payload);
     } else if (level === 'error') {
       console.error('[signal-metrics]', payload);
-    } else {
+    } else if (!QUIET_SIGNAL_EVENTS.has(event) && IMPORTANT_SIGNAL_INFO_EVENTS.has(event)) {
       console.info('[signal-metrics]', payload);
     }
     pushSignalLog(payload);

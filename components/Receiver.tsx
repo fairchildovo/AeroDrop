@@ -120,6 +120,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const relayConnRef = useRef<DataConnection | null>(null);
   const happyEyeballsWonRef = useRef(false);
   const p2pTimeoutRetryCountRef = useRef(0);
+  const connectionRouteLogSignatureRef = useRef('');
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -890,6 +891,38 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (pc) {
         collectIceRouteWithRetry(pc).then((route) => {
           attachIceRouteToSession(connectTelemetryRef.current, route);
+          if (!route) return;
+          const routeSignature = [
+            route.protocol || '',
+            route.localCandidateType || '',
+            route.remoteCandidateType || '',
+            route.localUrl || '',
+            route.remoteUrl || '',
+            route.relayProtocol || '',
+            route.pathType || '',
+          ].join('|');
+          if (connectionRouteLogSignatureRef.current !== routeSignature) {
+            connectionRouteLogSignatureRef.current = routeSignature;
+            const turnUrl = route.localUrl?.startsWith('turn')
+              ? route.localUrl
+              : route.remoteUrl?.startsWith('turn')
+                ? route.remoteUrl
+                : '';
+            console.info('[ice-route:selected]', {
+              role: 'receiver',
+              peerId: conn.peer,
+              protocol: route.protocol,
+              localCandidateType: route.localCandidateType,
+              remoteCandidateType: route.remoteCandidateType,
+              localNetworkType: route.localNetworkType,
+              remoteNetworkType: route.remoteNetworkType,
+              relayProtocol: route.relayProtocol,
+              turnUrlType: turnUrl ? (turnUrl.startsWith('turns:') ? 'turns' : 'turn') : 'none',
+              turnUrl: turnUrl || undefined,
+              pathType: route.pathType,
+              rttMs: route.rttMs,
+            });
+          }
         });
       }
     });
