@@ -78,6 +78,12 @@ npm run dev:worker
 - `CF_TURN_API_TOKEN`
 - `CF_TURN_TTL_SECONDS` 可选，默认 `3600`
 
+注意：
+
+- 如果这些值是在 Cloudflare Dashboard 里手动添加的，`wrangler deploy` 默认会以下发配置为准覆盖远端变量。
+- 本项目已在 [`wrangler.jsonc`](./wrangler.jsonc) 中启用 `keep_vars = true` 对应的 `keep_vars: true`，用于保留 Dashboard 上已有的变量。
+- `CF_TURN_API_TOKEN` 属于敏感值，建议在 Dashboard 里以 Secret 方式保存；Cloudflare 文档说明 Secrets 不会在普通 `wrangler deploy` 时被删除。
+
 Worker 会按照 Cloudflare 官方方式，在服务端调用：
 
 ```text
