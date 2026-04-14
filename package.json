@@ -8,6 +8,7 @@
     "dev:worker": "wrangler dev --config wrangler.jsonc",
     "build": "vite build",
     "preview": "npm run build && wrangler dev --config wrangler.jsonc",
+    "test:receive": "node --test services/receive/*.test.ts",
     "typecheck": "tsc --noEmit",
     "deploy": "npm run build && wrangler deploy --config wrangler.jsonc",
     "deploy:worker": "npm run deploy"

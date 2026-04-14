@@ -11,6 +11,7 @@ export interface ReceiveSessionCoordinatorOptions {
   awaitPendingFileFinalize: (reason: string) => Promise<boolean>;
   isIOS: boolean;
   isSafari: boolean;
+  preferBrowserDownload: boolean;
   supportsStreamSaver: boolean;
   indexedDbThresholdBytes: number;
   getMetadataFileCount: () => number;
@@ -84,6 +85,7 @@ export const createReceiveSessionCoordinator = (
     const persistenceStrategy = decidePersistenceStrategy({
       isIOS: options.isIOS,
       isSafari: options.isSafari,
+      preferBrowserDownload: options.preferBrowserDownload,
       supportsNativeFs: canUseNativeFs,
       supportsStreamSaver: options.supportsStreamSaver,
       supportsIndexedDb: options.supportsIndexedDb(),

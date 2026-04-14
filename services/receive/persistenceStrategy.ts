@@ -7,6 +7,7 @@ export type PersistenceStrategy =
 export interface PersistenceStrategyInput {
   isIOS: boolean;
   isSafari: boolean;
+  preferBrowserDownload?: boolean;
   supportsNativeFs: boolean;
   supportsStreamSaver: boolean;
   supportsIndexedDb: boolean;

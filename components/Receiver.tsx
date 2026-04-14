@@ -32,6 +32,11 @@ import { createReceivePersistenceAdapter, type ReceivePersistenceAdapter } from 
 import { createReceiveRecoveryCoordinator, type ReceiveRecoveryCoordinator } from '../services/receive/recoveryCoordinator';
 import { createReceivePersistenceOrchestrator, type ReceivePersistenceOrchestrator } from '../services/receive/persistenceOrchestrator';
 import { createReceiveSessionCoordinator, type ReceiveSessionCoordinator } from '../services/receive/sessionCoordinator';
+import {
+  createReceiveStreamingWriter,
+  type ReceiveStreamingTarget,
+  type ReceiveStreamingWriter,
+} from '../services/receive/streamingWriter';
 import { useTransferStore } from '../stores/transferStore';
 import { createReceiverSessionService } from '../services/receiverSessionService';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
@@ -144,14 +149,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const hashedBytesRef = useRef<number>(0);
   
   const isStreamingRef = useRef<boolean>(false);
-  const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
   const nativeFileHandleRef = useRef<FileSystemFileHandle | null>(null);
-  const streamSaverWriterRef = useRef<WritableStreamDefaultWriter | null>(null);
   const preparedNativeWriterFileIndexRef = useRef<number | null>(null);
 
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const writeBufferRef = useRef<Uint8Array[]>([]);
-  const writeBufferSizeRef = useRef<number>(0);
   const BUFFER_FLUSH_THRESHOLD = TRANSFER_CONFIG.WRITE_BUFFER_FLUSH_THRESHOLD;
   const isIndexedDbBufferingRef = useRef<boolean>(false);
   const indexedDbOpenPromiseRef = useRef<Promise<IDBDatabase> | null>(null);
@@ -173,6 +174,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receiveRecoveryCoordinatorRef = useRef<ReceiveRecoveryCoordinator | null>(null);
   const receivePersistenceOrchestratorRef = useRef<ReceivePersistenceOrchestrator | null>(null);
   const receiveSessionCoordinatorRef = useRef<ReceiveSessionCoordinator | null>(null);
+  const receiveStreamingWriterRef = useRef<ReceiveStreamingWriter | null>(null);
+
+  if (!receiveStreamingWriterRef.current) {
+    receiveStreamingWriterRef.current = createReceiveStreamingWriter({
+      flushThresholdBytes: BUFFER_FLUSH_THRESHOLD,
+    });
+  }
+  const receiveStreamingWriter = receiveStreamingWriterRef.current;
 
   const codeRef = useRef<string>('');
   const isMountedRef = useRef(true);
@@ -497,16 +506,66 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     };
   }, []);
 
+  const createNativeStreamingTarget = (
+    writable: FileSystemWritableFileStream
+  ): ReceiveStreamingTarget => ({
+    kind: 'native-fs',
+    write: async (chunk) => {
+      await writable.write(chunk);
+    },
+    close: async () => {
+      await writable.close();
+    },
+    truncate: async (size) => {
+      await writable.truncate(size);
+    },
+  });
+
+  const createStreamSaverTarget = (
+    writer: WritableStreamDefaultWriter<Uint8Array>
+  ): ReceiveStreamingTarget => ({
+    kind: 'stream-saver',
+    write: async (chunk) => {
+      await writer.write(chunk);
+    },
+    close: async () => {
+      await writer.close();
+    },
+    abort: async () => {
+      await writer.abort();
+    },
+  });
+
+  const handleStreamingWriteFailure = async (error: unknown) => {
+    if (stateRef.current === TransferState.ERROR) {
+      return;
+    }
+
+    console.error('Write Error:', error);
+    const closeOk = await receiveStreamingWriter.closeCurrentTarget({
+      truncateNativeBeforeClose: true,
+      abortStreamSaver: true,
+      preserveCommittedBytes: false,
+    });
+
+    if (!closeOk) {
+      receiveStreamingWriter.reset();
+    }
+
+    isStreamingRef.current = receiveStreamingWriter.isStreaming();
+    failTransferPersistence("写入文件失败，磁盘可能已满或权限不足。");
+  };
+
   const abortStreams = async () => {
-      try {
-          if (nativeWriterRef.current) {
-              try { await nativeWriterRef.current.truncate(0); } catch {}
-              await nativeWriterRef.current.close();
-              nativeWriterRef.current = null;
-          }
-          if (streamSaverWriterRef.current) { await streamSaverWriterRef.current.abort(); streamSaverWriterRef.current = null; }
-          isStreamingRef.current = false;
-      } catch (e) { console.warn("Stream abort warning:", e); }
+      const ok = await receiveStreamingWriter.closeCurrentTarget({
+        truncateNativeBeforeClose: true,
+        abortStreamSaver: true,
+        preserveCommittedBytes: false,
+      });
+      if (!ok) {
+        console.warn("Stream abort warning: failed to close active target cleanly");
+      }
+      isStreamingRef.current = receiveStreamingWriter.isStreaming();
       resetIndexedDbBufferRuntime();
   };
 
@@ -514,63 +573,29 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       truncateNativeBeforeClose?: boolean;
       abortStreamSaver?: boolean;
   }): Promise<boolean> => {
-      const truncateNativeBeforeClose = options?.truncateNativeBeforeClose === true;
-      const abortStreamSaver = options?.abortStreamSaver === true;
-      const closeWithTimeout = async (task: Promise<void>, timeoutMs: number, label: string) => {
-          return Promise.race<void>([
-              task,
-              new Promise<void>((_, reject) => {
-                  window.setTimeout(() => reject(new Error(`${label}_TIMEOUT`)), timeoutMs);
-              })
-          ]);
-      };
-      let ok = true;
-      try {
-          if (nativeWriterRef.current) {
-              if (truncateNativeBeforeClose) {
-                  try {
-                      await closeWithTimeout(nativeWriterRef.current.truncate(0), 12000, 'NATIVE_WRITER_TRUNCATE');
-                  } catch (e) {
-                      ok = false;
-                      console.warn("Native writer truncate warning:", e);
-                  }
-              }
-              await closeWithTimeout(nativeWriterRef.current.close(), 12000, 'NATIVE_WRITER_CLOSE');
-              nativeWriterRef.current = null;
-          }
-          if (streamSaverWriterRef.current) {
-              if (abortStreamSaver) {
-                  await closeWithTimeout(streamSaverWriterRef.current.abort(), 12000, 'STREAM_SAVER_ABORT');
-              } else {
-                  await closeWithTimeout(streamSaverWriterRef.current.close(), 12000, 'STREAM_SAVER_CLOSE');
-              }
-              streamSaverWriterRef.current = null;
-          }
-          isStreamingRef.current = false;
-          return ok;
-      } catch (e) {
-          console.warn("Stream close warning:", e);
-      }
-      return false;
+      const ok = await receiveStreamingWriter.closeCurrentTarget({
+        truncateNativeBeforeClose: options?.truncateNativeBeforeClose === true,
+        abortStreamSaver: options?.abortStreamSaver === true,
+        preserveCommittedBytes: false,
+      });
+      isStreamingRef.current = receiveStreamingWriter.isStreaming();
+      return ok;
   };
 
   const flushPendingStreamWrites = async (): Promise<boolean> => {
-      if (!isStreamingRef.current) {
-          await writeQueueRef.current;
+      if (!receiveStreamingWriter.isStreaming()) {
+          await receiveStreamingWriter.awaitIdle();
           return true;
       }
 
-      const finalBatch = writeBufferRef.current;
-      const finalSize = writeBufferSizeRef.current;
-      writeBufferRef.current = [];
-      writeBufferSizeRef.current = 0;
-
-      if (finalSize > 0) {
-          writeQueueRef.current = writeQueueRef.current.then(() => flushSpecificBatch(finalBatch, finalSize));
+      try {
+        await receiveStreamingWriter.flushPending();
+        await receiveStreamingWriter.awaitIdle();
+        return stateRef.current !== TransferState.ERROR;
+      } catch (error) {
+        await handleStreamingWriteFailure(error);
+        return false;
       }
-
-      await writeQueueRef.current;
-      return stateRef.current !== TransferState.ERROR;
   };
 
   const markCurrentFilePersisted = (fileName: string) => {
@@ -602,8 +627,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const resetFileBuffersForRepair = (fileIndex: number) => {
       chunksRef.current = [];
-      writeBufferRef.current = [];
-      writeBufferSizeRef.current = 0;
+      receiveStreamingWriter.reset();
+      isStreamingRef.current = false;
       resetIndexedDbBufferRuntime();
       indexedDbChunkSeqRef.current = 0;
       indexedDbBufferedBytesRef.current = 0;
@@ -629,16 +654,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (!meta || meta.files.length !== 1 || targetFileIndex !== 0) return false;
 
     try {
-      const writable = await handle.createWritable({ keepExistingData: true });
-      await writable.seek(byteOffset);
-      nativeWriterRef.current = writable;
-      streamSaverWriterRef.current = null;
-      isStreamingRef.current = true;
-      preparedNativeWriterFileIndexRef.current = targetFileIndex;
-      return true;
+      const reopened = await receiveStreamingWriter.reopenForResume(async (resumeOffset) => {
+        const writable = await handle.createWritable({ keepExistingData: true });
+        await writable.seek(resumeOffset);
+        return createNativeStreamingTarget(writable);
+      }, byteOffset);
+      isStreamingRef.current = receiveStreamingWriter.isStreaming();
+      preparedNativeWriterFileIndexRef.current = reopened ? targetFileIndex : null;
+      return reopened;
     } catch (error) {
       console.warn('Failed to reopen native writer for resume:', error);
-      nativeWriterRef.current = null;
+      receiveStreamingWriter.reset();
+      isStreamingRef.current = false;
       return false;
     }
   };
@@ -650,11 +677,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const hasStreamingTarget =
       currentFileIndexRef.current === fileIndex &&
       receivedSizeRef.current > 0 &&
-      (
-        writeBufferRef.current.length > 0 ||
-        !!nativeWriterRef.current ||
-        !!streamSaverWriterRef.current
-      );
+      receiveStreamingWriter.hasRetainedData();
 
     return (
       currentFileIndexRef.current === fileIndex &&
@@ -664,38 +687,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         hasStreamingTarget
       )
     );
-  };
-
-  const prepareNativeWriterForSingleFile = async (targetFileIndex: number): Promise<boolean> => {
-    if (isIOS || isSafari) return false;
-    if (!window.showSaveFilePicker) return false;
-    const meta = metadataRef.current;
-    if (!meta || meta.files.length !== 1) return false;
-    const info = meta.files[targetFileIndex];
-    if (!info) return false;
-
-    const ext = (() => {
-      const dot = info.name.lastIndexOf('.');
-      return dot > -1 ? info.name.slice(dot).toLowerCase() : '';
-    })();
-
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: sanitizeFileName(info.name),
-        types: ext
-          ? [{ description: '文件', accept: { [info.type || 'application/octet-stream']: [ext] } }]
-          : undefined,
-        excludeAcceptAllOption: false,
-      });
-      const writable = await handle.createWritable();
-      nativeFileHandleRef.current = handle;
-      nativeWriterRef.current = writable;
-      isStreamingRef.current = true;
-      preparedNativeWriterFileIndexRef.current = targetFileIndex;
-      return true;
-    } catch {
-      return false;
-    }
   };
 
   useEffect(() => {
@@ -782,34 +773,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const flushSpecificBatch = async (batch: Uint8Array[], totalLen: number) => {
-      if (!isStreamingRef.current) return;
-
-      try {
-          const combined = new Uint8Array(totalLen);
-          let offset = 0;
-          for (const chunk of batch) {
-              combined.set(chunk, offset);
-              offset += chunk.byteLength;
-          }
-
-          if (nativeWriterRef.current) {
-              await nativeWriterRef.current.write(combined);
-          } else if (streamSaverWriterRef.current) {
-              await streamSaverWriterRef.current.write(combined);
-          }
-      } catch (err) {
-          console.error("Write Error:", err);
-          const closeOk = await closeStreams({
-              truncateNativeBeforeClose: true,
-              abortStreamSaver: true,
-          });
-          if (!closeOk) {
-              await abortStreams();
-          }
-          setErrorMsg("写入文件失败，磁盘可能已满或权限不足。");
-          setState(TransferState.ERROR);
-          if (connRef.current) connRef.current.close();
-      }
+      void batch;
+      void totalLen;
   };
 
   const failTransferPersistence = (message: string) => {
@@ -953,21 +918,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                 failTransferPersistence("文件校验计算失败，请重试传输。");
                 return;
               }
-              hashedBytesRef.current += byteLength;
+             hashedBytesRef.current += byteLength;
              
              if (isStreamingRef.current) {
-                 writeBufferRef.current.push(new Uint8Array(chunkData));
-                 writeBufferSizeRef.current += byteLength;
-
-                 if (writeBufferSizeRef.current >= BUFFER_FLUSH_THRESHOLD) {
-                     const batch = writeBufferRef.current;
-                     const batchSize = writeBufferSizeRef.current;
-
-                     writeBufferRef.current = [];
-                     writeBufferSizeRef.current = 0;
-
-                      writeQueueRef.current = writeQueueRef.current.then(() => flushSpecificBatch(batch, batchSize));
-                  }
+                 void receiveStreamingWriter.enqueueChunk(new Uint8Array(chunkData)).catch((error) => {
+                   void handleStreamingWriteFailure(error);
+                 });
              } else if (isIndexedDbBufferingRef.current) {
                  indexedDbBatchRef.current.push(chunkData);
                  indexedDbBatchBytesRef.current += byteLength;
@@ -1111,8 +1067,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const resetStateForNewTransfer = () => {
       chunksRef.current = [];
-      writeBufferRef.current = [];
-      writeBufferSizeRef.current = 0;
+      receiveStreamingWriter.reset();
+      isStreamingRef.current = false;
       resetIndexedDbFileState();
       receivedChunksCountRef.current = 0;
       receivedSizeRef.current = 0;
@@ -1145,7 +1101,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     usePreparedNativeWriter: boolean;
   }) => {
     if (usePreparedNativeWriter) {
-      isStreamingRef.current = true;
+      isStreamingRef.current = receiveStreamingWriter.isStreaming();
       preparedNativeWriterFileIndexRef.current = null;
       return;
     }
@@ -1153,18 +1109,20 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (persistenceStrategy === 'native-fs' && nativeFileHandleRef.current) {
       try {
         const writable = await nativeFileHandleRef.current.createWritable({ keepExistingData: false });
-        nativeWriterRef.current = writable;
-        streamSaverWriterRef.current = null;
-        isStreamingRef.current = true;
+        receiveStreamingWriter.attachTarget(createNativeStreamingTarget(writable), {
+          committedBytes: 0,
+        });
+        isStreamingRef.current = receiveStreamingWriter.isStreaming();
         return;
       } catch {
-        nativeWriterRef.current = null;
+        receiveStreamingWriter.reset();
         isStreamingRef.current = false;
       }
     }
 
-    if (!nativeWriterRef.current) {
+    if (!receiveStreamingWriter.isStreaming()) {
       if (persistenceStrategy === 'indexeddb-buffer' || persistenceStrategy === 'memory-blob') {
+        receiveStreamingWriter.reset();
         isStreamingRef.current = false;
         return;
       }
@@ -1178,20 +1136,24 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             size: fileSize,
             pathname: streamPathname,
           });
-          streamSaverWriterRef.current = fileStream.getWriter();
-          isStreamingRef.current = true;
+          receiveStreamingWriter.attachTarget(createStreamSaverTarget(fileStream.getWriter()), {
+            committedBytes: 0,
+          });
+          isStreamingRef.current = receiveStreamingWriter.isStreaming();
           return;
         } catch {
+          receiveStreamingWriter.reset();
           isStreamingRef.current = false;
           return;
         }
       }
 
+      receiveStreamingWriter.reset();
       isStreamingRef.current = false;
       return;
     }
 
-    isStreamingRef.current = true;
+    isStreamingRef.current = receiveStreamingWriter.isStreaming();
   };
 
   const setCurrentFileTransferState = ({
@@ -1282,7 +1244,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       isTransferActive: () => isTransferActiveRef.current,
       getCurrentFileIndex: () => currentFileIndexRef.current,
       isIndexedDbBuffering: () => isIndexedDbBufferingRef.current,
-      isStreaming: () => isStreamingRef.current,
+      isStreaming: () => receiveStreamingWriter.isStreaming(),
+      finalizeStreamingWriter: async () => {
+        const finalized = await receiveStreamingWriter.finalize();
+        isStreamingRef.current = receiveStreamingWriter.isStreaming();
+        return finalized;
+      },
       takeIndexedDbBatch: () => {
         const batch = indexedDbBatchRef.current;
         const size = indexedDbBatchBytesRef.current;
@@ -1291,13 +1258,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         return { batch, size };
       },
       flushIndexedDbBatch,
-      takeStreamBatch: () => {
-        const batch = writeBufferRef.current;
-        const size = writeBufferSizeRef.current;
-        writeBufferRef.current = [];
-        writeBufferSizeRef.current = 0;
-        return { batch, size };
-      },
+      takeStreamBatch: () => ({ batch: [], size: 0 }),
       flushSpecificBatch,
       enqueueWrite,
       closeStreams: () => closeStreams(),
@@ -1313,18 +1274,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       awaitPendingFileFinalize: (reason) => receivePersistenceOrchestrator.awaitPendingFileFinalize(reason),
       isIOS,
       isSafari,
+      preferBrowserDownload: false,
       supportsStreamSaver: !!streamSaver,
       indexedDbThresholdBytes: IOS_IDB_BUFFER_THRESHOLD_BYTES,
       getMetadataFileCount: () => metadataRef.current?.files?.length ?? 0,
       getFileStartPersistenceCapabilities: (fileIndex) => {
-        const usePreparedNativeWriter =
-          preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
+        const usePreparedNativeWriter = false;
         const canUseNativeFs =
           !isIOS &&
           !isSafari &&
           !!window.showSaveFilePicker &&
           (metadataRef.current?.files?.length ?? 0) === 1 &&
-          (usePreparedNativeWriter || !!nativeFileHandleRef.current);
+          !!nativeFileHandleRef.current;
         return {
           canUseNativeFs,
           usePreparedNativeWriter,
@@ -1335,7 +1296,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         isTransferActiveRef.current = active;
       },
       isTransferActive: () => isTransferActiveRef.current,
-      isStreaming: () => isStreamingRef.current,
+      isStreaming: () => receiveStreamingWriter.isStreaming(),
       isIndexedDbBuffering: () => isIndexedDbBufferingRef.current,
       setIndexedDbBuffering: (enabled) => {
         isIndexedDbBufferingRef.current = enabled;
@@ -1349,7 +1310,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       hasRetainedCurrentFileData,
       abortStreams,
       resetIncomingFileBuffers: resetFileBuffersForRepair,
-      awaitWriteQueue: () => writeQueueRef.current,
+      awaitWriteQueue: async () => {
+        await writeQueueRef.current;
+        await receiveStreamingWriter.awaitIdle();
+      },
       deleteIndexedDbChunksForFile,
       prepareFilePersistenceTarget,
       setCurrentFileState: setCurrentFileTransferState,
@@ -1576,17 +1540,36 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (connRef.current?.open) {
       resetStateForNewTransfer();
       isTransferActiveRef.current = true;
-      // Default to browser-managed download behavior; do not force a save-path picker on accept.
       preparedNativeWriterFileIndexRef.current = null;
+      nativeFileHandleRef.current = null;
 
-      if (isIOS || isSafari) {
+      if (
+        !isIOS &&
+        !isSafari &&
+        !!window.showSaveFilePicker &&
+        (metadataRef.current?.files?.length ?? 0) === 1
+      ) {
+        const suggestedName = sanitizeFileName(
+          metadataRef.current?.files?.[0]?.name || `file_${Date.now()}.bin`
+        );
+        try {
+          nativeFileHandleRef.current = await window.showSaveFilePicker({
+            suggestedName,
+          });
+          if (onNotification) {
+            onNotification("已启用原生流式写入模式。", 'info');
+          }
+        } catch {
+          nativeFileHandleRef.current = null;
+          if (onNotification) {
+            onNotification("未授予本地保存权限，将回退到备用保存模式。", 'info');
+          }
+        }
+      } else if (isIOS || isSafari) {
           isStreamingRef.current = false;
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
-      } else if ((metadataRef.current?.files?.length ?? 0) === 1 && window.showSaveFilePicker && !nativeFileHandleRef.current) {
-          const prepared = await prepareNativeWriterForSingleFile(0);
-          if (!prepared) {
-            if (onNotification) onNotification("未选择原生保存位置，将回退到浏览器下载流。", 'info');
-          }
+      } else if (onNotification) {
+          onNotification("当前将优先尝试流式写入备用模式；若不可用则回退到浏览器保存。", 'info');
       }
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });

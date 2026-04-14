@@ -1,16 +1,18 @@
-import { TransferState } from '../../types';
-
 interface FinalizeBatch<T> {
   batch: T[];
   size: number;
 }
 
+type TransferStateLike = string;
+
 export interface ReceivePersistenceOrchestratorOptions {
-  getState: () => TransferState;
+  getState: () => TransferStateLike;
   isTransferActive: () => boolean;
   getCurrentFileIndex: () => number;
   isIndexedDbBuffering: () => boolean;
   isStreaming: () => boolean;
+  flushStreamingWriter?: () => Promise<void>;
+  finalizeStreamingWriter?: () => Promise<boolean>;
   takeIndexedDbBatch: () => FinalizeBatch<ArrayBuffer>;
   flushIndexedDbBatch: (fileIndex: number, batch: ArrayBuffer[], totalLen: number) => Promise<void>;
   takeStreamBatch: () => FinalizeBatch<Uint8Array>;
@@ -44,7 +46,7 @@ export const createReceivePersistenceOrchestrator = (
       console.warn(`Pending file finalize failed before ${reason}:`, error);
     }
 
-    return options.getState() !== TransferState.ERROR;
+    return options.getState() !== 'ERROR';
   };
 
   const finalizeCurrentFile = (fileName: string): Promise<void> => {
@@ -62,21 +64,31 @@ export const createReceivePersistenceOrchestrator = (
         });
       }
 
-      const streamBatch = options.takeStreamBatch();
-      await options.enqueueWrite(async () => {
-        if (streamBatch.size > 0) {
-          await options.flushSpecificBatch(streamBatch.batch, streamBatch.size);
+      if (options.isStreaming() && options.finalizeStreamingWriter) {
+        const finalized = await options.finalizeStreamingWriter();
+        if (!finalized) {
+          options.failTransferPersistence('文件落盘失败，请重试。');
+          return;
         }
-
-        if (options.isStreaming()) {
-          const closeOk = await options.closeStreams();
-          if (!closeOk) {
-            options.failTransferPersistence('文件落盘失败，请重试。');
-            return;
+      } else {
+        const streamBatch = options.takeStreamBatch();
+        await options.enqueueWrite(async () => {
+          if (streamBatch.size > 0) {
+            await options.flushSpecificBatch(streamBatch.batch, streamBatch.size);
           }
-        }
 
-        if (!options.isTransferActive() || options.getState() === TransferState.ERROR) {
+          if (options.isStreaming()) {
+            const closeOk = await options.closeStreams();
+            if (!closeOk) {
+              options.failTransferPersistence('文件落盘失败，请重试。');
+              return;
+            }
+          }
+        });
+      }
+
+      await options.enqueueWrite(async () => {
+        if (!options.isTransferActive() || options.getState() === 'ERROR') {
           return;
         }
 
