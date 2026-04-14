@@ -6,6 +6,7 @@ import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTO
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
+import { createHappyEyeballsPlan } from '../services/connectionPolicy';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
@@ -21,6 +22,7 @@ import {
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
+import { getBrowserNetworkProfile } from '../services/networkProfile';
 import { createResumeRequestMessage, normalizeFileRequest } from '../services/protocol';
 import { decidePersistenceStrategy } from '../services/receive/persistenceStrategy';
 import { useTransferStore } from '../stores/transferStore';
@@ -1391,12 +1393,28 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
 
     const iceConfig = await getIceConfig();
+    const networkProfile = getBrowserNetworkProfile();
+    const connectionPlan = createHappyEyeballsPlan(iceConfig, networkProfile, {
+      defaultInitialTimeoutMs: INITIAL_TIMEOUT_MS,
+      relayInitialTimeoutMs: RELAY_TIMEOUT_MS,
+      relayParallelDelayMs: RELAY_PARALLEL_DELAY_MS,
+      p2pBackfillDelayMs: P2P_BACKFILL_DELAY_MS,
+    });
     markIceConfigFetched(connectTelemetryRef.current);
     setConnectingStage('connecting_signaling');
     hasTurnRef.current = iceConfig.hasTurn;
-    preferredIcePolicyRef.current =
-      iceConfig.hasTurn && iceConfig.iceTransportPolicy === 'relay' ? 'relay' : 'all';
+    preferredIcePolicyRef.current = connectionPlan.initialPolicy;
     p2pTimeoutRetryCountRef.current = 0;
+
+    if (
+      iceConfig.hasTurn &&
+      (connectionPlan.reason === 'mobile_network' ||
+        connectionPlan.reason === 'constrained_network' ||
+        connectionPlan.reason === 'relay_recommended') &&
+      onNotification
+    ) {
+      onNotification('检测到移动或高延迟网络，已优先尝试中继连接以提升成功率。', 'info');
+    }
 
     const applyConnectTimeout = (timeoutMs: number) => {
       clearConnectionTimeout();
@@ -1503,21 +1521,33 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       applyConnectTimeout(timeoutMs);
       };
 
-    const initialPolicy = preferredIcePolicyRef.current;
-    const backgroundPolicy: RTCIceTransportPolicy = initialPolicy === 'relay' ? 'all' : 'relay';
-    const initialTimeoutMs = initialPolicy === 'relay' ? RELAY_TIMEOUT_MS : INITIAL_TIMEOUT_MS;
-    const backgroundDelayMs = initialPolicy === 'relay' ? P2P_BACKFILL_DELAY_MS : RELAY_PARALLEL_DELAY_MS;
-    const backgroundTimeoutMs = backgroundPolicy === 'relay' ? RELAY_TIMEOUT_MS : INITIAL_TIMEOUT_MS;
+    const initialPolicy = connectionPlan.initialPolicy;
+    const backgroundPolicy = connectionPlan.backgroundPolicy;
+    const initialTimeoutMs = connectionPlan.initialTimeoutMs;
+    const backgroundDelayMs = connectionPlan.backgroundDelayMs;
+    const backgroundTimeoutMs = connectionPlan.backgroundTimeoutMs;
 
     markSessionEvent(connectTelemetryRef.current, 'ice_strategy_selected', {
       initialPolicy,
-      backgroundPolicy: iceConfig.hasTurn ? backgroundPolicy : null,
+      backgroundPolicy,
       relayRecommended: iceConfig.relayRecommended,
       relayReason: iceConfig.relayReason,
+      fetchLatencyMs: iceConfig.fetchLatencyMs,
+      strategyReason: connectionPlan.reason,
+      networkType: networkProfile.connectionType,
+      effectiveType: networkProfile.effectiveType,
+      isLikelyMobileNetwork: networkProfile.isLikelyMobileNetwork,
+      isConstrained: networkProfile.isConstrained,
     });
     void createAndConnectPeer(initialPolicy, initialTimeoutMs);
 
-    if (iceConfig.hasTurn && backgroundPolicy !== initialPolicy) {
+    if (
+      iceConfig.hasTurn &&
+      backgroundPolicy &&
+      backgroundPolicy !== initialPolicy &&
+      backgroundDelayMs !== null &&
+      backgroundTimeoutMs !== null
+    ) {
       window.setTimeout(() => {
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;

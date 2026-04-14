@@ -26,6 +26,7 @@ import {
   markSessionEvent,
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
+import { getBrowserNetworkProfile } from '../services/networkProfile';
 import { normalizeTransferMessage } from '../services/protocol';
 import {
   deriveAdaptiveFlow,
@@ -592,8 +593,28 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const metadataWithConstraints: FileMetadata = { ...metadata, protocolVersion: P2P_PROTOCOL_VERSION, constraints: { expiresAt } };
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
+    const networkProfile = getBrowserNetworkProfile();
     setPreparingStage('connecting_signaling');
     markIceConfigFetched(shareTelemetryRef.current);
+    markSessionEvent(shareTelemetryRef.current, 'ice_strategy_selected', {
+      initialPolicy: iceConfig.iceTransportPolicy,
+      relayRecommended: iceConfig.relayRecommended,
+      relayReason: iceConfig.relayReason,
+      fetchLatencyMs: iceConfig.fetchLatencyMs,
+      networkType: networkProfile.connectionType,
+      effectiveType: networkProfile.effectiveType,
+      isLikelyMobileNetwork: networkProfile.isLikelyMobileNetwork,
+      isConstrained: networkProfile.isConstrained,
+    });
+
+    if (
+      iceConfig.hasTurn &&
+      (iceConfig.iceTransportPolicy === 'relay' || iceConfig.relayRecommended) &&
+      onNotification
+    ) {
+      onNotification('检测到当前网络更适合优先使用中继连接，已自动优化建连策略。', 'info');
+    }
+
     const clearSignalingOpenTimeout = () => {
       if (signalingOpenTimeoutRef.current !== null) {
         window.clearTimeout(signalingOpenTimeoutRef.current);

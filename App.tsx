@@ -8,6 +8,7 @@ import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
+import { appendNetworkProfileQuery, getBrowserNetworkProfile } from './services/networkProfile';
 
 type Mode = 'send' | 'receive' | 'screen';
 
@@ -64,7 +65,7 @@ const scheduleIdleTask = (callback: () => void, timeout = 2000): (() => void) =>
 
 interface NetworkCheckResponse {
   isRisk: boolean;
-  reason: 'isp' | 'score' | 'location' | null;
+  reason: 'isp' | 'score' | 'location' | 'network' | null;
   details: string;
   isp: string;
   country: string;
@@ -209,7 +210,9 @@ const App: React.FC = () => {
   useEffect(() => {
     const checkNetwork = async () => {
       try {
-        const res = await fetch('/api/network-check');
+        const url = new URL('/api/network-check', window.location.origin);
+        appendNetworkProfileQuery(url.searchParams, getBrowserNetworkProfile());
+        const res = await fetch(url.toString());
 
         // Check if the response is JSON (Cloudflare Functions return JSON)
         // In local Vite dev without wrangler, this returns index.html (text/html)
@@ -430,10 +433,10 @@ const App: React.FC = () => {
              <p className="text-xs font-medium text-amber-800 dark:text-amber-200 mb-1">
                 网络环境受限
              </p>
-             <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
-                检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
-             </p>
-          </div>
+              <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
+                 检测到当前网络可能限制 P2P 打洞（如代理、移动网络或跨境链路），系统会优先尝试更稳的连接方式。
+              </p>
+           </div>
           <button
             onClick={() => {
               dismissRiskBanner();

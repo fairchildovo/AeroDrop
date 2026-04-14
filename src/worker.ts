@@ -26,14 +26,23 @@ type IceConfigPayload = {
   iceTransportPolicy: 'all' | 'relay';
   hasTurn: boolean;
   relayRecommended?: boolean;
-  relayReason?: 'isp' | 'score' | 'location' | null;
+  relayReason?: 'isp' | 'score' | 'location' | 'network' | null;
 };
 
 type CloudflareTurnApiResponse = {
   iceServers?: IceServerConfig[];
 };
 
-type NetworkRiskReason = 'isp' | 'score' | 'location' | null;
+type NetworkRiskReason = 'isp' | 'score' | 'location' | 'network' | null;
+
+type ClientNetworkHints = {
+  isMobileDevice: boolean;
+  networkType: string;
+  effectiveType: string;
+  saveData: boolean;
+  rtt: number | null;
+  downlink: number | null;
+};
 
 type NetworkRiskAssessment = {
   isRisk: boolean;
@@ -145,6 +154,29 @@ const parsePositiveInt = (value: string | undefined, fallback: number): number =
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const parseBooleanFlag = (value: string | null): boolean => value === '1' || value === 'true';
+
+const parseNullableNumber = (value: string | null): number | null => {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const getClientNetworkHints = (request: Request): ClientNetworkHints => {
+  const url = new URL(request.url);
+  return {
+    isMobileDevice: parseBooleanFlag(url.searchParams.get('mobileDevice')),
+    networkType: url.searchParams.get('networkType')?.trim().toLowerCase() || 'unknown',
+    effectiveType: url.searchParams.get('effectiveType')?.trim().toLowerCase() || 'unknown',
+    saveData: parseBooleanFlag(url.searchParams.get('saveData')),
+    rtt: parseNullableNumber(url.searchParams.get('rtt')),
+    downlink: parseNullableNumber(url.searchParams.get('downlink')),
+  };
+};
+
 const getCloudflareTurnTokenId = (env: Env): string => {
   return env.CF_TURN_TOKEN_ID?.trim() || env.CF_TURN_KEY_ID?.trim() || '';
 };
@@ -198,11 +230,12 @@ const isAllowedSameOriginRequest = (request: Request): boolean => {
 
 const assessNetworkRisk = (request: Request): NetworkRiskAssessment => {
   const cf = request.cf;
+  const clientNetwork = getClientNetworkHints(request);
 
   if (!cf) {
     return {
-      isRisk: false,
-      reason: null,
+      isRisk: clientNetwork.networkType === 'cellular' || clientNetwork.saveData,
+      reason: clientNetwork.networkType === 'cellular' || clientNetwork.saveData ? 'network' : null,
       details: 'Local development or CF object missing',
       isp: 'Local Dev',
       country: 'CN',
@@ -225,20 +258,51 @@ const assessNetworkRisk = (request: Request): NetworkRiskAssessment => {
     'cdn',
     'server',
   ];
+  const mobileCarrierKeywords = [
+    'mobile',
+    'wireless',
+    'cellular',
+    'telecom',
+    'unicom',
+    'cmcc',
+    'verizon',
+    'vodafone',
+    't-mobile',
+    'sprint',
+    'telefonica',
+  ];
 
   const originalIsp = (cf.asOrganization as string) || 'Unknown';
   const isp = originalIsp.toLowerCase();
   const country = (cf.country as string) || 'Unknown';
   const threatScore = (cf.threatScore as number) || 0;
+  const isLikelyMobileNetwork =
+    clientNetwork.networkType === 'cellular' ||
+    mobileCarrierKeywords.some((keyword) => isp.includes(keyword));
+  const clientLooksConstrained =
+    clientNetwork.saveData ||
+    clientNetwork.effectiveType === 'slow-2g' ||
+    clientNetwork.effectiveType === '2g' ||
+    clientNetwork.effectiveType === '3g' ||
+    (clientNetwork.rtt !== null && clientNetwork.rtt >= 180) ||
+    (clientNetwork.downlink !== null && clientNetwork.downlink > 0 && clientNetwork.downlink < 5);
 
   let isRisk = false;
   let reason: NetworkRiskReason = null;
   let details = '';
 
-  if (riskKeywords.some((keyword) => isp.includes(keyword))) {
+  if (isLikelyMobileNetwork && (clientLooksConstrained || clientNetwork.isMobileDevice)) {
+    isRisk = true;
+    reason = 'network';
+    details = `${originalIsp} / ${clientNetwork.networkType} / ${clientNetwork.effectiveType}`;
+  } else if (riskKeywords.some((keyword) => isp.includes(keyword))) {
     isRisk = true;
     reason = 'isp';
     details = originalIsp;
+  } else if (isLikelyMobileNetwork) {
+    isRisk = true;
+    reason = 'network';
+    details = `${originalIsp} / ${clientNetwork.networkType}`;
   } else if (threatScore > 10) {
     isRisk = true;
     reason = 'score';
