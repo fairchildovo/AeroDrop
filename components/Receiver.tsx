@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
-import { TransferState, FileMetadata, P2PMessage, FileCompletePayload, P2P_PROTOCOL_VERSION } from '../types';
+import { TransferState, FileMetadata, P2PMessage, P2P_PROTOCOL_VERSION } from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
@@ -28,8 +28,10 @@ import {
   startConnectionAttempt,
 } from '../services/connectionTelemetry';
 import { getBrowserNetworkProfile } from '../services/networkProfile';
-import { createResumeRequestMessage, normalizeFileRequest } from '../services/protocol';
-import { decidePersistenceStrategy } from '../services/receive/persistenceStrategy';
+import { createReceivePersistenceAdapter, type ReceivePersistenceAdapter } from '../services/receive/persistenceAdapter';
+import { createReceiveRecoveryCoordinator, type ReceiveRecoveryCoordinator } from '../services/receive/recoveryCoordinator';
+import { createReceivePersistenceOrchestrator, type ReceivePersistenceOrchestrator } from '../services/receive/persistenceOrchestrator';
+import { createReceiveSessionCoordinator, type ReceiveSessionCoordinator } from '../services/receive/sessionCoordinator';
 import { useTransferStore } from '../stores/transferStore';
 import { createReceiverSessionService } from '../services/receiverSessionService';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
@@ -130,6 +132,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const metadataRef = useRef<FileMetadata | null>(null);
   const currentFileIndexRef = useRef<number>(0); 
+  const currentFileNameRef = useRef<string>('');
   const completedFileIndicesRef = useRef<Set<number>>(new Set());
   const isTransferActiveRef = useRef<boolean>(false);
 
@@ -139,8 +142,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const currentFileSizeRef = useRef<number>(0);
   const fileHasherRef = useRef<Crc32Hasher | null>(null);
   const hashedBytesRef = useRef<number>(0);
-  const fileRepairAttemptsRef = useRef<Map<number, number>>(new Map());
-  const pendingAutoRepairFileRef = useRef<number | null>(null);
   
   const isStreamingRef = useRef<boolean>(false);
   const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
@@ -149,7 +150,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const preparedNativeWriterFileIndexRef = useRef<number | null>(null);
 
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const fileFinalizePromiseRef = useRef<Promise<void> | null>(null);
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const writeBufferSizeRef = useRef<number>(0);
   const BUFFER_FLUSH_THRESHOLD = TRANSFER_CONFIG.WRITE_BUFFER_FLUSH_THRESHOLD;
@@ -169,6 +169,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
   const lastReportedSpeedBytesRef = useRef<number>(0);
+  const receivePersistenceAdapterRef = useRef<ReceivePersistenceAdapter | null>(null);
+  const receiveRecoveryCoordinatorRef = useRef<ReceiveRecoveryCoordinator | null>(null);
+  const receivePersistenceOrchestratorRef = useRef<ReceivePersistenceOrchestrator | null>(null);
+  const receiveSessionCoordinatorRef = useRef<ReceiveSessionCoordinator | null>(null);
 
   const codeRef = useRef<string>('');
   const isMountedRef = useRef(true);
@@ -569,6 +573,55 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       return stateRef.current !== TransferState.ERROR;
   };
 
+  const markCurrentFilePersisted = (fileName: string) => {
+      completedFileIndicesRef.current.add(currentFileIndexRef.current);
+      receiveRecoveryCoordinatorRef.current?.clearRepairStateForFile(currentFileIndexRef.current);
+      sendTransferProgress(lastReportedSpeedBytesRef.current);
+      if (onNotification) {
+          onNotification(`文件 ${fileName} 已保存`, 'success');
+      }
+  };
+
+  const enqueueWrite = (task: () => Promise<void>): Promise<void> => {
+      writeQueueRef.current = writeQueueRef.current.then(task);
+      return writeQueueRef.current;
+  };
+
+  const resetIndexedDbPersistedFileState = () => {
+      indexedDbBufferedBytesRef.current = 0;
+      indexedDbChunkSeqRef.current = 0;
+      indexedDbBufferedFileIndexRef.current = null;
+      resetIndexedDbBufferRuntime();
+  };
+
+  const resetMemoryFileState = () => {
+      chunksRef.current = [];
+      receivedChunksCountRef.current = 0;
+      receivedSizeRef.current = 0;
+  };
+
+  const resetFileBuffersForRepair = (fileIndex: number) => {
+      chunksRef.current = [];
+      writeBufferRef.current = [];
+      writeBufferSizeRef.current = 0;
+      resetIndexedDbBufferRuntime();
+      indexedDbChunkSeqRef.current = 0;
+      indexedDbBufferedBytesRef.current = 0;
+      indexedDbBufferedFileIndexRef.current = fileIndex;
+      receivedChunksCountRef.current = 0;
+      receivedSizeRef.current = 0;
+  };
+
+  const resetHasherForRepair = async (): Promise<boolean> => {
+      try {
+        await getFileHasher().reset();
+        hashedBytesRef.current = 0;
+        return true;
+      } catch {
+        return false;
+      }
+  };
+
   const reopenNativeWriterForResume = async (targetFileIndex: number, byteOffset: number): Promise<boolean> => {
     const handle = nativeFileHandleRef.current;
     if (!handle) return false;
@@ -761,7 +814,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const failTransferPersistence = (message: string) => {
       isTransferActiveRef.current = false;
-      pendingAutoRepairFileRef.current = null;
+      receiveRecoveryCoordinatorRef.current?.reset();
       setErrorMsg(message);
       setState(TransferState.ERROR);
       abortStreams().catch(() => {});
@@ -769,66 +822,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         try { connRef.current.send({ type: 'TRANSFER_CANCELLED', payload: { reason: message } }); } catch {}
         try { connRef.current.close(); } catch {}
       }
-  };
-
-  const requestFileAutoRepair = async (fileIndex: number, reason: string): Promise<boolean> => {
-      const attempt = (fileRepairAttemptsRef.current.get(fileIndex) || 0) + 1;
-      fileRepairAttemptsRef.current.set(fileIndex, attempt);
-
-      if (attempt > MAX_AUTO_REPAIR_RETRIES_PER_FILE) {
-          failTransferPersistence(`文件自动修复失败（已重试 ${MAX_AUTO_REPAIR_RETRIES_PER_FILE} 次）：${reason}`);
-          return false;
-      }
-
-      pendingAutoRepairFileRef.current = fileIndex;
-      setProgress(0);
-      setDownloadSpeed('0 KB/s');
-      setDownloadSpeedBytes(0);
-      setEta('自动修复中...');
-
-      chunksRef.current = [];
-      writeBufferRef.current = [];
-      writeBufferSizeRef.current = 0;
-      resetIndexedDbBufferRuntime();
-      indexedDbChunkSeqRef.current = 0;
-      indexedDbBufferedBytesRef.current = 0;
-      indexedDbBufferedFileIndexRef.current = fileIndex;
-      receivedChunksCountRef.current = 0;
-      receivedSizeRef.current = 0;
-      try {
-        await getFileHasher().reset();
-      } catch {
-        failTransferPersistence("文件校验初始化失败，请重试传输。");
-        return false;
-      }
-      hashedBytesRef.current = 0;
-
-      await abortStreams();
-      try {
-        await writeQueueRef.current;
-        await deleteIndexedDbChunksForFile(fileIndex);
-      } catch (e) {
-        console.warn('IndexedDB cleanup before repair failed:', e);
-      }
-
-      const conn = connRef.current;
-      if (!conn || !conn.open) {
-          failTransferPersistence("连接已断开，无法自动修复，请重试。");
-          return false;
-      }
-
-      try {
-          conn.send(createResumeRequestMessage(normalizeFileRequest({
-            fileIndex,
-            byteOffset: 0,
-            silent: true,
-          })));
-      } catch {
-          failTransferPersistence("自动修复请求发送失败，请重试。");
-          return false;
-      }
-
-      return true;
   };
 
   const setupConnListeners = (conn: DataConnection) => {
@@ -939,11 +932,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       const isBinary = data instanceof ArrayBuffer || (data.constructor && data.constructor.name === 'ArrayBuffer') || ArrayBuffer.isView(data);
       
       if (isBinary) {
+         if (!await receivePersistenceOrchestrator.awaitPendingFileFinalize('binary_chunk')) return;
          if (!isTransferActiveRef.current) return;
-
+ 
          const chunkData = ((): ArrayBuffer => {
-             if (ArrayBuffer.isView(data)) {
-                 const view = data as ArrayBufferView;
+              if (ArrayBuffer.isView(data)) {
+                  const view = data as ArrayBufferView;
                  return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
              }
              return data as ArrayBuffer;
@@ -1039,246 +1033,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         }
       } 
       else if (msg.type === 'FILE_START') {
-        isTransferActiveRef.current = true;
-        const { fileSize, fileIndex } = msg.payload;
-        const fileName = sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`);
-        const usePreparedNativeWriter =
-          preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
-        const canUseNativeFs =
-          !isIOS &&
-          !isSafari &&
-          !!window.showSaveFilePicker &&
-          (metadataRef.current?.files?.length ?? 0) === 1 &&
-          (usePreparedNativeWriter || !!nativeFileHandleRef.current);
-        const persistenceStrategy = decidePersistenceStrategy({
-          isIOS,
-          isSafari,
-          supportsNativeFs: canUseNativeFs,
-          supportsStreamSaver: !!streamSaver,
-          supportsIndexedDb: isIndexedDbSupported(),
-          fileSize,
-          indexedDbThresholdBytes: IOS_IDB_BUFFER_THRESHOLD_BYTES,
+        await receiveSessionCoordinator.handleFileStart({
+          ...msg.payload,
+          fileName: sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`),
         });
-
-        const shouldUseIndexedDbBuffering = persistenceStrategy === 'indexeddb-buffer';
-        isIndexedDbBufferingRef.current = shouldUseIndexedDbBuffering;
-
-        if (shouldUseIndexedDbBuffering && !indexedDbNotifiedRef.current && onNotification) {
-          indexedDbNotifiedRef.current = true;
-          onNotification('iOS 大文件已启用 IndexedDB 缓冲模式', 'info');
-        }
-
-        const resumingSameFile = hasRetainedCurrentFileData(fileIndex);
-
-        if (!resumingSameFile) {
-            if (!usePreparedNativeWriter) {
-              await abortStreams();
-            }
-            chunksRef.current = [];
-            writeBufferRef.current = [];
-            writeBufferSizeRef.current = 0;
-            resetIndexedDbBufferRuntime();
-            indexedDbChunkSeqRef.current = 0;
-            indexedDbBufferedBytesRef.current = 0;
-            indexedDbBufferedFileIndexRef.current = fileIndex;
-            receivedChunksCountRef.current = 0;
-            receivedSizeRef.current = 0;
-
-            if (isIndexedDbBufferingRef.current) {
-              try {
-                await writeQueueRef.current;
-                await deleteIndexedDbChunksForFile(fileIndex);
-              } catch (e) {
-                failTransferPersistence('无法初始化 iOS 大文件缓存，请重试。');
-                return;
-              }
-            }
-
-            if (usePreparedNativeWriter) {
-                isStreamingRef.current = true;
-                preparedNativeWriterFileIndexRef.current = null;
-            } else if (persistenceStrategy === 'native-fs' && nativeFileHandleRef.current) {
-                try {
-                    const writable = await nativeFileHandleRef.current.createWritable({ keepExistingData: false });
-                    nativeWriterRef.current = writable;
-                    streamSaverWriterRef.current = null;
-                    isStreamingRef.current = true;
-                } catch {
-                    nativeWriterRef.current = null;
-                    isStreamingRef.current = false;
-                }
-            } else if (!nativeWriterRef.current) {
-                if (persistenceStrategy === 'indexeddb-buffer' || persistenceStrategy === 'memory-blob') {
-                    isStreamingRef.current = false;
-                } else if (persistenceStrategy === 'stream-saver') {
-                     try {
-                         const streamPathname =
-                           `${STREAMSAVER_PATH_PREFIX}${Date.now().toString(36)}-` +
-                           `${Math.random().toString(36).slice(2, 8)}/${encodeURIComponent(fileName)}`;
-                         const fileStream = streamSaver.createWriteStream(fileName, {
-                           size: fileSize,
-                           pathname: streamPathname,
-                         });
-                         streamSaverWriterRef.current = fileStream.getWriter();
-                         isStreamingRef.current = true;
-                     } catch {
-                         // Fallback to browser default save flow when stream writer is unavailable.
-                         isStreamingRef.current = false;
-                     }
-                } else {
-                    isStreamingRef.current = false;
-                }
-            } else {
-                isStreamingRef.current = true;
-            }
-        }
-        
-        currentFileSizeRef.current = fileSize;
-        currentFileIndexRef.current = fileIndex;
-        if (pendingAutoRepairFileRef.current === fileIndex) {
-          pendingAutoRepairFileRef.current = null;
-        }
-        try {
-          await getFileHasher().reset();
-        } catch {
-          failTransferPersistence('文件校验初始化失败，请重试。');
-          return;
-        }
-        hashedBytesRef.current = 0;
-        
-        lastSpeedUpdateRef.current = Date.now();
-        lastSpeedBytesRef.current = receivedSizeRef.current;
-        lastReportedSpeedBytesRef.current = 0;
-        
-        setCurrentFileName(fileName);
-        setCurrentFileIndex(fileIndex + 1);
-        setProgress(fileSize > 0 ? Math.min(100, Math.floor((receivedSizeRef.current / fileSize) * 100)) : 0);
-        setEta('计算中...');
-        setDownloadSpeed('0 KB/s');
-        sendTransferProgress(0);
       }
       else if (msg.type === 'FILE_COMPLETE') {
-         if (!isTransferActiveRef.current) return;
-         if (receivedSizeRef.current !== currentFileSizeRef.current) {
-             const repaired = await requestFileAutoRepair(
-               currentFileIndexRef.current,
-               `文件长度不一致（${receivedSizeRef.current}/${currentFileSizeRef.current}）`
-             );
-             if (!repaired) return;
-             return;
-         }
-         const completePayload = (msg.payload || {}) as FileCompletePayload;
-         if (completePayload.hashAlgorithm === 'crc32' && typeof completePayload.fileHash === 'string') {
-             const expectedBytes = typeof completePayload.hashedBytes === 'number'
-               ? Math.max(0, completePayload.hashedBytes)
-               : hashedBytesRef.current;
-             if (hashedBytesRef.current !== expectedBytes) {
-                const repaired = await requestFileAutoRepair(currentFileIndexRef.current, `字节数不一致（${hashedBytesRef.current}/${expectedBytes}）`);
-                if (!repaired) return;
-                return;
-             }
-              let actualHash = '';
-              try {
-                actualHash = await getFileHasher().finalizeHex();
-              } catch {
-                failTransferPersistence('文件校验计算失败，请重试。');
-                return;
-              }
-              if (actualHash !== completePayload.fileHash.toLowerCase()) {
-                 const repaired = await requestFileAutoRepair(currentFileIndexRef.current, `哈希不一致（${actualHash} != ${completePayload.fileHash}）`);
-                 if (!repaired) return;
-                 return;
-             }
-         }
-
-         if (isStreamingRef.current || isIndexedDbBufferingRef.current) {
-              const finalizePromise = (async () => {
-              if (isIndexedDbBufferingRef.current) {
-                  const finalBatch = indexedDbBatchRef.current;
-                  const finalSize = indexedDbBatchBytesRef.current;
-                  indexedDbBatchRef.current = [];
-                  indexedDbBatchBytesRef.current = 0;
-
-                  writeQueueRef.current = writeQueueRef.current.then(async () => {
-                      if (finalSize > 0) await flushIndexedDbBatch(currentFileIndexRef.current, finalBatch, finalSize);
-                  }).catch(e => console.error("IndexedDB final batch flush error", e));
-              }
-
-              const finalBatch = writeBufferRef.current;
-              const finalSize = writeBufferSizeRef.current;
-              writeBufferRef.current = [];
-              writeBufferSizeRef.current = 0;
-
-              writeQueueRef.current = writeQueueRef.current.then(async () => {
-                  if (finalSize > 0) await flushSpecificBatch(finalBatch, finalSize);
-                  if (isStreamingRef.current) {
-                    const closeOk = await closeStreams();
-                    if (!closeOk) {
-                       failTransferPersistence("文件落盘失败，请重试。");
-                       return;
-                    }
-                  }
-
-                  if (isTransferActiveRef.current) {
-                     if (isIndexedDbBufferingRef.current) {
-                       if (await saveCurrentFile()) {
-                         completedFileIndicesRef.current.add(currentFileIndexRef.current);
-                         fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
-                         sendTransferProgress(lastReportedSpeedBytesRef.current);
-                         if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
-                       }
-                     } else {
-                       completedFileIndicesRef.current.add(currentFileIndexRef.current);
-                       fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
-                       sendTransferProgress(lastReportedSpeedBytesRef.current);
-                       if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
-                     }
-                  }
-              }).catch(e => console.error("File Complete Error", e));
-
-              await writeQueueRef.current;
-              })();
-              fileFinalizePromiseRef.current = finalizePromise;
-              try {
-                await finalizePromise;
-              } finally {
-                if (fileFinalizePromiseRef.current === finalizePromise) {
-                  fileFinalizePromiseRef.current = null;
-                }
-              }
-          } else {
-              if (!await saveCurrentFile()) {
-                return;
-              }
-              completedFileIndicesRef.current.add(currentFileIndexRef.current);
-              fileRepairAttemptsRef.current.delete(currentFileIndexRef.current);
-              sendTransferProgress(lastReportedSpeedBytesRef.current);
-              if (onNotification) onNotification(`文件 ${currentFileName} 已保存`, 'success');
-           }
+         await receiveSessionCoordinator.handleFileComplete(msg.payload);
       }
       else if (msg.type === 'ALL_FILES_COMPLETE') {
-         if (!isTransferActiveRef.current) return;
-         if (pendingAutoRepairFileRef.current !== null) return;
-         if (fileFinalizePromiseRef.current) {
-           await fileFinalizePromiseRef.current;
-         }
-         await writeQueueRef.current;
-         const expectedFiles = metadataRef.current?.files?.length ?? 0;
-         const savedFiles = completedFileIndicesRef.current.size;
-         if (expectedFiles > 0 && savedFiles < expectedFiles) {
-           failTransferPersistence(`文件保存不完整（${savedFiles}/${expectedFiles}），请重试。`);
-           return;
-         }
-         sendTransferProgress(0);
-         try {
-           conn.send({ type: 'ALL_FILES_RECEIVED' });
-         } catch {
-           // Ignore ack send failures; sender has heartbeat/close fallback.
-         }
-         setState(TransferState.COMPLETED);
-         if (onNotification) onNotification("所有文件接收完毕", 'success');
-         resetStateForNewTransfer();
-         isTransferActiveRef.current = false; 
+         await receiveSessionCoordinator.handleAllFilesComplete();
       }
       else if (msg.type === 'REJECT_TRANSFER') {
          markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
@@ -1355,160 +1119,271 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       hashedBytesRef.current = 0;
       completedFileIndicesRef.current.clear();
       currentFileIndexRef.current = 0;
+      currentFileNameRef.current = '';
       setDownloadSpeed('0 KB/s');
       setDownloadSpeedBytes(0);
       lastReportedSpeedBytesRef.current = 0;
-      fileRepairAttemptsRef.current.clear();
-      pendingAutoRepairFileRef.current = null;
+      receiveRecoveryCoordinator.reset();
       setEta('--');
       preparedNativeWriterFileIndexRef.current = null;
+      receivePersistenceAdapter.reset();
+      receivePersistenceOrchestrator.reset();
       writeQueueRef.current = Promise.resolve();
   };
 
-  const saveFileForIOS = (blob: Blob, fileName: string) => {
-    const url = URL.createObjectURL(blob);
+  const prepareFilePersistenceTarget = async ({
+    fileIndex,
+    fileName,
+    fileSize,
+    persistenceStrategy,
+    usePreparedNativeWriter,
+  }: {
+    fileIndex: number;
+    fileName: string;
+    fileSize: number;
+    persistenceStrategy: 'native-fs' | 'stream-saver' | 'indexeddb-buffer' | 'memory-blob';
+    usePreparedNativeWriter: boolean;
+  }) => {
+    if (usePreparedNativeWriter) {
+      isStreamingRef.current = true;
+      preparedNativeWriterFileIndexRef.current = null;
+      return;
+    }
 
-    const downloadModal = document.createElement('div');
-    downloadModal.id = 'ios-download-modal';
-    downloadModal.style.cssText = `
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.8); z-index: 99999;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      padding: 20px;
-    `;
-
-    const contentDiv = document.createElement('div');
-    contentDiv.style.cssText = 'background: white; padding: 24px; border-radius: 16px; max-width: 320px; text-align: center;';
-
-    const title = document.createElement('h3');
-    title.style.cssText = 'margin: 0 0 12px; font-size: 18px; color: #1e293b;';
-    title.textContent = '文件已准备就绪';
-
-    const fileNameP = document.createElement('p');
-    fileNameP.style.cssText = 'margin: 0 0 20px; font-size: 14px; color: #64748b; word-break: break-all;';
-    fileNameP.textContent = fileName;
-
-    const downloadLink = document.createElement('a');
-    downloadLink.href = url;
-    downloadLink.download = fileName;
-    downloadLink.style.cssText = 'display: block; background: #3b82f6; color: white; padding: 14px 24px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 16px;';
-    downloadLink.textContent = '点击保存文件';
-    downloadLink.onclick = () => {
-      setTimeout(() => downloadModal.remove(), 500);
-      scheduleBlobUrlRevokeAfterFocus(url, { fallbackMs: 10 * 60 * 1000, focusDelayMs: 5000 });
-    };
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.style.cssText = 'margin-top: 12px; background: none; border: none; color: #64748b; font-size: 14px; cursor: pointer;';
-    cancelBtn.textContent = '取消';
-    cancelBtn.onclick = () => {
-      downloadModal.remove();
-      URL.revokeObjectURL(url);
-    };
-
-    contentDiv.appendChild(title);
-    contentDiv.appendChild(fileNameP);
-    contentDiv.appendChild(downloadLink);
-    contentDiv.appendChild(cancelBtn);
-    downloadModal.appendChild(contentDiv);
-    document.body.appendChild(downloadModal);
-  };
-
-  const scheduleBlobUrlRevokeAfterFocus = (url: string, opts?: { fallbackMs?: number; focusDelayMs?: number }) => {
-      const fallbackMs = opts?.fallbackMs ?? 5 * 60 * 1000;
-      const focusDelayMs = opts?.focusDelayMs ?? 4000;
-      let revoked = false;
-      let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
-      let focusDelayTimer: ReturnType<typeof setTimeout> | null = null;
-
-      const cleanupListener = () => {
-          window.removeEventListener('focus', onFocus);
-      };
-
-      const revokeNow = () => {
-          if (revoked) return;
-          revoked = true;
-          cleanupListener();
-          if (fallbackTimer) {
-              clearTimeout(fallbackTimer);
-              fallbackTimer = null;
-          }
-          if (focusDelayTimer) {
-              clearTimeout(focusDelayTimer);
-              focusDelayTimer = null;
-          }
-          URL.revokeObjectURL(url);
-      };
-
-      const onFocus = () => {
-          if (revoked) return;
-          if (focusDelayTimer) clearTimeout(focusDelayTimer);
-          focusDelayTimer = setTimeout(() => {
-              revokeNow();
-          }, focusDelayMs);
-      };
-
-      window.addEventListener('focus', onFocus);
-      fallbackTimer = setTimeout(() => {
-          revokeNow();
-      }, fallbackMs);
-  };
-
-  const saveCurrentFile = async (): Promise<boolean> => {
-      if (!isTransferActiveRef.current) return false;
-      if (receivedSizeRef.current === 0 && currentFileSizeRef.current > 0) return false;
-
-      let finalName = `file_${Date.now()}.bin`;
-      let finalType = 'application/octet-stream';
-      if (metadataRef.current && metadataRef.current.files[currentFileIndexRef.current]) {
-          finalName = metadataRef.current.files[currentFileIndexRef.current].name;
-          finalType = metadataRef.current.files[currentFileIndexRef.current].type;
-      }
+    if (persistenceStrategy === 'native-fs' && nativeFileHandleRef.current) {
       try {
-          let blob: Blob;
-          if (isIndexedDbBufferingRef.current) {
-              const fileIndex = currentFileIndexRef.current;
-              const blobs = await readIndexedDbBlobsForFile(fileIndex);
-              if (blobs.length === 0 && currentFileSizeRef.current > 0) {
-                failTransferPersistence("iOS 缓冲文件为空，请重试传输。");
-                return false;
-              }
-              blob = new Blob(blobs, { type: finalType });
-          } else {
-              blob = new Blob(chunksRef.current, { type: finalType });
-          }
-
-          if (isIOS || isSafari) {
-              saveFileForIOS(blob, finalName);
-          } else {
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url; a.download = finalName;
-              document.body.appendChild(a); a.click(); document.body.removeChild(a);
-              scheduleBlobUrlRevokeAfterFocus(url);
-          }
-
-      } catch (e) {
-          console.error("Save failed:", e);
-          failTransferPersistence("浏览器保存失败，请检查下载权限后重试。");
-          return false;
+        const writable = await nativeFileHandleRef.current.createWritable({ keepExistingData: false });
+        nativeWriterRef.current = writable;
+        streamSaverWriterRef.current = null;
+        isStreamingRef.current = true;
+        return;
+      } catch {
+        nativeWriterRef.current = null;
+        isStreamingRef.current = false;
       }
-      if (isIndexedDbBufferingRef.current) {
-          try {
-              await deleteIndexedDbChunksForFile(currentFileIndexRef.current);
-          } catch (e) {
-              console.warn('IndexedDB cleanup after save failed:', e);
-          }
-          indexedDbBufferedBytesRef.current = 0;
-          indexedDbChunkSeqRef.current = 0;
-          indexedDbBufferedFileIndexRef.current = null;
-          resetIndexedDbBufferRuntime();
+    }
+
+    if (!nativeWriterRef.current) {
+      if (persistenceStrategy === 'indexeddb-buffer' || persistenceStrategy === 'memory-blob') {
+        isStreamingRef.current = false;
+        return;
       }
-      chunksRef.current = [];
-      receivedChunksCountRef.current = 0;
-      receivedSizeRef.current = 0;
-      return true;
+
+      if (persistenceStrategy === 'stream-saver') {
+        try {
+          const streamPathname =
+            `${STREAMSAVER_PATH_PREFIX}${Date.now().toString(36)}-` +
+            `${Math.random().toString(36).slice(2, 8)}/${encodeURIComponent(fileName)}`;
+          const fileStream = streamSaver.createWriteStream(fileName, {
+            size: fileSize,
+            pathname: streamPathname,
+          });
+          streamSaverWriterRef.current = fileStream.getWriter();
+          isStreamingRef.current = true;
+          return;
+        } catch {
+          isStreamingRef.current = false;
+          return;
+        }
+      }
+
+      isStreamingRef.current = false;
+      return;
+    }
+
+    isStreamingRef.current = true;
   };
+
+  const setCurrentFileTransferState = ({
+    fileIndex,
+    fileName,
+    fileSize,
+  }: {
+    fileIndex: number;
+    fileName: string;
+    fileSize: number;
+  }) => {
+    currentFileSizeRef.current = fileSize;
+    currentFileIndexRef.current = fileIndex;
+    currentFileNameRef.current = fileName;
+    lastSpeedUpdateRef.current = Date.now();
+    lastSpeedBytesRef.current = receivedSizeRef.current;
+    lastReportedSpeedBytesRef.current = 0;
+    setCurrentFileName(fileName);
+    setCurrentFileIndex(fileIndex + 1);
+    setProgress(fileSize > 0 ? Math.min(100, Math.floor((receivedSizeRef.current / fileSize) * 100)) : 0);
+    setEta('计算中...');
+    setDownloadSpeed('0 KB/s');
+  };
+
+  const markReceiveSessionCompleted = () => {
+    setState(TransferState.COMPLETED);
+    if (onNotification) onNotification("所有文件接收完毕", 'success');
+    resetStateForNewTransfer();
+    isTransferActiveRef.current = false;
+  };
+
+  if (!receiveRecoveryCoordinatorRef.current) {
+    receiveRecoveryCoordinatorRef.current = createReceiveRecoveryCoordinator({
+      maxAutoRepairRetries: MAX_AUTO_REPAIR_RETRIES_PER_FILE,
+      getConnection: () => connRef.current,
+      setTransferActive: (active) => {
+        isTransferActiveRef.current = active;
+      },
+      getCurrentFileIndex: () => currentFileIndexRef.current,
+      getReceivedSize: () => receivedSizeRef.current,
+      isFileCompleted: (fileIndex) => completedFileIndicesRef.current.has(fileIndex),
+      hasRetainedCurrentFileData,
+      flushPendingStreamWrites,
+      reopenNativeWriterForResume,
+      resetFileBuffersForRepair,
+      resetHasherForRepair,
+      abortStreams,
+      awaitWriteQueue: () => writeQueueRef.current,
+      deleteIndexedDbChunksForFile,
+      setProgress,
+      setDownloadSpeed,
+      setDownloadSpeedBytes,
+      setEta,
+      setTransferState: setState,
+      setError: setErrorMsg,
+      notify: onNotification,
+      failTransferPersistence,
+    });
+  }
+  const receiveRecoveryCoordinator = receiveRecoveryCoordinatorRef.current!;
+
+  if (!receivePersistenceAdapterRef.current) {
+    receivePersistenceAdapterRef.current = createReceivePersistenceAdapter({
+      isIOS,
+      isSafari,
+      isTransferActive: () => isTransferActiveRef.current,
+      getReceivedSize: () => receivedSizeRef.current,
+      getCurrentFileSize: () => currentFileSizeRef.current,
+      getCurrentFileIndex: () => currentFileIndexRef.current,
+      getCurrentFileInfo: () => {
+        const file = metadataRef.current?.files?.[currentFileIndexRef.current];
+        return file ? { name: file.name, type: file.type } : null;
+      },
+      isIndexedDbBuffering: () => isIndexedDbBufferingRef.current,
+      getMemoryChunks: () => chunksRef.current,
+      readIndexedDbBlobsForFile,
+      deleteIndexedDbChunksForFile,
+      resetIndexedDbFileState: resetIndexedDbPersistedFileState,
+      resetMemoryFileState,
+      failTransferPersistence,
+    });
+  }
+  const receivePersistenceAdapter = receivePersistenceAdapterRef.current!;
+
+  if (!receivePersistenceOrchestratorRef.current) {
+    receivePersistenceOrchestratorRef.current = createReceivePersistenceOrchestrator({
+      getState: () => stateRef.current,
+      isTransferActive: () => isTransferActiveRef.current,
+      getCurrentFileIndex: () => currentFileIndexRef.current,
+      isIndexedDbBuffering: () => isIndexedDbBufferingRef.current,
+      isStreaming: () => isStreamingRef.current,
+      takeIndexedDbBatch: () => {
+        const batch = indexedDbBatchRef.current;
+        const size = indexedDbBatchBytesRef.current;
+        indexedDbBatchRef.current = [];
+        indexedDbBatchBytesRef.current = 0;
+        return { batch, size };
+      },
+      flushIndexedDbBatch,
+      takeStreamBatch: () => {
+        const batch = writeBufferRef.current;
+        const size = writeBufferSizeRef.current;
+        writeBufferRef.current = [];
+        writeBufferSizeRef.current = 0;
+        return { batch, size };
+      },
+      flushSpecificBatch,
+      enqueueWrite,
+      closeStreams: () => closeStreams(),
+      saveCurrentFile: () => receivePersistenceAdapter.saveCurrentFile(),
+      markCurrentFilePersisted,
+      failTransferPersistence,
+    });
+  }
+  const receivePersistenceOrchestrator = receivePersistenceOrchestratorRef.current!;
+
+  if (!receiveSessionCoordinatorRef.current) {
+    receiveSessionCoordinatorRef.current = createReceiveSessionCoordinator({
+      awaitPendingFileFinalize: (reason) => receivePersistenceOrchestrator.awaitPendingFileFinalize(reason),
+      isIOS,
+      isSafari,
+      supportsStreamSaver: !!streamSaver,
+      indexedDbThresholdBytes: IOS_IDB_BUFFER_THRESHOLD_BYTES,
+      getMetadataFileCount: () => metadataRef.current?.files?.length ?? 0,
+      getFileStartPersistenceCapabilities: (fileIndex) => {
+        const usePreparedNativeWriter =
+          preparedNativeWriterFileIndexRef.current === fileIndex && !!nativeWriterRef.current;
+        const canUseNativeFs =
+          !isIOS &&
+          !isSafari &&
+          !!window.showSaveFilePicker &&
+          (metadataRef.current?.files?.length ?? 0) === 1 &&
+          (usePreparedNativeWriter || !!nativeFileHandleRef.current);
+        return {
+          canUseNativeFs,
+          usePreparedNativeWriter,
+        };
+      },
+      supportsIndexedDb: isIndexedDbSupported,
+      setTransferActive: (active) => {
+        isTransferActiveRef.current = active;
+      },
+      isTransferActive: () => isTransferActiveRef.current,
+      isStreaming: () => isStreamingRef.current,
+      isIndexedDbBuffering: () => isIndexedDbBufferingRef.current,
+      setIndexedDbBuffering: (enabled) => {
+        isIndexedDbBufferingRef.current = enabled;
+      },
+      notifyIndexedDbBufferingEnabled: () => {
+        if (isIndexedDbBufferingRef.current && !indexedDbNotifiedRef.current && onNotification) {
+          indexedDbNotifiedRef.current = true;
+          onNotification('iOS 大文件已启用 IndexedDB 缓冲模式', 'info');
+        }
+      },
+      hasRetainedCurrentFileData,
+      abortStreams,
+      resetIncomingFileBuffers: resetFileBuffersForRepair,
+      awaitWriteQueue: () => writeQueueRef.current,
+      deleteIndexedDbChunksForFile,
+      prepareFilePersistenceTarget,
+      setCurrentFileState: setCurrentFileTransferState,
+      resetFileHasher: resetHasherForRepair,
+      getCurrentFileIndex: () => currentFileIndexRef.current,
+      getCurrentFileName: () => currentFileNameRef.current,
+      getCurrentFileSize: () => currentFileSizeRef.current,
+      getReceivedSize: () => receivedSizeRef.current,
+      getHashedBytes: () => hashedBytesRef.current,
+      finalizeHasher: () => getFileHasher().finalizeHex(),
+      requestAutoRepair: (fileIndex, reason) => receiveRecoveryCoordinator.requestAutoRepair(fileIndex, reason),
+      clearPendingAutoRepairFile: (fileIndex) => receiveRecoveryCoordinator.clearPendingAutoRepairFile(fileIndex),
+      getPendingAutoRepairFile: () => receiveRecoveryCoordinator.getPendingAutoRepairFile(),
+      hasPendingAutoRepair: () => receiveRecoveryCoordinator.hasPendingAutoRepair(),
+      finalizeCurrentFilePersistence: (fileName) => receivePersistenceOrchestrator.finalizeCurrentFile(fileName),
+      saveCurrentFile: () => receivePersistenceAdapter.saveCurrentFile(),
+      markCurrentFilePersisted,
+      getExpectedFiles: () => metadataRef.current?.files?.length ?? 0,
+      getSavedFiles: () => completedFileIndicesRef.current.size,
+      sendTransferProgress,
+      sendAllFilesReceived: () => {
+        const conn = connRef.current;
+        if (!conn) return;
+        try {
+          conn.send({ type: 'ALL_FILES_RECEIVED' });
+        } catch {
+          // Ignore ack send failures; sender has heartbeat/close fallback.
+        }
+      },
+      markCompleted: markReceiveSessionCompleted,
+      failTransferPersistence,
+    });
+  }
+  const receiveSessionCoordinator = receiveSessionCoordinatorRef.current!;
 
   const handleConnect = async () => {
     if (!code || code.length !== 4) return;
@@ -1724,53 +1599,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const resumeTransfer = () => {
-      void (async () => {
-          if (connRef.current?.open) {
-              isTransferActiveRef.current = true;
-              const currentIdx = currentFileIndexRef.current;
-
-              if (completedFileIndicesRef.current.has(currentIdx)) {
-                  connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
-                    fileIndex: currentIdx + 1,
-                    byteOffset: 0,
-                  })));
-                  setState(TransferState.TRANSFERRING);
-                  return;
-              }
-
-              let byteOffset = 0;
-              let canResumeCurrentFile = false;
-
-              if (hasRetainedCurrentFileData(currentIdx)) {
-                  const flushed = await flushPendingStreamWrites();
-                  if (!flushed) {
-                      return;
-                  }
-                  byteOffset = Math.max(0, receivedSizeRef.current);
-                  canResumeCurrentFile = byteOffset > 0;
-              } else if (receivedSizeRef.current > 0) {
-                  const reopened = await reopenNativeWriterForResume(currentIdx, Math.max(0, receivedSizeRef.current));
-                  if (reopened) {
-                      byteOffset = Math.max(0, receivedSizeRef.current);
-                      canResumeCurrentFile = byteOffset > 0;
-                  }
-              }
-
-              if (!canResumeCurrentFile && receivedSizeRef.current > 0 && onNotification) {
-                  onNotification("当前文件的流式落盘状态无法直接续写，本次将从该文件开头重新下载。", 'info');
-              }
-
-              connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
-                fileIndex: currentIdx,
-                byteOffset: canResumeCurrentFile ? byteOffset : 0,
-              })));
-              setState(TransferState.TRANSFERRING);
-          } else {
-              setErrorMsg("连接已断开，请重新连接发送方。");
-              setState(TransferState.ERROR);
-              if (onNotification) onNotification("连接已断开，请重试", 'error');
-          }
-      })();
+      void receiveRecoveryCoordinator.resumeTransfer();
   };
 
   const reset = () => {
