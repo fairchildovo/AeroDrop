@@ -12,6 +12,7 @@ import {
 import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
 import { createCrc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
+import { NO_TURN_WARNING_MESSAGE } from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer'; 
 import {
@@ -613,6 +614,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       onNotification
     ) {
       onNotification('检测到当前网络更适合优先使用中继连接，已自动优化建连策略。', 'info');
+    } else if (!iceConfig.hasTurn && onNotification) {
+      onNotification(NO_TURN_WARNING_MESSAGE, 'info');
     }
 
     const clearSignalingOpenTimeout = () => {

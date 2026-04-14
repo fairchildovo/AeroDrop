@@ -7,6 +7,11 @@ import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
 import { createHappyEyeballsPlan } from '../services/connectionPolicy';
+import {
+  getReceiverDisconnectedMessage,
+  getReceiverPreTransferFailureMessage,
+  NO_TURN_WARNING_MESSAGE,
+} from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
 import {
@@ -1179,14 +1184,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
        if (currentState !== TransferState.COMPLETED) {
          markConnectionFailure(connectTelemetryRef.current, 'connection_closed', { state: currentState });
        }
-       if (
-         currentState === TransferState.TRANSFERRING ||
-         currentState === TransferState.WAITING_FOR_PEER ||
-         currentState === TransferState.PEER_CONNECTED
-       ) {
-           setErrorMsg("连接已断开");
-           setState(TransferState.ERROR);
-       }
+      if (
+        currentState === TransferState.TRANSFERRING ||
+        currentState === TransferState.WAITING_FOR_PEER ||
+        currentState === TransferState.PEER_CONNECTED
+      ) {
+        setErrorMsg(
+          getReceiverDisconnectedMessage(
+            hasTurnRef.current,
+            currentState === TransferState.WAITING_FOR_PEER
+          )
+        );
+        setState(TransferState.ERROR);
+      }
     });
 
     conn.on('error', () => {
@@ -1414,6 +1424,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       onNotification
     ) {
       onNotification('检测到移动或高延迟网络，已优先尝试中继连接以提升成功率。', 'info');
+    } else if (!iceConfig.hasTurn && onNotification) {
+      onNotification(NO_TURN_WARNING_MESSAGE, 'info');
     }
 
     const applyConnectTimeout = (timeoutMs: number) => {
@@ -1439,7 +1451,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (peerRef.current) peerRef.current.destroy();
         if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
         markConnectionFailure(connectTelemetryRef.current, 'connect_timeout', { timeoutMs });
-        setErrorMsg("连接超时。请检查口令是否正确。");
+        setErrorMsg(getReceiverPreTransferFailureMessage(hasTurnRef.current));
         setState(TransferState.ERROR);
       }, timeoutMs);
     };
