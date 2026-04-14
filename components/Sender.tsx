@@ -36,6 +36,8 @@ import {
   type ConnectionMetrics,
   type ConnectionRoute,
 } from '../services/transfer/adaptiveFlow';
+import { waitForDataChannelDrain } from '../services/transfer/DataChannelTransmitter';
+import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChunkReader';
 import { useTransferStore } from '../stores/transferStore';
 import { createSenderSessionService } from '../services/senderSessionService';
 import { SenderUI } from './sender/SenderUI';
@@ -1095,189 +1097,70 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             const hashStartOffset = fileOffset;
             await fileHasher.reset();
             let hashedBytes = 0;
+            const chunkReader = new StreamingFileChunkReader(file, READ_BUFFER_SIZE, fileOffset);
 
             while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId || peerTransferEpochRef.current.get(peerId) !== peerEpoch) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
 
-                const readSize = Math.min(READ_BUFFER_SIZE, file.size - fileOffset);
-                const blobSlice = file.slice(fileOffset, fileOffset + readSize);
-                const largeBuffer = await blobSlice.arrayBuffer();
-
-                let bufferOffset = 0;
-                while (bufferOffset < readSize) {
-                    if (!conn.open) throw new Error("Connection closed");
-                    const flow = peerAdaptiveFlowRef.current.get(peerId) || defaultFlow;
-                    const HIGH_WATER_MARK = flow.highWaterMark;
-                    const LOW_WATER_MARK = flow.lowWaterMark;
-                    const CHUNK_SIZE = flow.chunkSize;
-
-                    if (dataChannel && dataChannel.bufferedAmount > HIGH_WATER_MARK) {
-                        dataChannel.bufferedAmountLowThreshold = LOW_WATER_MARK;
-
-                        await new Promise<void>((resolve, reject) => {
-                            let settled = false;
-                            const pc = conn.peerConnection;
-                            const BACKPRESSURE_DRAIN_TIMEOUT_MS = 30000;
-                            const BACKPRESSURE_CHECK_INTERVAL_MS = 250;
-                            let checkTimer: ReturnType<typeof setInterval> | null = null;
-
-                            const isTerminalState = () => {
-                                const pcState = pc?.connectionState;
-                                return (
-                                    !conn.open ||
-                                    dataChannel.readyState !== 'open' ||
-                                    pcState === 'closed' ||
-                                    pcState === 'failed'
-                                );
-                            };
-
-                            const done = (err?: Error) => {
-                                if (settled) return;
-                                settled = true;
-                                clearTimeout(timeoutId);
-                                if (checkTimer) {
-                                    clearInterval(checkTimer);
-                                }
-                                dataChannel.removeEventListener('bufferedamountlow', onLow);
-                                dataChannel.removeEventListener('close', onClose);
-                                if (pc) {
-                                    pc.removeEventListener('connectionstatechange', onPcStateChange);
-                                }
-                                if (err) {
-                                    reject(err);
-                                } else {
-                                    resolve();
-                                }
-                            };
-
-                            const onLow = () => {
-                                if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
-                                    done();
-                                }
-                            };
-
-                            const onClose = () => {
-                                done(new Error("Data channel closed while waiting for buffer drain"));
-                            };
-
-                            const onPcStateChange = () => {
-                                if (!isTerminalState()) return;
-                                done(new Error(
-                                    `Transport closed while waiting for buffer drain: ` +
-                                    `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
-                                ));
-                            };
-
-                            const checkProgress = () => {
-                                if (isTerminalState()) {
-                                    done(new Error(
-                                        `Transport unavailable while waiting for buffer drain: ` +
-                                        `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
-                                    ));
-                                    return;
-                                }
-
-                                const bufferedNow = dataChannel.bufferedAmount;
-                                if (bufferedNow <= LOW_WATER_MARK) {
-                                    done();
-                                }
-                            };
-
-                            const timeoutId = setTimeout(() => {
-                                if (isTerminalState()) {
-                                    done(new Error(
-                                        `Transport closed while waiting for buffer drain: ` +
-                                        `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
-                                    ));
-                                    return;
-                                }
-
-                                if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
-                                    done();
-                                    return;
-                                }
-
-                                done(new Error(
-                                    `Backpressure drain timeout (${BACKPRESSURE_DRAIN_TIMEOUT_MS}ms): ` +
-                                    `buffered=${dataChannel.bufferedAmount}, high=${HIGH_WATER_MARK}, low=${LOW_WATER_MARK}, ` +
-                                    `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`,
-                                ));
-                            }, BACKPRESSURE_DRAIN_TIMEOUT_MS);
-
-                            checkTimer = setInterval(checkProgress, BACKPRESSURE_CHECK_INTERVAL_MS);
-
-                            if (isTerminalState()) {
-                                done(new Error(
-                                    `Transport unavailable while waiting for buffer drain: ` +
-                                    `dc=${dataChannel.readyState}, pc=${pc?.connectionState ?? 'unknown'}`
-                                ));
-                                return;
-                            }
-
-                            if (dataChannel.bufferedAmount <= LOW_WATER_MARK) {
-                                done();
-                                return;
-                            }
-
-                            dataChannel.addEventListener('bufferedamountlow', onLow);
-                            dataChannel.addEventListener('close', onClose);
-                            if (pc) {
-                                pc.addEventListener('connectionstatechange', onPcStateChange);
-                            }
-                        });
-                    }
-
-                    const chunkEnd = Math.min(bufferOffset + CHUNK_SIZE, readSize);
-                    // Use typed-array views to avoid per-chunk memory copy from ArrayBuffer.slice.
-                    const chunkView = new Uint8Array(largeBuffer, bufferOffset, chunkEnd - bufferOffset);
-
-                    try {
-                        conn.send(chunkView);
-                    } catch (e) {
-                         if (!conn.open) throw new Error("Connection closed during send");
-                         await new Promise(r => setTimeout(r, 20));
-                         conn.send(chunkView);
-                    }
-
-                    const currentChunkSize = chunkView.byteLength;
-                    fileHasher.update(chunkView);
-                    hashedBytes += currentChunkSize;
-                    totalBytesSent += currentChunkSize;
-                    bytesInLastPeriod += currentChunkSize;
-                    bufferOffset += currentChunkSize;
-
-                    const now = Date.now();
-                    if (now - lastUpdateTime >= 500) {
-                        const duration = (now - lastUpdateTime) / 1000;
-                        const currentBuffered = dataChannel?.bufferedAmount || 0;
-
-                        const actualBytesTransferred = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
-                        
-                        if (duration > 0) {
-                            const effectiveSpeed = Math.max(0, actualBytesTransferred) / duration;
-                            const totalDuration = (now - startTime) / 1000;
-                            const realTotal = Math.max(0, totalBytesSent - currentBuffered);
-                            
-                            const hasProgressSync = peerHasProgressSyncRef.current.has(peerId);
-                            if (!hasProgressSync) {
-                                peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
-                                peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
-                                if (totalSize > 0) {
-                                    const p = Math.min(99, Math.floor((realTotal / totalSize) * 100));
-                                    peerProgress.current.set(peerId, p);
-                                }
-                                peerTotalBytesRef.current.set(peerId, totalSize);
-                                peerTransferredBytesRef.current.set(peerId, Math.max(0, Math.min(totalSize, realTotal)));
-                            }
-                        }
-                        
-                        lastUpdateTime = now;
-                        lastBufferedAmount = currentBuffered;
-                        bytesInLastPeriod = 0;
-                    }
+                const flow = peerAdaptiveFlowRef.current.get(peerId) || defaultFlow;
+                if (dataChannel) {
+                    await waitForDataChannelDrain(conn, dataChannel, {
+                        highWaterMark: flow.highWaterMark,
+                        lowWaterMark: flow.lowWaterMark,
+                    });
                 }
-                fileOffset += readSize;
+
+                const nextChunk = await chunkReader.readNextChunk(flow.chunkSize);
+                const chunkView = nextChunk.chunk;
+                if (!chunkView) {
+                    break;
+                }
+
+                try {
+                    conn.send(chunkView);
+                } catch (e) {
+                    if (!conn.open) throw new Error("Connection closed during send");
+                    await new Promise(r => setTimeout(r, 20));
+                    conn.send(chunkView);
+                }
+
+                const currentChunkSize = chunkView.byteLength;
+                fileHasher.update(chunkView);
+                hashedBytes += currentChunkSize;
+                totalBytesSent += currentChunkSize;
+                bytesInLastPeriod += currentChunkSize;
+                fileOffset = nextChunk.fileOffset + currentChunkSize;
+
+                const now = Date.now();
+                if (now - lastUpdateTime >= 500) {
+                    const duration = (now - lastUpdateTime) / 1000;
+                    const currentBuffered = dataChannel?.bufferedAmount || 0;
+
+                    const actualBytesTransferred = bytesInLastPeriod - (currentBuffered - lastBufferedAmount);
+
+                    if (duration > 0) {
+                        const effectiveSpeed = Math.max(0, actualBytesTransferred) / duration;
+                        const totalDuration = (now - startTime) / 1000;
+                        const realTotal = Math.max(0, totalBytesSent - currentBuffered);
+
+                        const hasProgressSync = peerHasProgressSyncRef.current.has(peerId);
+                        if (!hasProgressSync) {
+                            peerRealtimeSpeed.current.set(peerId, effectiveSpeed);
+                            peerAverageSpeed.current.set(peerId, realTotal / totalDuration);
+                            if (totalSize > 0) {
+                                const p = Math.min(99, Math.floor((realTotal / totalSize) * 100));
+                                peerProgress.current.set(peerId, p);
+                            }
+                            peerTotalBytesRef.current.set(peerId, totalSize);
+                            peerTransferredBytesRef.current.set(peerId, Math.max(0, Math.min(totalSize, realTotal)));
+                        }
+                    }
+
+                    lastUpdateTime = now;
+                    lastBufferedAmount = currentBuffered;
+                    bytesInLastPeriod = 0;
+                }
             }
 
             const fileHash = await fileHasher.finalizeHex();

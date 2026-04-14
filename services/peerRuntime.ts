@@ -402,8 +402,7 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
       return;
     }
     if (ArrayBuffer.isView(data)) {
-      const view = data as ArrayBufferView;
-      this.dataChannel.send(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+      this.dataChannel.send(data as ArrayBufferView);
       return;
     }
     if (data instanceof Blob) {

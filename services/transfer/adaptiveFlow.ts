@@ -77,6 +77,7 @@ export const deriveAdaptiveFlow = (route: ConnectionRoute, metrics: ConnectionMe
   const rtt = metrics.rttMs ?? 0;
   const loss = metrics.lossPct ?? 0;
   const bitrate = metrics.availableOutgoingBitrate ?? 0;
+  const protocol = route.protocol.toLowerCase();
 
   if (route.isLan) {
     if (loss > 1 || rtt > 80) {
@@ -88,14 +89,24 @@ export const deriveAdaptiveFlow = (route: ConnectionRoute, metrics: ConnectionMe
       lowWaterMark = Math.min(6 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.25));
     }
   } else if (route.isRelay) {
-    if (loss > 4 || rtt > 350 || (bitrate > 0 && bitrate < 8_000_000)) {
-      chunkSize = Math.max(32 * 1024, Math.floor(base.chunkSize / 2));
-      highWaterMark = Math.max(1 * 1024 * 1024, Math.floor(base.highWaterMark * 0.6));
-      lowWaterMark = Math.max(256 * 1024, Math.floor(base.lowWaterMark * 0.6));
-    } else if (loss < 1 && rtt > 0 && rtt < 120 && bitrate > 20_000_000) {
-      chunkSize = Math.min(128 * 1024, Math.floor(base.chunkSize * 1.5));
-      highWaterMark = Math.min(4 * 1024 * 1024, Math.floor(base.highWaterMark * 1.5));
-      lowWaterMark = Math.min(1 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.5));
+    const isTcpRelay = protocol === 'tcp';
+
+    if (loss > 8 || rtt > 900 || (bitrate > 0 && bitrate < 1_500_000 && rtt > 500)) {
+      chunkSize = 32 * 1024;
+      highWaterMark = Math.max(3 * 1024 * 1024, Math.floor(base.highWaterMark * 0.5));
+      lowWaterMark = Math.max(768 * 1024, Math.floor(base.lowWaterMark * 0.5));
+    } else if (isTcpRelay) {
+      // TCP relay 容易出现队头阻塞，保守一些的 chunk 更稳，但仍保留较深缓冲。
+      chunkSize = Math.min(base.chunkSize, 64 * 1024);
+      highWaterMark = Math.max(6 * 1024 * 1024, Math.floor(base.highWaterMark * 0.9));
+      lowWaterMark = Math.max(1536 * 1024, Math.floor(base.lowWaterMark * 0.9));
+    } else if (loss < 1 && rtt > 0 && rtt < 180 && bitrate > 6_000_000) {
+      chunkSize = Math.min(192 * 1024, Math.floor(base.chunkSize * 1.5));
+      highWaterMark = Math.min(12 * 1024 * 1024, Math.floor(base.highWaterMark * 1.25));
+      lowWaterMark = Math.min(3 * 1024 * 1024, Math.floor(base.lowWaterMark * 1.25));
+    } else if (loss < 3 && rtt > 0 && rtt < 350) {
+      highWaterMark = Math.min(10 * 1024 * 1024, Math.floor(base.highWaterMark * 1.1));
+      lowWaterMark = Math.min(2560 * 1024, Math.floor(base.lowWaterMark * 1.1));
     }
   } else {
     if (loss > 3 || rtt > 260 || (bitrate > 0 && bitrate < 12_000_000)) {

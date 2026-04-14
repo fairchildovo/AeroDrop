@@ -186,12 +186,33 @@ const getCloudflareTurnTtlSeconds = (env: Env): number => {
   return Math.min(MAX_CF_TURN_TTL_SECONDS, Math.max(MIN_CF_TURN_TTL_SECONDS, requestedTtl));
 };
 
+const rankIceUrl = (url: string): number => {
+  const normalized = url.trim().toLowerCase();
+  if (normalized.startsWith('turn:') && normalized.includes('transport=udp')) return 0;
+  if (normalized.startsWith('turn:')) return 1;
+  if (normalized.startsWith('turns:') && normalized.includes('transport=tcp')) return 3;
+  if (normalized.startsWith('turns:')) return 4;
+  if (normalized.startsWith('stun:')) return 5;
+  return 6;
+};
+
+const normalizeIceServers = (iceServers: IceServerConfig[]): IceServerConfig[] => {
+  return iceServers.map((server) => {
+    const urls = Array.isArray(server.urls) ? [...server.urls] : [server.urls];
+    const orderedUrls = Array.from(new Set(urls)).sort((left, right) => rankIceUrl(left) - rankIceUrl(right));
+    return {
+      ...server,
+      urls: Array.isArray(server.urls) ? orderedUrls : orderedUrls[0] || server.urls,
+    };
+  });
+};
+
 const createIceConfigPayload = (
   iceServers: IceServerConfig[],
   iceTransportPolicy: 'all' | 'relay' = 'all',
   relayReason: NetworkRiskReason = null
 ): IceConfigPayload => ({
-  iceServers,
+  iceServers: normalizeIceServers(iceServers),
   secure: true,
   iceCandidatePoolSize: 20,
   iceTransportPolicy,

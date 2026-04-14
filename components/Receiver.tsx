@@ -143,6 +143,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   
   const isStreamingRef = useRef<boolean>(false);
   const nativeWriterRef = useRef<FileSystemWritableFileStream | null>(null);
+  const nativeFileHandleRef = useRef<FileSystemFileHandle | null>(null);
   const streamSaverWriterRef = useRef<WritableStreamDefaultWriter | null>(null);
   const preparedNativeWriterFileIndexRef = useRef<number | null>(null);
 
@@ -547,6 +548,69 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       return false;
   };
 
+  const flushPendingStreamWrites = async (): Promise<boolean> => {
+      if (!isStreamingRef.current) {
+          await writeQueueRef.current;
+          return true;
+      }
+
+      const finalBatch = writeBufferRef.current;
+      const finalSize = writeBufferSizeRef.current;
+      writeBufferRef.current = [];
+      writeBufferSizeRef.current = 0;
+
+      if (finalSize > 0) {
+          writeQueueRef.current = writeQueueRef.current.then(() => flushSpecificBatch(finalBatch, finalSize));
+      }
+
+      await writeQueueRef.current;
+      return stateRef.current !== TransferState.ERROR;
+  };
+
+  const reopenNativeWriterForResume = async (targetFileIndex: number, byteOffset: number): Promise<boolean> => {
+    const handle = nativeFileHandleRef.current;
+    if (!handle) return false;
+    const meta = metadataRef.current;
+    if (!meta || meta.files.length !== 1 || targetFileIndex !== 0) return false;
+
+    try {
+      const writable = await handle.createWritable({ keepExistingData: true });
+      await writable.seek(byteOffset);
+      nativeWriterRef.current = writable;
+      streamSaverWriterRef.current = null;
+      isStreamingRef.current = true;
+      preparedNativeWriterFileIndexRef.current = targetFileIndex;
+      return true;
+    } catch (error) {
+      console.warn('Failed to reopen native writer for resume:', error);
+      nativeWriterRef.current = null;
+      return false;
+    }
+  };
+
+  const hasRetainedCurrentFileData = (fileIndex: number): boolean => {
+    const hasIndexedDbBufferedData =
+      indexedDbBufferedFileIndexRef.current === fileIndex &&
+      (indexedDbBufferedBytesRef.current > 0 || indexedDbBatchBytesRef.current > 0);
+    const hasStreamingTarget =
+      currentFileIndexRef.current === fileIndex &&
+      receivedSizeRef.current > 0 &&
+      (
+        writeBufferRef.current.length > 0 ||
+        !!nativeWriterRef.current ||
+        !!streamSaverWriterRef.current
+      );
+
+    return (
+      currentFileIndexRef.current === fileIndex &&
+      (
+        chunksRef.current.length > 0 ||
+        hasIndexedDbBufferedData ||
+        hasStreamingTarget
+      )
+    );
+  };
+
   const prepareNativeWriterForSingleFile = async (targetFileIndex: number): Promise<boolean> => {
     if (isIOS || isSafari) return false;
     if (!window.showSaveFilePicker) return false;
@@ -569,6 +633,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         excludeAcceptAllOption: false,
       });
       const writable = await handle.createWritable();
+      nativeFileHandleRef.current = handle;
       nativeWriterRef.current = writable;
       isStreamingRef.current = true;
       preparedNativeWriterFileIndexRef.current = targetFileIndex;
@@ -963,14 +1028,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           onNotification('iOS 大文件已启用 IndexedDB 缓冲模式', 'info');
         }
 
-        const hasIndexedDbBufferedData =
-          isIndexedDbBufferingRef.current &&
-          indexedDbBufferedFileIndexRef.current === fileIndex &&
-          indexedDbBufferedBytesRef.current > 0;
-
-        const resumingSameFile =
-          currentFileIndexRef.current === fileIndex &&
-          (chunksRef.current.length > 0 || hasIndexedDbBufferedData);
+        const resumingSameFile = hasRetainedCurrentFileData(fileIndex);
 
         if (!resumingSameFile) {
             if (!usePreparedNativeWriter) {
@@ -1044,7 +1102,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         
         setCurrentFileName(fileName);
         setCurrentFileIndex(fileIndex + 1);
-        setProgress(0);
+        setProgress(fileSize > 0 ? Math.min(100, Math.floor((receivedSizeRef.current / fileSize) * 100)) : 0);
         setEta('计算中...');
         setDownloadSpeed('0 KB/s');
         sendTransferProgress(0);
@@ -1598,31 +1656,53 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const resumeTransfer = () => {
-      if (connRef.current?.open) {
-          isTransferActiveRef.current = true;
-          const currentIdx = currentFileIndexRef.current;
-          const byteOffset = Math.max(0, receivedSizeRef.current);
+      void (async () => {
+          if (connRef.current?.open) {
+              isTransferActiveRef.current = true;
+              const currentIdx = currentFileIndexRef.current;
 
-          isStreamingRef.current = false;
-          preparedNativeWriterFileIndexRef.current = null;
+              if (completedFileIndicesRef.current.has(currentIdx)) {
+                  connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
+                    fileIndex: currentIdx + 1,
+                    byteOffset: 0,
+                  })));
+                  setState(TransferState.TRANSFERRING);
+                  return;
+              }
 
-          if (completedFileIndicesRef.current.has(currentIdx)) {
-              connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
-                fileIndex: currentIdx + 1,
-                byteOffset: 0,
-              })));
-          } else {
+              let byteOffset = 0;
+              let canResumeCurrentFile = false;
+
+              if (hasRetainedCurrentFileData(currentIdx)) {
+                  const flushed = await flushPendingStreamWrites();
+                  if (!flushed) {
+                      return;
+                  }
+                  byteOffset = Math.max(0, receivedSizeRef.current);
+                  canResumeCurrentFile = byteOffset > 0;
+              } else if (receivedSizeRef.current > 0) {
+                  const reopened = await reopenNativeWriterForResume(currentIdx, Math.max(0, receivedSizeRef.current));
+                  if (reopened) {
+                      byteOffset = Math.max(0, receivedSizeRef.current);
+                      canResumeCurrentFile = byteOffset > 0;
+                  }
+              }
+
+              if (!canResumeCurrentFile && receivedSizeRef.current > 0 && onNotification) {
+                  onNotification("当前文件的流式落盘状态无法直接续写，本次将从该文件开头重新下载。", 'info');
+              }
+
               connRef.current.send(createResumeRequestMessage(normalizeFileRequest({
                 fileIndex: currentIdx,
-                byteOffset,
+                byteOffset: canResumeCurrentFile ? byteOffset : 0,
               })));
+              setState(TransferState.TRANSFERRING);
+          } else {
+              setErrorMsg("连接已断开，请重新连接发送方。");
+              setState(TransferState.ERROR);
+              if (onNotification) onNotification("连接已断开，请重试", 'error');
           }
-          setState(TransferState.TRANSFERRING);
-      } else {
-          setErrorMsg("连接已断开，请重新连接发送方。");
-          setState(TransferState.ERROR);
-          if (onNotification) onNotification("连接已断开，请重试", 'error');
-      }
+      })();
   };
 
   const reset = () => {
@@ -1646,6 +1726,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setDownloadSpeedBytes(0);
         setSenderDeviceName('');
         indexedDbNotifiedRef.current = false;
+        nativeFileHandleRef.current = null;
         resetStateForNewTransfer();
         resetReceiverSnapshot();
     });
