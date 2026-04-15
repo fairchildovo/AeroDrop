@@ -4,6 +4,7 @@ export type RouteSelectionContext = {
   isMobileDevice: boolean;
   isConstrained: boolean;
   relayRecommended: boolean;
+  fetchLatencyMs?: number | null;
 };
 
 export type RouteSnapshot = {
@@ -17,11 +18,14 @@ export const getRouteSelectionTimings = (context: RouteSelectionContext) => {
     return { startAllImmediately: true, startRelayDelayMs: 500, p2pGraceWindowMs: 900 };
   }
 
-  if (context.relayRecommended) {
+  if (
+    context.relayRecommended ||
+    (typeof context.fetchLatencyMs === 'number' && context.fetchLatencyMs >= 1200)
+  ) {
     return { startAllImmediately: true, startRelayDelayMs: 800, p2pGraceWindowMs: 1500 };
   }
 
-  return { startAllImmediately: true, startRelayDelayMs: 1200, p2pGraceWindowMs: 1800 };
+  return { startAllImmediately: true, startRelayDelayMs: null, p2pGraceWindowMs: 1800 };
 };
 
 export const pickPreferredRouteKind = (

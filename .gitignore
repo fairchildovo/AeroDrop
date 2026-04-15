@@ -1,6 +1,7 @@
 # Logs
 logs
 *.log
+.tmp-*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -25,6 +26,7 @@ dist-ssr
 figma/*
 .claude/*
 .claude/settings.local.json
+.codex-*
 
 # wrangler files
 .wrangler
@@ -36,3 +38,4 @@ figma/*
 # Local private documents
 private-docs/
 docs/
+skills/

@@ -1,10 +1,14 @@
 import { pickPreferredRouteKind, type RouteSnapshot } from '../routeSelectionPolicy';
 import type { RouteAttemptKind } from '../../types';
 
+type ReadyRouteAttempt = RouteSnapshot & {
+  attemptId: string;
+};
+
 type RouteArbiterOptions = {
   receiverSessionId?: string;
   p2pGraceWindowMs: number;
-  onCommit: (kind: RouteAttemptKind) => void;
+  onCommit: (winner: { kind: RouteAttemptKind; attemptId: string }) => void;
   now?: () => number;
   schedule?: (ms: number, fn: () => void) => number;
   clearScheduled?: (id: number) => void;
@@ -13,49 +17,55 @@ type RouteArbiterOptions = {
 export const createReceiveRouteArbiter = (options: RouteArbiterOptions) => {
   let committed = false;
   let provisionalTimer: number | null = null;
-  let opened = new Map<RouteAttemptKind, RouteSnapshot>();
+  let readyAttempts = new Map<RouteAttemptKind, ReadyRouteAttempt>();
 
-  const commit = (kind: RouteAttemptKind) => {
+  const commit = (attempt: ReadyRouteAttempt) => {
     if (committed) return;
     committed = true;
     if (provisionalTimer !== null) {
       options.clearScheduled?.(provisionalTimer);
       provisionalTimer = null;
     }
-    options.onCommit(kind);
+    options.onCommit({ kind: attempt.kind, attemptId: attempt.attemptId });
   };
 
   return {
-    markAttemptOpen(kind: RouteAttemptKind, snapshot?: Partial<RouteSnapshot>) {
-      const route: RouteSnapshot = {
+    markAttemptReady(attemptId: string, kind: RouteAttemptKind, snapshot?: Partial<RouteSnapshot>) {
+      const route: ReadyRouteAttempt = {
+        attemptId,
         kind,
         isDirect: snapshot?.isDirect ?? (kind === 'all'),
         isLanDirect: snapshot?.isLanDirect ?? false,
       };
-      opened.set(kind, route);
+      readyAttempts.set(kind, route);
 
       if (kind === 'all') {
-        const relay = opened.get('relay');
+        const relay = readyAttempts.get('relay');
         if (!relay) {
-          commit('all');
+          commit(route);
           return;
         }
 
         const preferred = pickPreferredRouteKind(relay, route);
         if (preferred === 'all') {
-          commit('all');
+          commit(route);
         }
         return;
       }
 
-      if (opened.has('all')) {
-        const all = opened.get('all')!;
+      if (provisionalTimer !== null) {
+        options.clearScheduled?.(provisionalTimer);
+        provisionalTimer = null;
+      }
+
+      if (readyAttempts.has('all')) {
+        const all = readyAttempts.get('all')!;
         const preferred = pickPreferredRouteKind(route, all);
-        commit(preferred);
+        commit(preferred === 'all' ? all : route);
         return;
       }
 
-      provisionalTimer = options.schedule?.(options.p2pGraceWindowMs, () => commit('relay')) ?? null;
+      provisionalTimer = options.schedule?.(options.p2pGraceWindowMs, () => commit(route)) ?? null;
     },
   };
 };

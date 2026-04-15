@@ -20,6 +20,7 @@ import {
   collectIceRouteWithRetry,
   ConnectionSession,
   createConnectionSession,
+  type IceRoute,
   markConnectionFailure,
   markConnectionSuccess,
   markIceConfigFetched,
@@ -42,6 +43,7 @@ import { useTransferStore } from '../stores/transferStore';
 import { createSenderSessionService } from '../services/senderSessionService';
 import { createReceiverSessionRegistry } from '../services/send/receiverSessionRegistry';
 import { createRouteCommitGate } from '../services/send/routeCommitGate';
+import { createSenderRouteHandshakeHandler } from '../services/send/routeHandshake';
 import { SenderUI } from './sender/SenderUI';
 
 interface SenderProps {
@@ -277,6 +279,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerIsLAN = useRef<Map<string, boolean>>(new Map());
   const peerAdaptiveFlowRef = useRef<Map<string, AdaptiveFlowProfile>>(new Map());
   const peerRouteLogSignatureRef = useRef<Map<string, string>>(new Map());
+  const committedRouteLogSignatureRef = useRef<Map<string, string>>(new Map());
 
   const updateAdaptiveFlow = (peerId: string, route: ConnectionRoute, metrics: ConnectionMetrics) => {
     const next = deriveAdaptiveFlow(route, metrics);
@@ -406,6 +409,66 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       }
 
       return route;
+  };
+
+  const logCommittedRouteSelection = async (
+    conn: DataConnection,
+    receiverSessionId: string,
+    selectedKind: 'all' | 'relay'
+  ) => {
+    const pc = conn.peerConnection;
+    if (!pc) return;
+
+    const route: IceRoute | null = await collectIceRouteWithRetry(pc);
+    attachIceRouteToSession(shareTelemetryRef.current, route);
+
+    const selectionReason =
+      route?.pathType === 'LAN' &&
+      route.localCandidateType !== 'relay' &&
+      route.remoteCandidateType !== 'relay'
+        ? 'lan_direct'
+        : route && route.localCandidateType !== 'relay' && route.remoteCandidateType !== 'relay'
+          ? 'p2p_direct'
+          : 'relay_fallback';
+    const turnUrl = route?.localUrl?.startsWith('turn')
+      ? route.localUrl
+      : route?.remoteUrl?.startsWith('turn')
+        ? route.remoteUrl
+        : '';
+    const routeSignature = [
+      receiverSessionId,
+      selectedKind,
+      route?.protocol || '',
+      route?.localCandidateType || '',
+      route?.remoteCandidateType || '',
+      route?.localUrl || '',
+      route?.remoteUrl || '',
+      route?.relayProtocol || '',
+      route?.pathType || '',
+    ].join('|');
+
+    if (committedRouteLogSignatureRef.current.get(receiverSessionId) === routeSignature) {
+      return;
+    }
+    committedRouteLogSignatureRef.current.set(receiverSessionId, routeSignature);
+
+    console.info('[route-selected]', {
+      role: 'sender',
+      receiverSessionId,
+      peerId: conn.peer,
+      selectedKind,
+      protocol: route?.protocol,
+      localCandidateType: route?.localCandidateType,
+      remoteCandidateType: route?.remoteCandidateType,
+      localNetworkType: route?.localNetworkType,
+      remoteNetworkType: route?.remoteNetworkType,
+      relayProtocol: route?.relayProtocol,
+      turnUrlType: turnUrl ? (turnUrl.startsWith('turns:') ? 'turns' : 'turn') : 'none',
+      turnUrl: turnUrl || undefined,
+      pathType: route?.pathType,
+      rttMs: route?.rttMs,
+      selectionReason,
+    });
   };
 
   
@@ -770,6 +833,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       if (removedSessionId && sessionToPeerRef.current.get(removedSessionId) === conn.peer) {
           sessionToPeerRef.current.delete(removedSessionId);
       }
+      if (removedSessionId) {
+          committedRouteLogSignatureRef.current.delete(removedSessionId);
+      }
       peerSessionIdsRef.current.delete(conn.peer);
 
       updateConnectionStatusUI();
@@ -944,67 +1010,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           
           conn.on('data', (data: any) => {
               const incoming = data as P2PMessage;
+              const routeHandshakeHandler = createSenderRouteHandshakeHandler({
+                  registry: receiverSessionRegistryRef.current,
+                  commitGate: routeCommitGateRef.current,
+                  getConnectionId: getOrCreateConnectionId,
+                  metadata: sessionMetadata,
+                  deviceName: localDeviceNameRef.current,
+                  onRouteCommitted: ({ conn: committedConn, receiverSessionId, selectedKind }) => {
+                    void logCommittedRouteSelection(committedConn as DataConnection, receiverSessionId, selectedKind);
+                  },
+              });
+              if (routeHandshakeHandler.handleMessage(conn, incoming)) {
+                  return;
+              }
               const msg = normalizeTransferMessage(incoming, TRANSFER_CONFIG.CHUNK_SIZE_WAN);
-              if (msg.type === 'ROUTE_PROBE') {
-                  receiverSessionRegistryRef.current.registerAttempt({
-                      receiverSessionId: msg.payload.receiverSessionId,
-                      attemptId: msg.payload.attemptId,
-                      attemptKind: msg.payload.attemptKind,
-                      peerId: conn.peer,
-                      connectionId: getOrCreateConnectionId(conn),
-                  });
-
-                  conn.send({
-                      type: 'ROUTE_READY',
-                      payload: {
-                          receiverSessionId: msg.payload.receiverSessionId,
-                          attemptId: msg.payload.attemptId,
-                      },
-                  });
-                  return;
-              }
-
-              if (msg.type === 'ROUTE_COMMIT') {
-                  const connectionId = getOrCreateConnectionId(conn);
-                  if (!receiverSessionRegistryRef.current.resolveAttemptForCommit(
-                      msg.payload.receiverSessionId,
-                      msg.payload.attemptId,
-                      connectionId
-                  )) {
-                      conn.close();
-                      return;
-                  }
-
-                  const commitClaim = routeCommitGateRef.current.claimCommit(
-                      msg.payload.receiverSessionId,
-                      connectionId
-                  );
-                  if (commitClaim.status === 'conflict') {
-                      conn.close();
-                      return;
-                  }
-                  if (commitClaim.status === 'duplicate') {
-                      return;
-                  }
-
-                  receiverSessionRegistryRef.current.markCommitted(msg.payload.receiverSessionId, connectionId);
-
-                  try {
-                      conn.send({
-                          type: 'DEVICE_INFO',
-                          payload: { deviceName: localDeviceNameRef.current },
-                      });
-                      conn.send({ type: 'METADATA', payload: sessionMetadata });
-                  } catch (error) {
-                      console.error('Failed to send committed route metadata', error);
-                  }
-                  return;
-              }
-
-              if (msg.type === 'ROUTE_ABORT') {
-                  conn.close();
-                  return;
-              }
 
               if (msg.type === 'DEVICE_INFO') {
                   const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName : '';
@@ -1357,6 +1376,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerConnectionTypeRef.current.clear();
     peerHeartbeatAtRef.current.clear();
     peerAdaptiveFlowRef.current.clear();
+    committedRouteLogSignatureRef.current.clear();
 
     setTimeout(() => {
         if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }

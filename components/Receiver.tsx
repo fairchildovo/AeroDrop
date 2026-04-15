@@ -25,6 +25,7 @@ import {
   collectIceRouteWithRetry,
   ConnectionSession,
   createConnectionSession,
+  type IceRoute,
   markConnectionFailure,
   markConnectionRetry,
   markConnectionSuccess,
@@ -38,6 +39,14 @@ import { createReceivePersistenceAdapter, type ReceivePersistenceAdapter } from 
 import { createReceiveRecoveryCoordinator, type ReceiveRecoveryCoordinator } from '../services/receive/recoveryCoordinator';
 import { createReceivePersistenceOrchestrator, type ReceivePersistenceOrchestrator } from '../services/receive/persistenceOrchestrator';
 import { createReceiveRouteArbiter } from '../services/receive/routeArbiter';
+import {
+  getCommittedSessionReconnectDelayMs,
+  shouldAutoReconnectCommittedSession,
+} from '../services/receive/committedReconnectPolicy';
+import {
+  getNonWinningRouteMessageDisposition,
+  isRouteAttemptTransferControlMessage,
+} from '../services/receive/routeAttemptMessagePolicy';
 import { createReceiveSessionCoordinator, type ReceiveSessionCoordinator } from '../services/receive/sessionCoordinator';
 import {
   createReceiveStreamingWriter,
@@ -75,12 +84,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const resetReceiverSnapshot = useTransferStore((store) => store.resetReceiverSnapshot);
   const INITIAL_TIMEOUT_MS = 15000;
   const RELAY_TIMEOUT_MS = 25000;
-  const RELAY_PARALLEL_DELAY_MS = 1200;
-  const P2P_BACKFILL_DELAY_MS = 2200;
   const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
   const FAST_RETRY_BASE_MS = 700;
   const FAST_RETRY_MAX_MS = 5000;
   const MAX_CONNECT_RETRY = 6;
+  const MAX_COMMITTED_RECONNECT_RETRY = 3;
   const MAX_AUTO_REPAIR_RETRIES_PER_FILE = 2;
   const IOS_MEMORY_WARN_BYTES = 500 * 1024 * 1024;
   const IOS_IDB_BUFFER_THRESHOLD_BYTES = 500 * 1024 * 1024;
@@ -130,6 +138,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const inputRef = useRef<HTMLInputElement>(null);
   const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
+  const committedReconnectTimerRef = useRef<number | null>(null);
   const stateRef = useRef<TransferState>(TransferState.IDLE);
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
   const localDeviceNameRef = useRef<string>(deviceName);
@@ -141,9 +150,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const relayConnRef = useRef<DataConnection | null>(null);
   const happyEyeballsWonRef = useRef(false);
   const p2pTimeoutRetryCountRef = useRef(0);
-  const connectionRouteLogSignatureRef = useRef('');
+  const selectedRouteLogSignatureRef = useRef('');
   const routeAttemptCounterRef = useRef(0);
   const routeAttemptsRef = useRef<Map<string, RouteAttemptRecord>>(new Map());
+  const intentionalConnectionCloseRef = useRef(new WeakSet<DataConnection>());
+  const committedReconnectAttemptsRef = useRef(0);
   const pendingRouteMessagesRef = useRef<Map<string, P2PMessage[]>>(new Map());
   const latestRouteAttemptIdsRef = useRef<Record<RouteAttemptKind, string | null>>({
     all: null,
@@ -226,6 +237,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }
   };
 
+  const clearCommittedReconnectTimer = () => {
+    if (committedReconnectTimerRef.current !== null) {
+      clearTimeout(committedReconnectTimerRef.current);
+      committedReconnectTimerRef.current = null;
+    }
+  };
+
+  const markIntentionalConnectionClose = (conn: DataConnection | null) => {
+    if (!conn) return;
+    intentionalConnectionCloseRef.current.add(conn);
+  };
+
   const getNextRouteAttemptId = (attemptKind: RouteAttemptKind) => {
     routeAttemptCounterRef.current += 1;
     return `${attemptKind}-${Date.now().toString(36)}-${routeAttemptCounterRef.current.toString(36)}`;
@@ -279,7 +302,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const closeRouteAttempt = (
     attemptId: string,
-    reason: 'session_closed' | 'winner_selected'
+    reason: 'lost_race' | 'session_closed' | 'winner_selected'
   ) => {
     const existing = routeAttemptsRef.current.get(attemptId);
     if (!existing) {
@@ -331,6 +354,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       all: null,
       relay: null,
     };
+    selectedRouteLogSignatureRef.current = '';
     receiveRouteArbiterRef.current = null;
   };
 
@@ -355,7 +379,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     collectIceRouteWithRetry(pc).then((route) => {
       attachIceRouteToSession(connectTelemetryRef.current, route);
       if (!route) return;
+      const selectedKind = preferredIcePolicyRef.current === 'relay' ? 'relay' : 'all';
+      const selectionReason =
+        route.pathType === 'LAN' &&
+        route.localCandidateType !== 'relay' &&
+        route.remoteCandidateType !== 'relay'
+          ? 'lan_direct'
+          : route.localCandidateType !== 'relay' && route.remoteCandidateType !== 'relay'
+            ? 'p2p_direct'
+            : 'relay_fallback';
       const routeSignature = [
+        receiverSessionIdRef.current,
+        selectedKind,
         route.protocol || '',
         route.localCandidateType || '',
         route.remoteCandidateType || '',
@@ -364,15 +399,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         route.relayProtocol || '',
         route.pathType || '',
       ].join('|');
-      if (connectionRouteLogSignatureRef.current !== routeSignature) {
-        connectionRouteLogSignatureRef.current = routeSignature;
+      if (selectedRouteLogSignatureRef.current !== routeSignature) {
+        selectedRouteLogSignatureRef.current = routeSignature;
         const turnUrl = route.localUrl?.startsWith('turn')
           ? route.localUrl
           : route.remoteUrl?.startsWith('turn')
             ? route.remoteUrl
             : '';
-        console.info('[ice-route:selected]', {
+        console.info('[route-selected]', {
           role: 'receiver',
+          receiverSessionId: receiverSessionIdRef.current,
+          selectedKind,
           peerId: conn.peer,
           protocol: route.protocol,
           localCandidateType: route.localCandidateType,
@@ -384,12 +421,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           turnUrl: turnUrl || undefined,
           pathType: route.pathType,
           rttMs: route.rttMs,
+          selectionReason,
         });
       }
     });
   };
 
-  const handleConnectRef = useRef<() => void>(() => {});
+  const handleConnectRef = useRef<(options?: { preserveCommittedReconnectAttempts?: boolean }) => void>(() => {});
   useEffect(() => {
     handleConnectRef.current = handleConnect;
   });
@@ -408,8 +446,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       isMountedRef.current = false;
       clearConnectionTimeout();
       clearHeartbeatTimer();
+      clearCommittedReconnectTimer();
       resetRouteAttemptState();
-      if (connRef.current) connRef.current.close();
+      if (connRef.current) {
+        markIntentionalConnectionClose(connRef.current);
+        connRef.current.close();
+      }
       if (peerRef.current) peerRef.current.destroy();
       if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
       deleteIndexedDbChunksForSession().catch(() => {});
@@ -973,6 +1015,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setState(TransferState.ERROR);
       abortStreams().catch(() => {});
       if (connRef.current?.open) {
+        markIntentionalConnectionClose(connRef.current);
         try { connRef.current.send({ type: 'TRANSFER_CANCELLED', payload: { reason: message } }); } catch {}
         try { connRef.current.close(); } catch {}
       }
@@ -1013,6 +1056,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setTotalFiles(meta.files?.length || 0);
       setState(TransferState.PEER_CONNECTED);
       setCanResume(isResumable);
+      committedReconnectAttemptsRef.current = 0;
       isTransferActiveRef.current = false;
 
       if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
@@ -1036,11 +1080,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
        markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
        setErrorMsg(msg.payload?.reason || "发送方拒绝了请求。");
        setState(TransferState.ERROR);
+       markIntentionalConnectionClose(conn);
        conn.close();
     }
     else if (msg.type === 'TRANSFER_CANCELLED') {
        setErrorMsg("发送方已停止分享。");
        setState(TransferState.ERROR);
+       markIntentionalConnectionClose(conn);
        conn.close();
     }
   };
@@ -1085,8 +1131,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         return;
       }
 
-      receiveRouteArbiterRef.current?.markAttemptOpen(attemptKind);
-
       try {
         conn.send({
           type: 'ROUTE_PROBE',
@@ -1107,6 +1151,46 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         try { conn.close(); } catch {}
       }
     });
+
+    const buildRouteSnapshot = (route: IceRoute | null) => {
+      if (!route) {
+        return {
+          isDirect: attemptKind === 'all',
+          isLanDirect: false,
+        };
+      }
+
+      const isRelay =
+        route.localCandidateType === 'relay' ||
+        route.remoteCandidateType === 'relay';
+      const isDirect = !isRelay;
+      const isLanDirect = isDirect && route.pathType === 'LAN';
+
+      return {
+        isDirect,
+        isLanDirect,
+      };
+    };
+
+    const handleRouteReady = async (msg: P2PMessage) => {
+      if (msg.type !== 'ROUTE_READY') return;
+      if (msg.payload.receiverSessionId !== receiverSessionIdRef.current) return;
+      if (msg.payload.attemptId !== attemptId) return;
+      if (latestRouteAttemptIdsRef.current[attemptKind] !== attemptId) return;
+
+      const registeredAttempt = routeAttemptsRef.current.get(attemptId);
+      if (!registeredAttempt || registeredAttempt.conn !== conn) return;
+
+      const route = conn.peerConnection
+        ? await collectIceRouteWithRetry(conn.peerConnection)
+        : null;
+
+      receiveRouteArbiterRef.current?.markAttemptReady(
+        attemptId,
+        attemptKind,
+        buildRouteSnapshot(route)
+      );
+    };
 
     conn.on('data', async (data: any) => {
       if (data == null) return;
@@ -1172,14 +1256,32 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       const msg = data as P2PMessage;
 
+      if (msg.type === 'ROUTE_READY') {
+        await handleRouteReady(msg);
+        return;
+      }
+
       if (connRef.current !== conn) {
-        if (
-          msg.type === 'DEVICE_INFO' ||
-          msg.type === 'METADATA' ||
-          msg.type === 'REJECT_TRANSFER' ||
-          msg.type === 'TRANSFER_CANCELLED'
-        ) {
-          bufferRouteMessage(attemptId, msg);
+        if (isRouteAttemptTransferControlMessage(msg.type)) {
+          const disposition = getNonWinningRouteMessageDisposition({
+            winnerCommitted: happyEyeballsWonRef.current,
+            messageType: msg.type,
+          });
+
+          if (disposition === 'buffer') {
+            bufferRouteMessage(attemptId, msg);
+          } else {
+            console.warn('[route-protocol-misuse]', {
+              role: 'receiver',
+              receiverSessionId: receiverSessionIdRef.current,
+              attemptId,
+              attemptKind,
+              peerId: conn.peer,
+              messageType: msg.type,
+              reason: 'losing_route_received_transfer_control',
+            });
+            closeRouteAttempt(attemptId, 'lost_race');
+          }
         }
         return;
       }
@@ -1201,8 +1303,44 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
        connRef.current = null;
        clearHeartbeatTimer();
        const currentState = stateRef.current;
+       const intentionalClose = intentionalConnectionCloseRef.current.delete(conn);
        if (currentState === TransferState.WAITING_FOR_PEER && scheduleFastReconnect()) {
           return;
+       }
+       if (intentionalClose) {
+         return;
+       }
+       if (
+        shouldAutoReconnectCommittedSession({
+          currentState,
+          hasCode: codeRef.current.length === 4,
+          intentionalClose,
+        })
+       ) {
+        if (committedReconnectTimerRef.current !== null) {
+          return;
+        }
+        if (committedReconnectAttemptsRef.current >= MAX_COMMITTED_RECONNECT_RETRY) {
+          setErrorMsg(getReceiverDisconnectedMessage(hasTurnRef.current, false));
+          setState(TransferState.ERROR);
+          return;
+        }
+
+        committedReconnectAttemptsRef.current += 1;
+        const reconnectAttempt = committedReconnectAttemptsRef.current;
+        const reconnectDelayMs = getCommittedSessionReconnectDelayMs(reconnectAttempt);
+        setErrorMsg('连接中断，正在尝试恢复...');
+        setConnectingStage('connecting_signaling');
+        setState(TransferState.WAITING_FOR_PEER);
+        if (onNotification) {
+          onNotification(`连接中断，正在尝试第 ${reconnectAttempt} 次重连...`, 'info');
+        }
+        committedReconnectTimerRef.current = window.setTimeout(() => {
+          committedReconnectTimerRef.current = null;
+          if (codeRef.current.length !== 4) return;
+          void handleConnectRef.current({ preserveCommittedReconnectAttempts: true });
+        }, reconnectDelayMs);
+        return;
        }
        clearConnectionTimeout();
        if (currentState !== TransferState.COMPLETED) {
@@ -1233,6 +1371,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
       clearHeartbeatTimer();
       if (scheduleFastReconnect()) {
+        return;
+      }
+      if (
+        shouldAutoReconnectCommittedSession({
+          currentState: stateRef.current,
+          hasCode: codeRef.current.length === 4,
+          intentionalClose: intentionalConnectionCloseRef.current.has(conn),
+        })
+      ) {
+        try { conn.close(); } catch {}
         return;
       }
       markConnectionFailure(connectTelemetryRef.current, 'data_channel_error');
@@ -1537,8 +1685,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   }
   const receiveSessionCoordinator = receiveSessionCoordinatorRef.current!;
 
-  const handleConnect = async () => {
+  const handleConnect = async (options?: { preserveCommittedReconnectAttempts?: boolean }) => {
     if (!code || code.length !== 4) return;
+    clearCommittedReconnectTimer();
+    if (!options?.preserveCommittedReconnectAttempts) {
+      committedReconnectAttemptsRef.current = 0;
+    }
     connectTelemetryRef.current = createConnectionSession('receiver', { code });
     setState(TransferState.WAITING_FOR_PEER);
     setConnectingStage('fetching_ice');
@@ -1558,13 +1710,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const connectionPlan = createHappyEyeballsPlan(iceConfig, networkProfile, {
       defaultInitialTimeoutMs: INITIAL_TIMEOUT_MS,
       relayInitialTimeoutMs: RELAY_TIMEOUT_MS,
-      relayParallelDelayMs: RELAY_PARALLEL_DELAY_MS,
-      p2pBackfillDelayMs: P2P_BACKFILL_DELAY_MS,
     });
     const routeSelectionTimings = getRouteSelectionTimings({
       isMobileDevice: networkProfile.isMobileDevice,
       isConstrained: networkProfile.isConstrained,
       relayRecommended: iceConfig.relayRecommended,
+      fetchLatencyMs: iceConfig.fetchLatencyMs,
     });
     markIceConfigFetched(connectTelemetryRef.current);
     setConnectingStage('connecting_signaling');
@@ -1573,13 +1724,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     p2pTimeoutRetryCountRef.current = 0;
     receiveRouteArbiterRef.current = createReceiveRouteArbiter({
       p2pGraceWindowMs: routeSelectionTimings.p2pGraceWindowMs,
-      onCommit: (winningKind) => {
+      onCommit: ({ kind: winningKind, attemptId: winnerAttemptId }) => {
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) {
-          return;
-        }
-
-        const winnerAttemptId = latestRouteAttemptIdsRef.current[winningKind];
-        if (!winnerAttemptId) {
           return;
         }
 
@@ -1591,6 +1737,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         clearConnectionTimeout();
         connRef.current = winner.conn;
         happyEyeballsWonRef.current = true;
+        preferredIcePolicyRef.current = winningKind;
         closeNonWinningRouteAttempts(winnerAttemptId);
         cleanupLosingPeer(winner.conn);
         markConnectionSuccess(connectTelemetryRef.current, { peerId: winner.conn.peer });
@@ -1855,11 +2002,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     happyEyeballsWonRef.current = false;
     clearConnectionTimeout();
     clearHeartbeatTimer();
+    clearCommittedReconnectTimer();
     resetRouteAttemptState();
     
     abortStreams().then(() => {
         deleteIndexedDbChunksForSession().catch(() => {});
-        if (connRef.current) connRef.current.close();
+        if (connRef.current) {
+          markIntentionalConnectionClose(connRef.current);
+          connRef.current.close();
+        }
         if (peerRef.current) peerRef.current.destroy();
         if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
         setMetadata(null);
@@ -1872,6 +2023,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setSenderDeviceName('');
         indexedDbNotifiedRef.current = false;
         nativeFileHandleRef.current = null;
+        committedReconnectAttemptsRef.current = 0;
         resetStateForNewTransfer();
         resetReceiverSnapshot();
     });

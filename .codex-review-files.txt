@@ -1,5 +1,0 @@
-components/Sender.tsx
-services/send/receiverSessionRegistry.test.ts
-services/send/receiverSessionRegistry.ts
-services/send/routeCommitGate.test.ts
-services/send/routeCommitGate.ts

@@ -15,7 +15,7 @@ type EventRecord = {
   data?: Record<string, unknown>;
 };
 
-type IceRoute = {
+export type IceRoute = {
   protocol?: string;
   localCandidateType?: string;
   remoteCandidateType?: string;

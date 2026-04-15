@@ -52,7 +52,24 @@ test('desktop relay recommendation keeps all as primary and relay as background 
   assert.equal(plan.reason, 'relay_recommended');
 });
 
-test('constrained mobile network still prefers relay first', () => {
+test('desktop normal network keeps all as the only initial route when no prewarm is needed', () => {
+  const plan = createHappyEyeballsPlan(
+    baseIceConfig({
+      relayRecommended: false,
+      relayReason: null,
+      fetchLatencyMs: 200,
+    }),
+    baseProfile(),
+    options
+  );
+
+  assert.equal(plan.initialPolicy, 'all');
+  assert.equal(plan.backgroundPolicy, null);
+  assert.equal(plan.backgroundDelayMs, null);
+  assert.equal(plan.reason, 'default');
+});
+
+test('constrained mobile network keeps all first and relay as fast background fallback', () => {
   const plan = createHappyEyeballsPlan(
     baseIceConfig({
       relayRecommended: true,
@@ -69,7 +86,7 @@ test('constrained mobile network still prefers relay first', () => {
     options
   );
 
-  assert.equal(plan.initialPolicy, 'relay');
-  assert.equal(plan.backgroundPolicy, 'all');
+  assert.equal(plan.initialPolicy, 'all');
+  assert.equal(plan.backgroundPolicy, 'relay');
   assert.equal(plan.reason, 'mobile_network');
 });
