@@ -1,0 +1,94 @@
+diff --git a/services/send/receiverSessionRegistry.test.ts b/services/send/receiverSessionRegistry.test.ts
+index de6d91f..da30953 100644
+--- a/services/send/receiverSessionRegistry.test.ts
++++ b/services/send/receiverSessionRegistry.test.ts
+@@ -66,3 +66,36 @@ test('registry does not retain the caller-owned attempt object reference', () =>
+   const session = registry.getSession('receiver-1');
+   assert.equal(session?.attempts.all?.connectionId, 'conn-all');
+ });
++
++test('registry resolves a commit only for the registered attempt and connection', () => {
++  const registry = createReceiverSessionRegistry();
++
++  registry.registerAttempt({
++    receiverSessionId: 'receiver-1',
++    attemptId: 'a1',
++    attemptKind: 'all',
++    peerId: 'peer-all',
++    connectionId: 'conn-all',
++  });
++
++  const resolved = registry.resolveAttemptForCommit('receiver-1', 'a1', 'conn-all');
++
++  assert.equal(resolved?.attemptId, 'a1');
++  assert.equal(resolved?.connectionId, 'conn-all');
++});
++
++test('registry rejects commit resolution when attempt id or connection id does not match', () => {
++  const registry = createReceiverSessionRegistry();
++
++  registry.registerAttempt({
++    receiverSessionId: 'receiver-1',
++    attemptId: 'a1',
++    attemptKind: 'all',
++    peerId: 'peer-all',
++    connectionId: 'conn-all',
++  });
++
++  assert.equal(registry.resolveAttemptForCommit('receiver-1', 'a2', 'conn-all'), null);
++  assert.equal(registry.resolveAttemptForCommit('receiver-1', 'a1', 'conn-relay'), null);
++  assert.equal(registry.resolveAttemptForCommit('receiver-2', 'a1', 'conn-all'), null);
++});
+diff --git a/services/send/routeCommitGate.test.ts b/services/send/routeCommitGate.test.ts
+index 0cd9cf0..582f5f2 100644
+--- a/services/send/routeCommitGate.test.ts
++++ b/services/send/routeCommitGate.test.ts
+@@ -12,3 +12,48 @@ test('commit gate blocks metadata until session winner is committed', () => {
+   assert.equal(gate.getCommittedConnectionId('receiver-1'), 'conn-all');
+   assert.equal(gate.getCommittedConnectionId('receiver-2'), null);
+ });
++
++test('gate exposes the committed connection id for metadata routing', () => {
++  const gate = createRouteCommitGate();
++
++  gate.markCommitted('receiver-1', 'conn-relay');
++
++  assert.equal(gate.getCommittedConnectionId('receiver-1'), 'conn-relay');
++});
++
++test('claimCommit accepts the first winning connection once', () => {
++  const gate = createRouteCommitGate();
++
++  const firstClaim = gate.claimCommit('receiver-1', 'conn-all');
++
++  assert.deepEqual(firstClaim, {
++    status: 'accepted',
++    committedConnectionId: 'conn-all',
++  });
++  assert.equal(gate.getCommittedConnectionId('receiver-1'), 'conn-all');
++});
++
++test('claimCommit is idempotent for duplicate commits from the same connection', () => {
++  const gate = createRouteCommitGate();
++
++  gate.claimCommit('receiver-1', 'conn-all');
++  const duplicateClaim = gate.claimCommit('receiver-1', 'conn-all');
++
++  assert.deepEqual(duplicateClaim, {
++    status: 'duplicate',
++    committedConnectionId: 'conn-all',
++  });
++});
++
++test('claimCommit rejects conflicting commits from a different connection', () => {
++  const gate = createRouteCommitGate();
++
++  gate.claimCommit('receiver-1', 'conn-all');
++  const conflictingClaim = gate.claimCommit('receiver-1', 'conn-relay');
++
++  assert.deepEqual(conflictingClaim, {
++    status: 'conflict',
++    committedConnectionId: 'conn-all',
++  });
++  assert.equal(gate.getCommittedConnectionId('receiver-1'), 'conn-all');
++});

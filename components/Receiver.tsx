@@ -2,7 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 
 import streamSaver from 'streamsaver';
 streamSaver.mitm = '/mitm.html';
-import { TransferState, FileMetadata, P2PMessage, P2P_PROTOCOL_VERSION } from '../types';
+import {
+  TransferState,
+  FileMetadata,
+  P2PMessage,
+  P2P_PROTOCOL_VERSION,
+  type RouteAttemptKind,
+} from '../types';
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
@@ -31,12 +37,14 @@ import { getBrowserNetworkProfile } from '../services/networkProfile';
 import { createReceivePersistenceAdapter, type ReceivePersistenceAdapter } from '../services/receive/persistenceAdapter';
 import { createReceiveRecoveryCoordinator, type ReceiveRecoveryCoordinator } from '../services/receive/recoveryCoordinator';
 import { createReceivePersistenceOrchestrator, type ReceivePersistenceOrchestrator } from '../services/receive/persistenceOrchestrator';
+import { createReceiveRouteArbiter } from '../services/receive/routeArbiter';
 import { createReceiveSessionCoordinator, type ReceiveSessionCoordinator } from '../services/receive/sessionCoordinator';
 import {
   createReceiveStreamingWriter,
   type ReceiveStreamingTarget,
   type ReceiveStreamingWriter,
 } from '../services/receive/streamingWriter';
+import { getRouteSelectionTimings } from '../services/routeSelectionPolicy';
 import { useTransferStore } from '../stores/transferStore';
 import { createReceiverSessionService } from '../services/receiverSessionService';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
@@ -55,6 +63,12 @@ interface ReceiverProps {
   onNotification?: (msg: string, type: 'success' | 'info' | 'error') => void;
   deviceName: string;
 }
+
+type RouteAttemptRecord = {
+  attemptId: string;
+  attemptKind: RouteAttemptKind;
+  conn: DataConnection;
+};
 
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
   const setReceiverSnapshot = useTransferStore((store) => store.setReceiverSnapshot);
@@ -128,6 +142,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const happyEyeballsWonRef = useRef(false);
   const p2pTimeoutRetryCountRef = useRef(0);
   const connectionRouteLogSignatureRef = useRef('');
+  const routeAttemptCounterRef = useRef(0);
+  const routeAttemptsRef = useRef<Map<string, RouteAttemptRecord>>(new Map());
+  const pendingRouteMessagesRef = useRef<Map<string, P2PMessage[]>>(new Map());
+  const latestRouteAttemptIdsRef = useRef<Record<RouteAttemptKind, string | null>>({
+    all: null,
+    relay: null,
+  });
+  const receiveRouteArbiterRef = useRef<ReturnType<typeof createReceiveRouteArbiter> | null>(null);
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -204,6 +226,169 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }
   };
 
+  const getNextRouteAttemptId = (attemptKind: RouteAttemptKind) => {
+    routeAttemptCounterRef.current += 1;
+    return `${attemptKind}-${Date.now().toString(36)}-${routeAttemptCounterRef.current.toString(36)}`;
+  };
+
+  const registerRouteAttempt = (record: RouteAttemptRecord) => {
+    routeAttemptsRef.current.set(record.attemptId, record);
+    pendingRouteMessagesRef.current.set(record.attemptId, []);
+    latestRouteAttemptIdsRef.current = {
+      ...latestRouteAttemptIdsRef.current,
+      [record.attemptKind]: record.attemptId,
+    };
+  };
+
+  const unregisterRouteAttempt = (attemptId: string) => {
+    const existing = routeAttemptsRef.current.get(attemptId);
+    if (!existing) {
+      return;
+    }
+
+    routeAttemptsRef.current.delete(attemptId);
+
+    if (latestRouteAttemptIdsRef.current[existing.attemptKind] === attemptId) {
+      const latestForKind = Array.from(routeAttemptsRef.current.values())
+        .reverse()
+        .find((record) => record.attemptKind === existing.attemptKind)?.attemptId ?? null;
+
+      latestRouteAttemptIdsRef.current = {
+        ...latestRouteAttemptIdsRef.current,
+        [existing.attemptKind]: latestForKind,
+      };
+    }
+
+    if (relayConnRef.current === existing.conn) {
+      relayConnRef.current = null;
+    }
+
+    pendingRouteMessagesRef.current.delete(attemptId);
+  };
+
+  const bufferRouteMessage = (attemptId: string, msg: P2PMessage) => {
+    const existing = pendingRouteMessagesRef.current.get(attemptId) ?? [];
+    pendingRouteMessagesRef.current.set(attemptId, [...existing, msg]);
+  };
+
+  const takePendingRouteMessages = (attemptId: string) => {
+    const queued = pendingRouteMessagesRef.current.get(attemptId) ?? [];
+    pendingRouteMessagesRef.current.delete(attemptId);
+    return queued;
+  };
+
+  const closeRouteAttempt = (
+    attemptId: string,
+    reason: 'session_closed' | 'winner_selected'
+  ) => {
+    const existing = routeAttemptsRef.current.get(attemptId);
+    if (!existing) {
+      return;
+    }
+
+    if (existing.conn.open) {
+      try {
+        existing.conn.send({
+          type: 'ROUTE_ABORT',
+          payload: {
+            receiverSessionId: receiverSessionIdRef.current,
+            attemptId,
+            reason,
+          },
+        });
+      } catch {
+        // Best-effort abort signal before closing the losing route.
+      }
+    }
+
+    try {
+      existing.conn.close();
+    } catch {
+      // Ignore close errors while tearing down non-winning attempts.
+    }
+
+    unregisterRouteAttempt(attemptId);
+  };
+
+  const closeNonWinningRouteAttempts = (winnerAttemptId: string) => {
+    const losingAttemptIds = Array.from(routeAttemptsRef.current.keys()).filter(
+      (attemptId) => attemptId !== winnerAttemptId
+    );
+
+    for (const losingAttemptId of losingAttemptIds) {
+      closeRouteAttempt(losingAttemptId, 'winner_selected');
+    }
+  };
+
+  const resetRouteAttemptState = () => {
+    const activeAttemptIds = Array.from(routeAttemptsRef.current.keys());
+    for (const attemptId of activeAttemptIds) {
+      closeRouteAttempt(attemptId, 'session_closed');
+    }
+    routeAttemptsRef.current.clear();
+    pendingRouteMessagesRef.current.clear();
+    latestRouteAttemptIdsRef.current = {
+      all: null,
+      relay: null,
+    };
+    receiveRouteArbiterRef.current = null;
+  };
+
+  const startWinnerHeartbeat = (conn: DataConnection) => {
+    clearHeartbeatTimer();
+    heartbeatTimerRef.current = window.setInterval(() => {
+      if (!conn.open) return;
+      try {
+        conn.send({ type: 'HEARTBEAT', payload: { t: Date.now() } });
+      } catch {
+        // Ignore heartbeat failures; close/error path handles reconnect.
+      }
+    }, 2500);
+  };
+
+  const collectSelectedRoute = (conn: DataConnection) => {
+    const pc = conn.peerConnection;
+    if (!pc) {
+      return;
+    }
+
+    collectIceRouteWithRetry(pc).then((route) => {
+      attachIceRouteToSession(connectTelemetryRef.current, route);
+      if (!route) return;
+      const routeSignature = [
+        route.protocol || '',
+        route.localCandidateType || '',
+        route.remoteCandidateType || '',
+        route.localUrl || '',
+        route.remoteUrl || '',
+        route.relayProtocol || '',
+        route.pathType || '',
+      ].join('|');
+      if (connectionRouteLogSignatureRef.current !== routeSignature) {
+        connectionRouteLogSignatureRef.current = routeSignature;
+        const turnUrl = route.localUrl?.startsWith('turn')
+          ? route.localUrl
+          : route.remoteUrl?.startsWith('turn')
+            ? route.remoteUrl
+            : '';
+        console.info('[ice-route:selected]', {
+          role: 'receiver',
+          peerId: conn.peer,
+          protocol: route.protocol,
+          localCandidateType: route.localCandidateType,
+          remoteCandidateType: route.remoteCandidateType,
+          localNetworkType: route.localNetworkType,
+          remoteNetworkType: route.remoteNetworkType,
+          relayProtocol: route.relayProtocol,
+          turnUrlType: turnUrl ? (turnUrl.startsWith('turns:') ? 'turns' : 'turn') : 'none',
+          turnUrl: turnUrl || undefined,
+          pathType: route.pathType,
+          rttMs: route.rttMs,
+        });
+      }
+    });
+  };
+
   const handleConnectRef = useRef<() => void>(() => {});
   useEffect(() => {
     handleConnectRef.current = handleConnect;
@@ -223,6 +408,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       isMountedRef.current = false;
       clearConnectionTimeout();
       clearHeartbeatTimer();
+      resetRouteAttemptState();
       if (connRef.current) connRef.current.close();
       if (peerRef.current) peerRef.current.destroy();
       if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
@@ -507,6 +693,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   }, []);
 
   const createNativeStreamingTarget = (
+    handle: FileSystemFileHandle,
     writable: FileSystemWritableFileStream
   ): ReceiveStreamingTarget => ({
     kind: 'native-fs',
@@ -518,6 +705,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     },
     truncate: async (size) => {
       await writable.truncate(size);
+    },
+    verifyCommittedBytes: async (expectedBytes) => {
+      const file = await handle.getFile();
+      return file.size === expectedBytes;
     },
   });
 
@@ -543,13 +734,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
     console.error('Write Error:', error);
     const closeOk = await receiveStreamingWriter.closeCurrentTarget({
-      truncateNativeBeforeClose: true,
       abortStreamSaver: true,
-      preserveCommittedBytes: false,
+      preserveCommittedBytes: true,
     });
 
     if (!closeOk) {
-      receiveStreamingWriter.reset();
+      console.warn('Streaming target close after write failure was not clean; preserving partial file state.');
     }
 
     isStreamingRef.current = receiveStreamingWriter.isStreaming();
@@ -558,9 +748,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const abortStreams = async () => {
       const ok = await receiveStreamingWriter.closeCurrentTarget({
-        truncateNativeBeforeClose: true,
         abortStreamSaver: true,
-        preserveCommittedBytes: false,
+        preserveCommittedBytes: true,
       });
       if (!ok) {
         console.warn("Stream abort warning: failed to close active target cleanly");
@@ -657,7 +846,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       const reopened = await receiveStreamingWriter.reopenForResume(async (resumeOffset) => {
         const writable = await handle.createWritable({ keepExistingData: true });
         await writable.seek(resumeOffset);
-        return createNativeStreamingTarget(writable);
+        return createNativeStreamingTarget(handle, writable);
       }, byteOffset);
       isStreamingRef.current = receiveStreamingWriter.isStreaming();
       preparedNativeWriterFileIndexRef.current = reopened ? targetFileIndex : null;
@@ -789,10 +978,85 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
   };
 
-  const setupConnListeners = (conn: DataConnection) => {
+  const handleIncomingMessage = async (conn: DataConnection, msg: P2PMessage) => {
+    if (msg.type === 'DEVICE_INFO') {
+      const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName.trim().slice(0, 24) : '';
+      setSenderDeviceName(remoteName || '发送设备');
+    }
+    else if (msg.type === 'METADATA') {
+      const meta = msg.payload as FileMetadata;
+      const remoteProtocolVersion = typeof meta.protocolVersion === 'number' ? meta.protocolVersion : 1;
+      if (remoteProtocolVersion > P2P_PROTOCOL_VERSION) {
+          setErrorMsg(`发送方协议版本(${remoteProtocolVersion})高于当前版本(${P2P_PROTOCOL_VERSION})，请升级接收端。`);
+          setState(TransferState.ERROR);
+          conn.close();
+          return;
+      }
+      const previousMeta = metadataRef.current;
+      let isResumable = false;
+      if (previousMeta &&
+          previousMeta.totalSize === meta.totalSize &&
+          previousMeta.files.length === meta.files.length) {
+          isResumable = meta.files.every((file, idx) => {
+              const prev = previousMeta.files[idx];
+              if (file.fingerprint && prev.fingerprint) {
+                  return file.fingerprint === prev.fingerprint;
+              }
+              return file.name === prev.name && file.size === prev.size;
+          });
+      } else {
+          resetStateForNewTransfer();
+      }
+
+      setMetadata(meta);
+      metadataRef.current = meta;
+      setTotalFiles(meta.files?.length || 0);
+      setState(TransferState.PEER_CONNECTED);
+      setCanResume(isResumable);
+      isTransferActiveRef.current = false;
+
+      if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
+      if ((isIOS || isSafari) && meta.totalSize >= IOS_MEMORY_WARN_BYTES && onNotification) {
+          onNotification('检测到超大文件：将优先尝试使用 IndexedDB 分块缓冲，减少内存占用。', 'info');
+      }
+    }
+    else if (msg.type === 'FILE_START') {
+      await receiveSessionCoordinator.handleFileStart({
+        ...msg.payload,
+        fileName: sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`),
+      });
+    }
+    else if (msg.type === 'FILE_COMPLETE') {
+       await receiveSessionCoordinator.handleFileComplete(msg.payload);
+    }
+    else if (msg.type === 'ALL_FILES_COMPLETE') {
+       await receiveSessionCoordinator.handleAllFilesComplete();
+    }
+    else if (msg.type === 'REJECT_TRANSFER') {
+       markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
+       setErrorMsg(msg.payload?.reason || "发送方拒绝了请求。");
+       setState(TransferState.ERROR);
+       conn.close();
+    }
+    else if (msg.type === 'TRANSFER_CANCELLED') {
+       setErrorMsg("发送方已停止分享。");
+       setState(TransferState.ERROR);
+       conn.close();
+    }
+  };
+
+  const setupConnListeners = (
+    conn: DataConnection,
+    attemptKind: RouteAttemptKind,
+    attemptId: string
+  ) => {
     let reconnectScheduled = false;
+    registerRouteAttempt({ attemptId, attemptKind, conn });
+
     const scheduleFastReconnect = () => {
       if (reconnectScheduled) return true;
+      if (attemptKind !== 'all') return false;
+      if (happyEyeballsWonRef.current) return false;
       if (stateRef.current !== TransferState.WAITING_FOR_PEER) return false;
       if (retryCountRef.current >= MAX_CONNECT_RETRY) return false;
       if (!peerRef.current || peerRef.current.destroyed) return false;
@@ -806,83 +1070,41 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
         startConnectionAttempt(connectTelemetryRef.current, 'fast_retry');
         const nextConn = peerRef.current.connect(`aerodrop-${codeRef.current}`, { serialization: 'binary' });
-        setupConnListeners(nextConn);
+        const nextAttemptId = getNextRouteAttemptId('all');
+        setupConnListeners(nextConn, 'all', nextAttemptId);
       }, delay);
       return true;
     };
 
-    connRef.current = conn;
     conn.on('open', () => {
       clearConnectionTimeout();
       retryCountRef.current = 0;
 
-      // Happy-eyeballs: if a parallel attempt already won, discard this one.
-      if (happyEyeballsWonRef.current && connRef.current !== conn) {
-        try { conn.close(); } catch {}
+      if (happyEyeballsWonRef.current) {
+        closeRouteAttempt(attemptId, 'winner_selected');
         return;
       }
-      happyEyeballsWonRef.current = true;
-      connRef.current = conn;
 
-      // Tear down the losing parallel peer (if any).
-      cleanupLosingPeer(conn);
+      receiveRouteArbiterRef.current?.markAttemptOpen(attemptKind);
 
-      markConnectionSuccess(connectTelemetryRef.current, { peerId: conn.peer });
-      setConnectingStage('waiting_response');
-      conn.send({
-        type: 'DEVICE_INFO',
-        payload: {
-          deviceName: localDeviceNameRef.current,
-          sessionId: receiverSessionIdRef.current
-        }
-      });
-      clearHeartbeatTimer();
-      heartbeatTimerRef.current = window.setInterval(() => {
-        if (!conn.open) return;
-        try {
-          conn.send({ type: 'HEARTBEAT', payload: { t: Date.now() } });
-        } catch {
-          // Ignore heartbeat failures; close/error path handles reconnect.
-        }
-      }, 2500);
-
-      const pc = conn.peerConnection;
-      if (pc) {
-        collectIceRouteWithRetry(pc).then((route) => {
-          attachIceRouteToSession(connectTelemetryRef.current, route);
-          if (!route) return;
-          const routeSignature = [
-            route.protocol || '',
-            route.localCandidateType || '',
-            route.remoteCandidateType || '',
-            route.localUrl || '',
-            route.remoteUrl || '',
-            route.relayProtocol || '',
-            route.pathType || '',
-          ].join('|');
-          if (connectionRouteLogSignatureRef.current !== routeSignature) {
-            connectionRouteLogSignatureRef.current = routeSignature;
-            const turnUrl = route.localUrl?.startsWith('turn')
-              ? route.localUrl
-              : route.remoteUrl?.startsWith('turn')
-                ? route.remoteUrl
-                : '';
-            console.info('[ice-route:selected]', {
-              role: 'receiver',
-              peerId: conn.peer,
-              protocol: route.protocol,
-              localCandidateType: route.localCandidateType,
-              remoteCandidateType: route.remoteCandidateType,
-              localNetworkType: route.localNetworkType,
-              remoteNetworkType: route.remoteNetworkType,
-              relayProtocol: route.relayProtocol,
-              turnUrlType: turnUrl ? (turnUrl.startsWith('turns:') ? 'turns' : 'turn') : 'none',
-              turnUrl: turnUrl || undefined,
-              pathType: route.pathType,
-              rttMs: route.rttMs,
-            });
-          }
+      try {
+        conn.send({
+          type: 'ROUTE_PROBE',
+          payload: {
+            receiverSessionId: receiverSessionIdRef.current,
+            attemptId,
+            attemptKind,
+            deviceName: localDeviceNameRef.current,
+          },
         });
+      } catch {
+        if (scheduleFastReconnect()) {
+          return;
+        }
+        markConnectionFailure(connectTelemetryRef.current, 'route_probe_failed');
+        setErrorMsg('连接初始化失败，请重试');
+        setState(TransferState.ERROR);
+        try { conn.close(); } catch {}
       }
     });
 
@@ -895,8 +1117,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
 
       const isBinary = data instanceof ArrayBuffer || (data.constructor && data.constructor.name === 'ArrayBuffer') || ArrayBuffer.isView(data);
-      
+
       if (isBinary) {
+         if (connRef.current !== conn) {
+           return;
+         }
          if (!await receivePersistenceOrchestrator.awaitPendingFileFinalize('binary_chunk')) return;
          if (!isTransferActiveRef.current) return;
  
@@ -947,79 +1172,37 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       const msg = data as P2PMessage;
 
-      if (msg.type === 'DEVICE_INFO') {
-        const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName.trim().slice(0, 24) : '';
-        setSenderDeviceName(remoteName || '发送设备');
+      if (connRef.current !== conn) {
+        if (
+          msg.type === 'DEVICE_INFO' ||
+          msg.type === 'METADATA' ||
+          msg.type === 'REJECT_TRANSFER' ||
+          msg.type === 'TRANSFER_CANCELLED'
+        ) {
+          bufferRouteMessage(attemptId, msg);
+        }
+        return;
       }
-      else if (msg.type === 'METADATA') {
-        const meta = msg.payload as FileMetadata;
-        const remoteProtocolVersion = typeof meta.protocolVersion === 'number' ? meta.protocolVersion : 1;
-        if (remoteProtocolVersion > P2P_PROTOCOL_VERSION) {
-            setErrorMsg(`发送方协议版本(${remoteProtocolVersion})高于当前版本(${P2P_PROTOCOL_VERSION})，请升级接收端。`);
-            setState(TransferState.ERROR);
-            conn.close();
-            return;
-        }
-        const previousMeta = metadataRef.current;
-        let isResumable = false;
-        if (previousMeta &&
-            previousMeta.totalSize === meta.totalSize &&
-            previousMeta.files.length === meta.files.length) {
-            isResumable = meta.files.every((file, idx) => {
-                const prev = previousMeta.files[idx];
-                if (file.fingerprint && prev.fingerprint) {
-                    return file.fingerprint === prev.fingerprint;
-                }
-                return file.name === prev.name && file.size === prev.size;
-            });
-        } else {
-            resetStateForNewTransfer();
-        }
 
-        setMetadata(meta);
-        metadataRef.current = meta;
-        setTotalFiles(meta.files?.length || 0);
-        setState(TransferState.PEER_CONNECTED);
-        setCanResume(isResumable);
-        isTransferActiveRef.current = false;
-
-        if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
-        if ((isIOS || isSafari) && meta.totalSize >= IOS_MEMORY_WARN_BYTES && onNotification) {
-            onNotification('检测到超大文件：将优先尝试使用 IndexedDB 分块缓冲，减少内存占用。', 'info');
-        }
-      } 
-      else if (msg.type === 'FILE_START') {
-        await receiveSessionCoordinator.handleFileStart({
-          ...msg.payload,
-          fileName: sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`),
-        });
-      }
-      else if (msg.type === 'FILE_COMPLETE') {
-         await receiveSessionCoordinator.handleFileComplete(msg.payload);
-      }
-      else if (msg.type === 'ALL_FILES_COMPLETE') {
-         await receiveSessionCoordinator.handleAllFilesComplete();
-      }
-      else if (msg.type === 'REJECT_TRANSFER') {
-         markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
-         setErrorMsg(msg.payload?.reason || "发送方拒绝了请求。");
-         setState(TransferState.ERROR);
-         conn.close();
-      }
-      else if (msg.type === 'TRANSFER_CANCELLED') {
-         setErrorMsg("发送方已停止分享。");
-         setState(TransferState.ERROR);
-         conn.close();
-      }
+      await handleIncomingMessage(conn, msg);
     });
 
     conn.on('close', () => {
-       // Ignore close events from the losing happy-eyeballs connection.
-       if (happyEyeballsWonRef.current && connRef.current !== conn) return;
+       if (connRef.current !== conn) {
+        unregisterRouteAttempt(attemptId);
+        if (happyEyeballsWonRef.current) return;
+        if (stateRef.current === TransferState.WAITING_FOR_PEER) {
+          scheduleFastReconnect();
+        }
+        return;
+       }
+
+       unregisterRouteAttempt(attemptId);
+       connRef.current = null;
        clearHeartbeatTimer();
        const currentState = stateRef.current;
        if (currentState === TransferState.WAITING_FOR_PEER && scheduleFastReconnect()) {
-         return;
+          return;
        }
        clearConnectionTimeout();
        if (currentState !== TransferState.COMPLETED) {
@@ -1041,8 +1224,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('error', () => {
-      // Ignore error events from the losing happy-eyeballs connection.
-      if (happyEyeballsWonRef.current && connRef.current !== conn) return;
+      if (connRef.current !== conn) {
+        if (happyEyeballsWonRef.current) return;
+        if (stateRef.current === TransferState.WAITING_FOR_PEER) {
+          scheduleFastReconnect();
+        }
+        return;
+      }
       clearHeartbeatTimer();
       if (scheduleFastReconnect()) {
         return;
@@ -1109,7 +1297,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (persistenceStrategy === 'native-fs' && nativeFileHandleRef.current) {
       try {
         const writable = await nativeFileHandleRef.current.createWritable({ keepExistingData: false });
-        receiveStreamingWriter.attachTarget(createNativeStreamingTarget(writable), {
+        receiveStreamingWriter.attachTarget(createNativeStreamingTarget(nativeFileHandleRef.current, writable), {
           committedBytes: 0,
         });
         isStreamingRef.current = receiveStreamingWriter.isStreaming();
@@ -1357,6 +1545,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     setErrorMsg('');
     retryCountRef.current = 0;
     happyEyeballsWonRef.current = false;
+    resetRouteAttemptState();
+    connRef.current = null;
+    relayConnRef.current = null;
     startConnectionAttempt(connectTelemetryRef.current, 'initial_connect');
 
     if (peerRef.current) peerRef.current.destroy();
@@ -1370,11 +1561,76 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       relayParallelDelayMs: RELAY_PARALLEL_DELAY_MS,
       p2pBackfillDelayMs: P2P_BACKFILL_DELAY_MS,
     });
+    const routeSelectionTimings = getRouteSelectionTimings({
+      isMobileDevice: networkProfile.isMobileDevice,
+      isConstrained: networkProfile.isConstrained,
+      relayRecommended: iceConfig.relayRecommended,
+    });
     markIceConfigFetched(connectTelemetryRef.current);
     setConnectingStage('connecting_signaling');
     hasTurnRef.current = iceConfig.hasTurn;
     preferredIcePolicyRef.current = connectionPlan.initialPolicy;
     p2pTimeoutRetryCountRef.current = 0;
+    receiveRouteArbiterRef.current = createReceiveRouteArbiter({
+      p2pGraceWindowMs: routeSelectionTimings.p2pGraceWindowMs,
+      onCommit: (winningKind) => {
+        if (stateRef.current !== TransferState.WAITING_FOR_PEER) {
+          return;
+        }
+
+        const winnerAttemptId = latestRouteAttemptIdsRef.current[winningKind];
+        if (!winnerAttemptId) {
+          return;
+        }
+
+        const winner = routeAttemptsRef.current.get(winnerAttemptId);
+        if (!winner || !winner.conn.open) {
+          return;
+        }
+
+        clearConnectionTimeout();
+        connRef.current = winner.conn;
+        happyEyeballsWonRef.current = true;
+        closeNonWinningRouteAttempts(winnerAttemptId);
+        cleanupLosingPeer(winner.conn);
+        markConnectionSuccess(connectTelemetryRef.current, { peerId: winner.conn.peer });
+        setConnectingStage('waiting_response');
+
+        try {
+          winner.conn.send({
+            type: 'ROUTE_COMMIT',
+            payload: {
+              receiverSessionId: receiverSessionIdRef.current,
+              attemptId: winnerAttemptId,
+              selectedKind: winningKind,
+            },
+          });
+          winner.conn.send({
+            type: 'DEVICE_INFO',
+            payload: {
+              deviceName: localDeviceNameRef.current,
+              sessionId: receiverSessionIdRef.current,
+            },
+          });
+        } catch {
+          markConnectionFailure(connectTelemetryRef.current, 'route_commit_failed');
+          setErrorMsg('建立路由失败，请重试');
+          setState(TransferState.ERROR);
+          try { winner.conn.close(); } catch {}
+          return;
+        }
+
+        startWinnerHeartbeat(winner.conn);
+        collectSelectedRoute(winner.conn);
+        const pendingMessages = takePendingRouteMessages(winnerAttemptId);
+        void pendingMessages.reduce(
+          (chain, message) => chain.then(() => handleIncomingMessage(winner.conn, message)),
+          Promise.resolve()
+        );
+      },
+      schedule: (ms, fn) => window.setTimeout(fn, ms),
+      clearScheduled: (id) => window.clearTimeout(id),
+    });
 
     if (
       iceConfig.hasTurn &&
@@ -1383,7 +1639,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         connectionPlan.reason === 'relay_recommended') &&
       onNotification
     ) {
-      onNotification('检测到移动或高延迟网络，已优先尝试中继连接以提升成功率。', 'info');
+      if (connectionPlan.initialPolicy === 'relay') {
+        onNotification('检测到移动或高延迟网络，已优先尝试中继连接以提升成功率。', 'info');
+      } else {
+        onNotification('检测到当前网络可能受限，将优先尝试直连，并在需要时快速回退到中继。', 'info');
+      }
     } else if (!iceConfig.hasTurn && onNotification) {
       onNotification(NO_TURN_WARNING_MESSAGE, 'info');
     }
@@ -1408,6 +1668,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         }
 
         // Final timeout — tear down everything.
+        resetRouteAttemptState();
         if (peerRef.current) peerRef.current.destroy();
         if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
         markConnectionFailure(connectTelemetryRef.current, 'connect_timeout', { timeoutMs });
@@ -1452,10 +1713,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setConnectingStage('connecting_peer');
         markSessionEvent(connectTelemetryRef.current, 'peer_open', { iceTransportPolicy: policy });
         const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
+        const attemptKind: RouteAttemptKind = policy === 'relay' ? 'relay' : 'all';
+        const attemptId = getNextRouteAttemptId(attemptKind);
         if (policy === 'relay') {
           relayConnRef.current = conn;
         }
-        setupConnListeners(conn);
+        setupConnListeners(conn, attemptKind, attemptId);
       });
 
       peer.on('error', (err) => {
@@ -1472,7 +1735,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             if (peer && !peer.destroyed) {
               startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
               const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
-              setupConnListeners(conn);
+              const attemptId = getNextRouteAttemptId('all');
+              setupConnListeners(conn, 'all', attemptId);
             }
           }, delay);
         } else {
@@ -1591,6 +1855,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     happyEyeballsWonRef.current = false;
     clearConnectionTimeout();
     clearHeartbeatTimer();
+    resetRouteAttemptState();
     
     abortStreams().then(() => {
         deleteIndexedDbChunksForSession().catch(() => {});

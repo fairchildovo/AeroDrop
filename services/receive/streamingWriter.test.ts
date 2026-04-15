@@ -72,3 +72,49 @@ test('reopenForResume preserves committed bytes for the next native writer', asy
   assert.equal(reopenedOffset, 4);
   assert.equal(writer.isStreaming(), true);
 });
+
+test('native finalize can recover when close throws but file size already matches', async () => {
+  const writer = createReceiveStreamingWriter({
+    flushThresholdBytes: 64,
+  });
+
+  writer.attachTarget({
+    kind: 'native-fs',
+    write: async () => {},
+    close: async () => {
+      throw new Error('BENIGN_CLOSE_FAILURE');
+    },
+    verifyCommittedBytes: async (expectedBytes) => expectedBytes === 5,
+  });
+
+  await writer.enqueueChunk(new Uint8Array([1, 2, 3, 4, 5]));
+  const finalized = await writer.finalize();
+
+  assert.equal(finalized, true);
+  assert.equal(writer.isStreaming(), false);
+});
+
+test('closeCurrentTarget keeps native data intact by default', async () => {
+  const events: string[] = [];
+  const writer = createReceiveStreamingWriter({
+    flushThresholdBytes: 64,
+  });
+
+  writer.attachTarget({
+    kind: 'native-fs',
+    write: async () => {},
+    close: async () => {
+      events.push('close');
+    },
+    truncate: async (size) => {
+      events.push(`truncate:${size}`);
+    },
+  });
+
+  const closed = await writer.closeCurrentTarget({
+    preserveCommittedBytes: true,
+  });
+
+  assert.equal(closed, true);
+  assert.deepEqual(events, ['close']);
+});

@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { resolveIceTransportPolicyDecision } from '../services/iceConfigPolicy';
 
 interface AssetBinding {
   fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
@@ -426,11 +427,16 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
   const networkRisk = assessNetworkRisk(request);
   const cfIceConfig = await fetchCloudflareTurnIceConfig(env);
   const basePayload = cfIceConfig ?? createIceConfigPayload(STUN_SERVERS);
+  const policyDecision = resolveIceTransportPolicyDecision({
+    hasTurn: basePayload.hasTurn,
+    isRisk: networkRisk.isRisk,
+    riskReason: networkRisk.reason,
+  });
   const payload = createIceConfigPayload(
     basePayload.iceServers,
-    'all',
-    networkRisk.isRisk ? networkRisk.reason : null,
-    basePayload.hasTurn && networkRisk.isRisk,
+    policyDecision.iceTransportPolicy,
+    policyDecision.relayReason,
+    policyDecision.relayRecommended,
   );
 
   return json(

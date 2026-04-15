@@ -1,0 +1,77 @@
+diff --git a/services/send/receiverSessionRegistry.ts b/services/send/receiverSessionRegistry.ts
+index 34e483c..a1b9388 100644
+--- a/services/send/receiverSessionRegistry.ts
++++ b/services/send/receiverSessionRegistry.ts
+@@ -28,6 +28,23 @@ const cloneSession = (session: ReceiverSessionRecord): ReceiverSessionRecord =>
+   committedConnectionId: session.committedConnectionId,
+ });
+ 
++const findAttemptForCommit = (
++  session: ReceiverSessionRecord | undefined,
++  attemptId: string,
++  connectionId: string
++): RegisterAttemptInput | null => {
++  if (!session) {
++    return null;
++  }
++
++  const attempts = [session.attempts.all, session.attempts.relay];
++  const matched = attempts.find(
++    (attempt) => attempt?.attemptId === attemptId && attempt.connectionId === connectionId
++  );
++
++  return matched ? cloneAttempt(matched) : null;
++};
++
+ export const createReceiverSessionRegistry = () => {
+   const sessions = new Map<string, ReceiverSessionRecord>();
+ 
+@@ -65,5 +82,8 @@ export const createReceiverSessionRegistry = () => {
+       const session = sessions.get(receiverSessionId);
+       return session ? cloneSession(session) : undefined;
+     },
++    resolveAttemptForCommit(receiverSessionId: string, attemptId: string, connectionId: string) {
++      return findAttemptForCommit(sessions.get(receiverSessionId), attemptId, connectionId);
++    },
+   };
+ };
+diff --git a/services/send/routeCommitGate.ts b/services/send/routeCommitGate.ts
+index 8c97119..ab070cb 100644
+--- a/services/send/routeCommitGate.ts
++++ b/services/send/routeCommitGate.ts
+@@ -1,8 +1,35 @@
++export type CommitClaimResult = {
++  status: 'accepted' | 'duplicate' | 'conflict';
++  committedConnectionId: string;
++};
++
+ export const createRouteCommitGate = () => {
+   const committed = new Map<string, string>();
+ 
+   return {
+     // Commit gate owns metadata-send gating after the winner has been decided.
++    claimCommit(receiverSessionId: string, connectionId: string): CommitClaimResult {
++      const existing = committed.get(receiverSessionId);
++      if (!existing) {
++        committed.set(receiverSessionId, connectionId);
++        return {
++          status: 'accepted',
++          committedConnectionId: connectionId,
++        };
++      }
++
++      if (existing === connectionId) {
++        return {
++          status: 'duplicate',
++          committedConnectionId: existing,
++        };
++      }
++
++      return {
++        status: 'conflict',
++        committedConnectionId: existing,
++      };
++    },
+     markCommitted(receiverSessionId: string, connectionId: string) {
+       committed.set(receiverSessionId, connectionId);
+     },

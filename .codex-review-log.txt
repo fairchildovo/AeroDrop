@@ -1,0 +1,5 @@
+aa11396 (HEAD -> codex/phase1-multi-receiver-routing) fix: enforce winner-only sender route commitment
+5cf93f6 feat: add per-receiver route commitment for multi-recipient transfers
+653d721 test: cover receiver session immutability regression
+f4da671 fix: tighten sender session registry immutability
+46c3175 feat: add sender receiver-session registry and commit gate

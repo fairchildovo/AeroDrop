@@ -6,6 +6,7 @@ export interface ReceiveStreamingTarget {
   close: () => Promise<void>;
   abort?: () => Promise<void>;
   truncate?: (size: number) => Promise<void>;
+  verifyCommittedBytes?: (expectedBytes: number) => Promise<boolean>;
 }
 
 export interface ReceiveStreamingWriterOptions {
@@ -173,6 +174,17 @@ export const createReceiveStreamingWriter = (
         clearTarget(false);
         return true;
       } catch {
+        if (activeTarget?.verifyCommittedBytes) {
+          try {
+            const verified = await activeTarget.verifyCommittedBytes(committedBytes);
+            if (verified) {
+              clearTarget(false);
+              return true;
+            }
+          } catch {
+            // Fall through to failure result.
+          }
+        }
         return false;
       }
     },

@@ -17,7 +17,7 @@ type ConnectionPolicyOptions = {
   p2pBackfillDelayMs: number;
 };
 
-const shouldPreferRelayFirst = (
+const getRelayFirstReason = (
   iceConfig: IceConfigResult,
   profile: BrowserNetworkProfile
 ): HappyEyeballsPlan['reason'] | null => {
@@ -33,10 +33,6 @@ const shouldPreferRelayFirst = (
     return 'mobile_network';
   }
 
-  if (profile.isConstrained || (iceConfig.fetchLatencyMs !== null && iceConfig.fetchLatencyMs >= 1200)) {
-    return 'constrained_network';
-  }
-
   return null;
 };
 
@@ -45,7 +41,7 @@ export const createHappyEyeballsPlan = (
   profile: BrowserNetworkProfile,
   options: ConnectionPolicyOptions
 ): HappyEyeballsPlan => {
-  const relayReason = shouldPreferRelayFirst(iceConfig, profile);
+  const relayFirstReason = getRelayFirstReason(iceConfig, profile);
   const shouldStartRelayFallbackEarly =
     iceConfig.hasTurn &&
     (
@@ -66,14 +62,14 @@ export const createHappyEyeballsPlan = (
     };
   }
 
-  if (relayReason) {
+  if (relayFirstReason) {
     return {
       initialPolicy: 'relay',
       backgroundPolicy: 'all',
       initialTimeoutMs: options.relayInitialTimeoutMs,
       backgroundDelayMs: profile.isLikelyMobileNetwork ? 1400 : options.p2pBackfillDelayMs,
       backgroundTimeoutMs: options.defaultInitialTimeoutMs,
-      reason: relayReason,
+      reason: relayFirstReason,
     };
   }
 
