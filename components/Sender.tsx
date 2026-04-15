@@ -42,7 +42,12 @@ import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChun
 import { useTransferStore } from '../stores/transferStore';
 import { createSenderSessionService } from '../services/senderSessionService';
 import { createReceiverSessionRegistry } from '../services/send/receiverSessionRegistry';
+import { getVisiblePeerIds } from '../services/send/logicalReceiverSessions';
 import { createRouteCommitGate } from '../services/send/routeCommitGate';
+import {
+  captureLogicalReceiverState,
+  restoreLogicalReceiverState,
+} from '../services/send/sessionTransferState';
 import { createSenderRouteHandshakeHandler } from '../services/send/routeHandshake';
 import { SenderUI } from './sender/SenderUI';
 
@@ -135,6 +140,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const signalingOpenTimeoutRef = useRef<number | null>(null);
   const receiverSessionRegistryRef = useRef(createReceiverSessionRegistry());
   const routeCommitGateRef = useRef(createRouteCommitGate());
+  const preservedSessionStateRef = useRef(new Map<string, ReturnType<typeof captureLogicalReceiverState>>());
   const connectionIdsRef = useRef(new WeakMap<DataConnection, string>());
 
   const getOrCreateConnectionId = (conn: DataConnection): string => {
@@ -144,6 +150,110 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     connectionIdsRef.current.set(conn, created);
     return created;
   };
+
+  const findConnectionById = (connectionId: string) =>
+    Array.from(activeConnections.current).find(
+      (candidate) => connectionIdsRef.current.get(candidate) === connectionId
+    ) ?? null;
+
+  const movePeerName = (fromPeerId: string, toPeerId: string) => {
+    setPeerNames((prev) => {
+      if (!prev[fromPeerId]) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      if (!next[toPeerId]) {
+        next[toPeerId] = prev[fromPeerId];
+      }
+      delete next[fromPeerId];
+      return next;
+    });
+  };
+
+  const rebindCommittedSessionState = (fromPeerId: string, toPeerId: string) => {
+    if (fromPeerId === toPeerId) {
+      return;
+    }
+
+    movePeerName(fromPeerId, toPeerId);
+
+    const moveMapValue = <T,>(map: Map<string, T>) => {
+      if (!map.has(fromPeerId)) {
+        return;
+      }
+      map.set(toPeerId, map.get(fromPeerId)!);
+      map.delete(fromPeerId);
+    };
+
+    moveMapValue(peerProgress.current);
+    moveMapValue(peerRealtimeSpeed.current);
+    moveMapValue(peerAverageSpeed.current);
+    moveMapValue(peerTransferredBytesRef.current);
+    moveMapValue(peerTotalBytesRef.current);
+    moveMapValue(peerSyncStartAtRef.current);
+    moveMapValue(peerSyncBaseBytesRef.current);
+    moveMapValue(peerTransferEpochRef.current);
+    moveMapValue(peerConnectionTypeRef.current);
+    moveMapValue(peerIsLAN.current);
+
+    if (peerHasProgressSyncRef.current.delete(fromPeerId)) {
+      peerHasProgressSyncRef.current.add(toPeerId);
+    }
+    if (peerAwaitingFinalizeAckRef.current.delete(fromPeerId)) {
+      peerAwaitingFinalizeAckRef.current.add(toPeerId);
+    }
+  };
+
+  const bindReceiverSessionToPeer = (
+    receiverSessionId: string,
+    peerId: string,
+    previousPeerId?: string | null
+  ) => {
+    const boundPeerId = previousPeerId ?? sessionToPeerRef.current.get(receiverSessionId) ?? null;
+
+    if (boundPeerId && boundPeerId !== peerId) {
+      rebindCommittedSessionState(boundPeerId, peerId);
+    }
+
+    const preservedState = preservedSessionStateRef.current.get(receiverSessionId);
+    if (preservedState) {
+      restoreLogicalReceiverState(preservedState, peerId, {
+        peerProgress: peerProgress.current,
+        peerRealtimeSpeed: peerRealtimeSpeed.current,
+        peerAverageSpeed: peerAverageSpeed.current,
+        peerTransferredBytes: peerTransferredBytesRef.current,
+        peerTotalBytes: peerTotalBytesRef.current,
+        peerSyncStartAt: peerSyncStartAtRef.current,
+        peerSyncBaseBytes: peerSyncBaseBytesRef.current,
+        peerTransferEpoch: peerTransferEpochRef.current,
+        peerConnectionType: peerConnectionTypeRef.current,
+        peerIsLAN: peerIsLAN.current,
+        peerNames: peerNamesRef.current,
+        peerHasProgressSync: peerHasProgressSyncRef.current,
+        peerAwaitingFinalizeAck: peerAwaitingFinalizeAckRef.current,
+        pendingSendPeers: pendingSendPeersRef.current,
+        activeSendingPeers: activeSendingPeersRef.current,
+      });
+      if (preservedState.peerName) {
+        setPeerNames((prev) => ({ ...prev, [peerId]: preservedState.peerName! }));
+      }
+      preservedSessionStateRef.current.delete(receiverSessionId);
+    }
+
+    peerSessionIdsRef.current.set(peerId, receiverSessionId);
+    sessionToPeerRef.current.set(receiverSessionId, peerId);
+  };
+
+  const getVisibleConnections = () =>
+    Array.from(activeConnections.current).filter((conn) => {
+      const receiverSessionId = peerSessionIdsRef.current.get(conn.peer);
+      if (!receiverSessionId) {
+        return true;
+      }
+
+      return sessionToPeerRef.current.get(receiverSessionId) === conn.peer;
+    });
 
   const resetCommittedRouteState = () => {
     receiverSessionRegistryRef.current = createReceiverSessionRegistry();
@@ -172,7 +282,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             let totalAvgSpeed = 0;
             let combinedProgress = 0;
 
-            const stats: PeerTransferStat[] = Array.from(activeConnections.current).map((conn) => {
+            const stats: PeerTransferStat[] = getVisibleConnections().map((conn) => {
                 const peerId = conn.peer;
                 const progress = peerProgress.current.get(peerId) || 0;
                 const realtimeSpeed = peerRealtimeSpeed.current.get(peerId) || 0;
@@ -268,7 +378,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const updateConnectionStatusUI = () => {
-    const count = activeConnections.current.size;
+    const count = getVisibleConnections().length;
     if (count > 1) {
        setConnectionStatus(`已连接 ${count} 个设备`);
     } else if (count === 0) {
@@ -801,6 +911,32 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {
+      const removedSessionId = peerSessionIdsRef.current.get(conn.peer);
+      const stillBoundToClosingPeer =
+        !!removedSessionId && sessionToPeerRef.current.get(removedSessionId) === conn.peer;
+      if (stillBoundToClosingPeer && removedSessionId) {
+          const preservedState = captureLogicalReceiverState(conn.peer, {
+            peerProgress: peerProgress.current,
+            peerRealtimeSpeed: peerRealtimeSpeed.current,
+            peerAverageSpeed: peerAverageSpeed.current,
+            peerTransferredBytes: peerTransferredBytesRef.current,
+            peerTotalBytes: peerTotalBytesRef.current,
+            peerSyncStartAt: peerSyncStartAtRef.current,
+            peerSyncBaseBytes: peerSyncBaseBytesRef.current,
+            peerTransferEpoch: peerTransferEpochRef.current,
+            peerConnectionType: peerConnectionTypeRef.current,
+            peerIsLAN: peerIsLAN.current,
+            peerNames: peerNamesRef.current,
+            peerHasProgressSync: peerHasProgressSyncRef.current,
+            peerAwaitingFinalizeAck: peerAwaitingFinalizeAckRef.current,
+            pendingSendPeers: pendingSendPeersRef.current,
+            activeSendingPeers: activeSendingPeersRef.current,
+          });
+          if (preservedState) {
+            preservedSessionStateRef.current.set(removedSessionId, preservedState);
+          }
+      }
+
       const connectionId = connectionIdsRef.current.get(conn);
       if (connectionId) {
           receiverSessionRegistryRef.current.releaseConnection(connectionId);
@@ -829,11 +965,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       peerRouteLogSignatureRef.current.delete(conn.peer);
       removePeerName(conn.peer);
 
-      const removedSessionId = peerSessionIdsRef.current.get(conn.peer);
-      if (removedSessionId && sessionToPeerRef.current.get(removedSessionId) === conn.peer) {
+      if (stillBoundToClosingPeer && removedSessionId) {
           sessionToPeerRef.current.delete(removedSessionId);
-      }
-      if (removedSessionId) {
           committedRouteLogSignatureRef.current.delete(removedSessionId);
       }
       peerSessionIdsRef.current.delete(conn.peer);
@@ -1016,7 +1149,30 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   getConnectionId: getOrCreateConnectionId,
                   metadata: sessionMetadata,
                   deviceName: localDeviceNameRef.current,
-                  onRouteCommitted: ({ conn: committedConn, receiverSessionId, selectedKind }) => {
+                  onRouteCommitted: ({
+                    conn: committedConn,
+                    receiverSessionId,
+                    selectedKind,
+                    replacedConnectionId,
+                  }) => {
+                    const replacedConn = replacedConnectionId
+                      ? findConnectionById(replacedConnectionId)
+                      : null;
+
+                    bindReceiverSessionToPeer(
+                      receiverSessionId,
+                      committedConn.peer,
+                      replacedConn?.peer ?? null
+                    );
+
+                    if (replacedConn && replacedConn !== committedConn) {
+                      try {
+                        if (replacedConn.open) {
+                          replacedConn.close();
+                        }
+                      } catch {}
+                    }
+
                     void logCommittedRouteSelection(committedConn as DataConnection, receiverSessionId, selectedKind);
                   },
               });
@@ -1038,8 +1194,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                               oldConn.close();
                           }
                       }
-                      peerSessionIdsRef.current.set(conn.peer, remoteSessionId);
-                      sessionToPeerRef.current.set(remoteSessionId, conn.peer);
+                      bindReceiverSessionToPeer(remoteSessionId, conn.peer, existingPeerId ?? null);
                   }
               } else if (msg.type === 'ACCEPT_TRANSFER') {
                   setState(TransferState.TRANSFERRING);
@@ -1371,6 +1526,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerTransferEpochRef.current.clear();
     peerSessionIdsRef.current.clear();
     sessionToPeerRef.current.clear();
+    preservedSessionStateRef.current.clear();
     resetCommittedRouteState();
     ghostCandidateSinceRef.current.clear();
     peerConnectionTypeRef.current.clear();
@@ -1483,7 +1639,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       currentSpeedBytes,
       avgSpeedBytes,
       activeTransfersCount: activeTransfersCount.current,
-      activeConnectionsCount: activeConnections.current.size,
+      activeConnectionsCount: getVisibleConnections().length,
       totalBytes,
       transferredBytes,
       overallEta,
@@ -1552,7 +1708,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       totalBytes={totalBytes}
       transferredBytes={transferredBytes}
       overallEta={overallEta}
-      activeConnectionsCount={activeConnections.current.size}
+      activeConnectionsCount={getVisibleConnections().length}
       currentSpeed={currentSpeed}
       avgSpeed={avgSpeed}
     />

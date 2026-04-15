@@ -39,6 +39,7 @@ const createHarness = () => {
     peerId: string;
     receiverSessionId: string;
     selectedKind: 'all' | 'relay';
+    replacedConnectionId?: string;
   }> = [];
 
   const handler = createSenderRouteHandshakeHandler({
@@ -55,11 +56,12 @@ const createHarness = () => {
       connectionIds.set(conn.peer, created);
       return created;
     },
-    onRouteCommitted: ({ conn, receiverSessionId, selectedKind }) => {
+    onRouteCommitted: ({ conn, receiverSessionId, selectedKind, replacedConnectionId }) => {
       committedRoutes.push({
         peerId: conn.peer,
         receiverSessionId,
         selectedKind,
+        replacedConnectionId,
       });
     },
   });
@@ -298,6 +300,96 @@ test('different receiver sessions can commit different route kinds in the same s
       peerId: 'peer-b',
       receiverSessionId: 'receiver-b',
       selectedKind: 'relay',
+    },
+  ]);
+});
+
+test('same receiver session can reclaim a committed route on a new connection', () => {
+  const harness = createHarness();
+  const originalConn = new FakeConnection('peer-original');
+  const reconnectConn = new FakeConnection('peer-reconnect');
+
+  sendRouteProbe(harness.handle, originalConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'all-1',
+    attemptKind: 'all',
+  });
+  commitWinner(harness.handle, originalConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'all-1',
+    selectedKind: 'all',
+  });
+
+  sendRouteProbe(harness.handle, reconnectConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'all-2',
+    attemptKind: 'all',
+  });
+  commitWinner(harness.handle, reconnectConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'all-2',
+    selectedKind: 'all',
+  });
+
+  assert.deepEqual(originalConn.sent.map((message) => message.type), [
+    'ROUTE_READY',
+    'DEVICE_INFO',
+    'METADATA',
+  ]);
+  assert.deepEqual(reconnectConn.sent.map((message) => message.type), [
+    'ROUTE_READY',
+    'DEVICE_INFO',
+    'METADATA',
+  ]);
+  assert.equal(harness.commitGate.getCommittedConnectionId('receiver-a'), 'conn-peer-reconnect');
+  assert.deepEqual(harness.committedRoutes, [
+    {
+      peerId: 'peer-original',
+      receiverSessionId: 'receiver-a',
+      selectedKind: 'all',
+    },
+    {
+      peerId: 'peer-reconnect',
+      receiverSessionId: 'receiver-a',
+      selectedKind: 'all',
+      replacedConnectionId: 'conn-peer-original',
+    },
+  ]);
+});
+
+test('losing route attempt cannot reclaim while the committed winner is still the active attempt', () => {
+  const harness = createHarness();
+  const allConn = new FakeConnection('peer-all');
+  const relayConn = new FakeConnection('peer-relay');
+
+  sendRouteProbe(harness.handle, allConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'all-1',
+    attemptKind: 'all',
+  });
+  sendRouteProbe(harness.handle, relayConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'relay-1',
+    attemptKind: 'relay',
+  });
+  commitWinner(harness.handle, allConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'all-1',
+    selectedKind: 'all',
+  });
+  commitWinner(harness.handle, relayConn, {
+    receiverSessionId: 'receiver-a',
+    attemptId: 'relay-1',
+    selectedKind: 'relay',
+  });
+
+  assert.equal(relayConn.closed, true);
+  assert.equal(harness.commitGate.getCommittedConnectionId('receiver-a'), 'conn-peer-all');
+  assert.deepEqual(harness.committedRoutes, [
+    {
+      peerId: 'peer-all',
+      receiverSessionId: 'receiver-a',
+      selectedKind: 'all',
     },
   ]);
 });

@@ -44,6 +44,10 @@ import {
   shouldAutoReconnectCommittedSession,
 } from '../services/receive/committedReconnectPolicy';
 import {
+  shouldAutoResumeCommittedReconnect,
+  shouldPreserveCommittedReconnectResumeIntent,
+} from '../services/receive/committedReconnectResume';
+import {
   getNonWinningRouteMessageDisposition,
   isRouteAttemptTransferControlMessage,
 } from '../services/receive/routeAttemptMessagePolicy';
@@ -53,6 +57,10 @@ import {
   type ReceiveStreamingTarget,
   type ReceiveStreamingWriter,
 } from '../services/receive/streamingWriter';
+import {
+  getOrCreateReceiverRouteSessionId,
+  rotateReceiverRouteSessionId,
+} from '../services/receive/receiverRouteSessionId';
 import { getRouteSelectionTimings } from '../services/routeSelectionPolicy';
 import { useTransferStore } from '../stores/transferStore';
 import { createReceiverSessionService } from '../services/receiverSessionService';
@@ -101,13 +109,24 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
     try {
-      const existing = sessionStorage.getItem(RECEIVER_SESSION_KEY);
-      if (existing) return existing;
-      const generated = `rcv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      sessionStorage.setItem(RECEIVER_SESSION_KEY, generated);
-      return generated;
+      return getOrCreateReceiverRouteSessionId({
+        storageKey: RECEIVER_SESSION_KEY,
+        read: (key) => sessionStorage.getItem(key),
+        write: (key, value) => sessionStorage.setItem(key, value),
+      });
     } catch {
       return `rcv-fallback-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  };
+
+  const rotateSessionId = () => {
+    try {
+      receiverSessionIdRef.current = rotateReceiverRouteSessionId({
+        storageKey: RECEIVER_SESSION_KEY,
+        write: (key, value) => sessionStorage.setItem(key, value),
+      });
+    } catch {
+      receiverSessionIdRef.current = `rcv-fallback-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     }
   };
 
@@ -155,6 +174,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const routeAttemptsRef = useRef<Map<string, RouteAttemptRecord>>(new Map());
   const intentionalConnectionCloseRef = useRef(new WeakSet<DataConnection>());
   const committedReconnectAttemptsRef = useRef(0);
+  const pendingCommittedReconnectResumeRef = useRef(false);
   const pendingRouteMessagesRef = useRef<Map<string, P2PMessage[]>>(new Map());
   const latestRouteAttemptIdsRef = useRef<Record<RouteAttemptKind, string | null>>({
     all: null,
@@ -637,10 +657,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
   };
 
-  const deleteIndexedDbChunksForSession = async (): Promise<void> => {
+  const deleteIndexedDbChunksForSession = async (sessionId = receiverSessionIdRef.current): Promise<void> => {
     if (!isIndexedDbSupported()) return;
     const db = await openIndexedDb();
-    const sessionId = receiverSessionIdRef.current;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(IOS_IDB_STORE, 'readwrite');
       const store = tx.objectStore(IOS_IDB_STORE);
@@ -1059,9 +1078,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       committedReconnectAttemptsRef.current = 0;
       isTransferActiveRef.current = false;
 
+      const shouldAutoResume = shouldAutoResumeCommittedReconnect({
+        pendingReconnectResume: pendingCommittedReconnectResumeRef.current,
+        isResumable,
+      });
+      pendingCommittedReconnectResumeRef.current = false;
+
       if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
       if ((isIOS || isSafari) && meta.totalSize >= IOS_MEMORY_WARN_BYTES && onNotification) {
           onNotification('检测到超大文件：将优先尝试使用 IndexedDB 分块缓冲，减少内存占用。', 'info');
+      }
+      if (shouldAutoResume) {
+          if (onNotification) onNotification("连接已恢复，正在继续下载...", 'info');
+          void receiveRecoveryCoordinator.resumeTransfer();
       }
     }
     else if (msg.type === 'FILE_START') {
@@ -1317,6 +1346,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           intentionalClose,
         })
        ) {
+        pendingCommittedReconnectResumeRef.current = shouldPreserveCommittedReconnectResumeIntent({
+          currentState,
+          transferActive: isTransferActiveRef.current,
+        });
         if (committedReconnectTimerRef.current !== null) {
           return;
         }
@@ -1380,6 +1413,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           intentionalClose: intentionalConnectionCloseRef.current.has(conn),
         })
       ) {
+        pendingCommittedReconnectResumeRef.current = shouldPreserveCommittedReconnectResumeIntent({
+          currentState: stateRef.current,
+          transferActive: isTransferActiveRef.current,
+        });
         try { conn.close(); } catch {}
         return;
       }
@@ -1690,6 +1727,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     clearCommittedReconnectTimer();
     if (!options?.preserveCommittedReconnectAttempts) {
       committedReconnectAttemptsRef.current = 0;
+      pendingCommittedReconnectResumeRef.current = false;
     }
     connectTelemetryRef.current = createConnectionSession('receiver', { code });
     setState(TransferState.WAITING_FOR_PEER);
@@ -2004,9 +2042,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     clearHeartbeatTimer();
     clearCommittedReconnectTimer();
     resetRouteAttemptState();
+    pendingCommittedReconnectResumeRef.current = false;
     
     abortStreams().then(() => {
-        deleteIndexedDbChunksForSession().catch(() => {});
+        const previousSessionId = receiverSessionIdRef.current;
+        deleteIndexedDbChunksForSession(previousSessionId).catch(() => {});
         if (connRef.current) {
           markIntentionalConnectionClose(connRef.current);
           connRef.current.close();
@@ -2024,6 +2064,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         indexedDbNotifiedRef.current = false;
         nativeFileHandleRef.current = null;
         committedReconnectAttemptsRef.current = 0;
+        rotateSessionId();
         resetStateForNewTransfer();
         resetReceiverSnapshot();
     });

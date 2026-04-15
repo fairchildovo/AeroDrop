@@ -17,6 +17,7 @@ type SenderRouteHandshakeOptions = {
     conn: SenderRouteHandshakeConnection;
     receiverSessionId: string;
     selectedKind: 'all' | 'relay';
+    replacedConnectionId?: string;
   }) => void;
 };
 
@@ -27,6 +28,7 @@ export const createSenderRouteHandshakeHandler = <TConn extends SenderRouteHands
       conn: TConn;
       receiverSessionId: string;
       selectedKind: 'all' | 'relay';
+      replacedConnectionId?: string;
     }) => void;
   }
 ) => ({
@@ -64,14 +66,28 @@ export const createSenderRouteHandshakeHandler = <TConn extends SenderRouteHands
       }
 
       const commitClaim = options.commitGate.claimCommit(msg.payload.receiverSessionId, connectionId);
-      if (commitClaim.status === 'conflict') {
-        conn.close();
-        return true;
-      }
-      if (commitClaim.status === 'duplicate') {
-        return true;
-      }
+      let replacedConnectionId: string | undefined;
 
+      if (commitClaim.status === 'conflict') {
+        const committedConnectionId = options.commitGate.getCommittedConnectionId(
+          msg.payload.receiverSessionId
+        );
+
+        if (
+          !committedConnectionId ||
+          !options.registry.isReconnectCandidate(msg.payload.receiverSessionId, connectionId)
+        ) {
+          conn.close();
+          return true;
+        }
+
+        replacedConnectionId = committedConnectionId;
+        options.commitGate.markCommitted(msg.payload.receiverSessionId, connectionId);
+      } else if (commitClaim.status === 'duplicate') {
+        return true;
+      } else {
+        replacedConnectionId = undefined;
+      }
       options.registry.markCommitted(msg.payload.receiverSessionId, connectionId);
 
       try {
@@ -84,6 +100,7 @@ export const createSenderRouteHandshakeHandler = <TConn extends SenderRouteHands
           conn,
           receiverSessionId: msg.payload.receiverSessionId,
           selectedKind: msg.payload.selectedKind,
+          replacedConnectionId,
         });
       } catch (error) {
         console.error('Failed to send committed route metadata', error);

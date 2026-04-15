@@ -12,6 +12,7 @@ export type ReceiverSessionRecord = {
   receiverSessionId: string;
   attempts: Partial<Record<RouteAttemptKind, RegisterAttemptInput>>;
   committedConnectionId?: string;
+  reconnectCandidateConnectionIds?: Set<string>;
 };
 
 export const createReceiverSessionRegistry = () => {
@@ -23,12 +24,13 @@ export const createReceiverSessionRegistry = () => {
       return existing;
     }
 
-    const created: ReceiverSessionRecord = {
-      receiverSessionId,
-      attempts: {},
-    };
-    sessions.set(receiverSessionId, created);
-    return created;
+      const created: ReceiverSessionRecord = {
+        receiverSessionId,
+        attempts: {},
+        reconnectCandidateConnectionIds: new Set<string>(),
+      };
+      sessions.set(receiverSessionId, created);
+      return created;
   };
 
   const deleteSessionIfEmpty = (receiverSessionId: string) => {
@@ -44,6 +46,12 @@ export const createReceiverSessionRegistry = () => {
   return {
     registerAttempt(input: RegisterAttemptInput) {
       const session = getOrCreateSession(input.receiverSessionId);
+      if (
+        session.committedConnectionId &&
+        session.committedConnectionId !== input.connectionId
+      ) {
+        session.reconnectCandidateConnectionIds?.add(input.connectionId);
+      }
       session.attempts[input.attemptKind] = input;
       return session;
     },
@@ -60,6 +68,15 @@ export const createReceiverSessionRegistry = () => {
     markCommitted(receiverSessionId: string, connectionId: string) {
       const session = getOrCreateSession(receiverSessionId);
       session.committedConnectionId = connectionId;
+      session.reconnectCandidateConnectionIds?.clear();
+    },
+    isReconnectCandidate(receiverSessionId: string, connectionId: string) {
+      const session = sessions.get(receiverSessionId);
+      if (!session) {
+        return false;
+      }
+
+      return session.reconnectCandidateConnectionIds?.has(connectionId) ?? false;
     },
     getSession(receiverSessionId: string) {
       return sessions.get(receiverSessionId);
@@ -75,6 +92,8 @@ export const createReceiverSessionRegistry = () => {
             delete session.attempts[attemptKind as RouteAttemptKind];
           }
         }
+
+        session.reconnectCandidateConnectionIds?.delete(connectionId);
 
         deleteSessionIfEmpty(receiverSessionId);
       }
