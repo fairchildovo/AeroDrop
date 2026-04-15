@@ -40,6 +40,8 @@ import { waitForDataChannelDrain } from '../services/transfer/DataChannelTransmi
 import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChunkReader';
 import { useTransferStore } from '../stores/transferStore';
 import { createSenderSessionService } from '../services/senderSessionService';
+import { createReceiverSessionRegistry } from '../services/send/receiverSessionRegistry';
+import { createRouteCommitGate } from '../services/send/routeCommitGate';
 import { SenderUI } from './sender/SenderUI';
 
 interface SenderProps {
@@ -129,6 +131,23 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const MAX_SIGNALING_OPEN_RETRY = 1;
   const lastStatsPollIndexRef = useRef(0);
   const signalingOpenTimeoutRef = useRef<number | null>(null);
+  const receiverSessionRegistryRef = useRef(createReceiverSessionRegistry());
+  const routeCommitGateRef = useRef(createRouteCommitGate());
+  const connectionIdsRef = useRef(new WeakMap<DataConnection, string>());
+
+  const getOrCreateConnectionId = (conn: DataConnection): string => {
+    const existing = connectionIdsRef.current.get(conn);
+    if (existing) return existing;
+    const created = `${conn.peer}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    connectionIdsRef.current.set(conn, created);
+    return created;
+  };
+
+  const resetCommittedRouteState = () => {
+    receiverSessionRegistryRef.current = createReceiverSessionRegistry();
+    routeCommitGateRef.current = createRouteCommitGate();
+    connectionIdsRef.current = new WeakMap<DataConnection, string>();
+  };
 
   const totalProgressRef = useRef(0);
   useEffect(() => {
@@ -620,6 +639,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerSyncBaseBytesRef.current.clear();
     peerTransferEpochRef.current.clear();
     pendingSendPeersRef.current.clear();
+    resetCommittedRouteState();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -718,6 +738,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {
+      const connectionId = connectionIdsRef.current.get(conn);
+      if (connectionId) {
+          receiverSessionRegistryRef.current.releaseConnection(connectionId);
+          routeCommitGateRef.current.releaseConnection(connectionId);
+          connectionIdsRef.current.delete(conn);
+      }
       if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
           activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
       }
@@ -914,15 +940,72 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               }
 
               setState(TransferState.PEER_CONNECTED);
-              try {
-                  conn.send({ type: 'DEVICE_INFO', payload: { deviceName: localDeviceNameRef.current } });
-                  conn.send({ type: 'METADATA', payload: sessionMetadata });
-              } catch(e) { console.error("Failed to send metadata", e); }
           });
           
           conn.on('data', (data: any) => {
               const incoming = data as P2PMessage;
               const msg = normalizeTransferMessage(incoming, TRANSFER_CONFIG.CHUNK_SIZE_WAN);
+              if (msg.type === 'ROUTE_PROBE') {
+                  receiverSessionRegistryRef.current.registerAttempt({
+                      receiverSessionId: msg.payload.receiverSessionId,
+                      attemptId: msg.payload.attemptId,
+                      attemptKind: msg.payload.attemptKind,
+                      peerId: conn.peer,
+                      connectionId: getOrCreateConnectionId(conn),
+                  });
+
+                  conn.send({
+                      type: 'ROUTE_READY',
+                      payload: {
+                          receiverSessionId: msg.payload.receiverSessionId,
+                          attemptId: msg.payload.attemptId,
+                      },
+                  });
+                  return;
+              }
+
+              if (msg.type === 'ROUTE_COMMIT') {
+                  const connectionId = getOrCreateConnectionId(conn);
+                  if (!receiverSessionRegistryRef.current.resolveAttemptForCommit(
+                      msg.payload.receiverSessionId,
+                      msg.payload.attemptId,
+                      connectionId
+                  )) {
+                      conn.close();
+                      return;
+                  }
+
+                  const commitClaim = routeCommitGateRef.current.claimCommit(
+                      msg.payload.receiverSessionId,
+                      connectionId
+                  );
+                  if (commitClaim.status === 'conflict') {
+                      conn.close();
+                      return;
+                  }
+                  if (commitClaim.status === 'duplicate') {
+                      return;
+                  }
+
+                  receiverSessionRegistryRef.current.markCommitted(msg.payload.receiverSessionId, connectionId);
+
+                  try {
+                      conn.send({
+                          type: 'DEVICE_INFO',
+                          payload: { deviceName: localDeviceNameRef.current },
+                      });
+                      conn.send({ type: 'METADATA', payload: sessionMetadata });
+                  } catch (error) {
+                      console.error('Failed to send committed route metadata', error);
+                  }
+                  return;
+              }
+
+              if (msg.type === 'ROUTE_ABORT') {
+                  conn.close();
+                  return;
+              }
+
               if (msg.type === 'DEVICE_INFO') {
                   const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName : '';
                   updatePeerName(conn.peer, remoteName);
@@ -1269,6 +1352,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerTransferEpochRef.current.clear();
     peerSessionIdsRef.current.clear();
     sessionToPeerRef.current.clear();
+    resetCommittedRouteState();
     ghostCandidateSinceRef.current.clear();
     peerConnectionTypeRef.current.clear();
     peerHeartbeatAtRef.current.clear();

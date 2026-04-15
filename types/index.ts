@@ -32,6 +32,7 @@ export interface FileMetadata {
 export type ConnectionTypeLabel = '直连' | '点对点' | '中继（速度会变慢）' | '检测中';
 
 export type PeerTransferStatus = 'waiting' | 'transferring' | 'completed';
+export type RouteAttemptKind = 'all' | 'relay';
 
 export interface PeerConnectionSnapshot {
   peerId: string;
@@ -148,6 +149,30 @@ export interface HeartbeatPayload {
   t: number;
 }
 
+export interface RouteProbePayload {
+  receiverSessionId: string;
+  attemptId: string;
+  attemptKind: RouteAttemptKind;
+  deviceName: string;
+}
+
+export interface RouteReadyPayload {
+  receiverSessionId: string;
+  attemptId: string;
+}
+
+export interface RouteCommitPayload {
+  receiverSessionId: string;
+  attemptId: string;
+  selectedKind: RouteAttemptKind;
+}
+
+export interface RouteAbortPayload {
+  receiverSessionId: string;
+  attemptId: string;
+  reason: 'lost_race' | 'session_closed' | 'winner_selected';
+}
+
 export type P2PMessageMap = {
   METADATA: FileMetadata;
   FILE_START: FileStartPayload;
@@ -162,6 +187,10 @@ export type P2PMessageMap = {
   TRANSFER_CANCELLED: TransferCancelledPayload;
   DEVICE_INFO: DeviceInfoPayload;
   HEARTBEAT: HeartbeatPayload;
+  ROUTE_PROBE: RouteProbePayload;
+  ROUTE_READY: RouteReadyPayload;
+  ROUTE_COMMIT: RouteCommitPayload;
+  ROUTE_ABORT: RouteAbortPayload;
 };
 
 export type P2PMessage = {
