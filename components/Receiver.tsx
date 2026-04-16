@@ -51,6 +51,7 @@ import {
   getNonWinningRouteMessageDisposition,
   isRouteAttemptTransferControlMessage,
 } from '../services/receive/routeAttemptMessagePolicy';
+import { createRouteProbeLogPayload } from '../services/routeProbeLog';
 import { createReceiveSessionCoordinator, type ReceiveSessionCoordinator } from '../services/receive/sessionCoordinator';
 import {
   createReceiveStreamingWriter,
@@ -61,7 +62,10 @@ import {
   getOrCreateReceiverRouteSessionId,
   rotateReceiverRouteSessionId,
 } from '../services/receive/receiverRouteSessionId';
-import { getRouteSelectionTimings } from '../services/routeSelectionPolicy';
+import {
+  getRouteSelectionDecision,
+  getRouteSelectionTimings,
+} from '../services/routeSelectionPolicy';
 import { useTransferStore } from '../stores/transferStore';
 import { createReceiverSessionService } from '../services/receiverSessionService';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
@@ -169,6 +173,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const relayConnRef = useRef<DataConnection | null>(null);
   const happyEyeballsWonRef = useRef(false);
   const p2pTimeoutRetryCountRef = useRef(0);
+  const allAttemptProgressedRef = useRef(false);
   const selectedRouteLogSignatureRef = useRef('');
   const routeAttemptCounterRef = useRef(0);
   const routeAttemptsRef = useRef<Map<string, RouteAttemptRecord>>(new Map());
@@ -176,6 +181,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const committedReconnectAttemptsRef = useRef(0);
   const pendingCommittedReconnectResumeRef = useRef(false);
   const pendingRouteMessagesRef = useRef<Map<string, P2PMessage[]>>(new Map());
+  const routeSelectionDecisionRef = useRef<ReturnType<typeof getRouteSelectionDecision> | null>(null);
   const latestRouteAttemptIdsRef = useRef<Record<RouteAttemptKind, string | null>>({
     all: null,
     relay: null,
@@ -442,6 +448,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           pathType: route.pathType,
           rttMs: route.rttMs,
           selectionReason,
+          routePolicyClass: routeSelectionDecisionRef.current?.policyClass,
+          routePolicyReasons: routeSelectionDecisionRef.current?.reasons,
+          routePolicyStartRelayDelayMs: routeSelectionDecisionRef.current?.startRelayDelayMs,
+          routePolicyP2pGraceWindowMs: routeSelectionDecisionRef.current?.p2pGraceWindowMs,
         });
       }
     });
@@ -1160,6 +1170,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         return;
       }
 
+      if (attemptKind === 'all') {
+        allAttemptProgressedRef.current = true;
+      }
+
+      console.info('[route-probe]', createRouteProbeLogPayload({
+        receiverSessionId: receiverSessionIdRef.current,
+        attemptId,
+        attemptKind,
+        openedAt: Date.now(),
+        peerId: conn.peer,
+      }));
+
       try {
         conn.send({
           type: 'ROUTE_PROBE',
@@ -1735,6 +1757,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     setErrorMsg('');
     retryCountRef.current = 0;
     happyEyeballsWonRef.current = false;
+    allAttemptProgressedRef.current = false;
     resetRouteAttemptState();
     connRef.current = null;
     relayConnRef.current = null;
@@ -1749,12 +1772,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       defaultInitialTimeoutMs: INITIAL_TIMEOUT_MS,
       relayInitialTimeoutMs: RELAY_TIMEOUT_MS,
     });
-    const routeSelectionTimings = getRouteSelectionTimings({
+    const routeSelectionContext = {
       isMobileDevice: networkProfile.isMobileDevice,
       isConstrained: networkProfile.isConstrained,
       relayRecommended: iceConfig.relayRecommended,
       fetchLatencyMs: iceConfig.fetchLatencyMs,
-    });
+    };
+    const routeSelectionTimings = getRouteSelectionTimings(routeSelectionContext);
+    routeSelectionDecisionRef.current = getRouteSelectionDecision(routeSelectionContext);
     markIceConfigFetched(connectTelemetryRef.current);
     setConnectingStage('connecting_signaling');
     hasTurnRef.current = iceConfig.hasTurn;
@@ -1947,6 +1972,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const initialTimeoutMs = connectionPlan.initialTimeoutMs;
     const backgroundDelayMs = connectionPlan.backgroundDelayMs;
     const backgroundTimeoutMs = connectionPlan.backgroundTimeoutMs;
+    const primaryProbeWindowMs = routeSelectionTimings.primaryProbeWindowMs ?? null;
 
     markSessionEvent(connectTelemetryRef.current, 'ice_strategy_selected', {
       initialPolicy,
@@ -1982,6 +2008,24 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         );
         void createAndConnectPeer(backgroundPolicy, backgroundTimeoutMs);
       }, backgroundDelayMs);
+    }
+
+    if (
+      iceConfig.hasTurn &&
+      initialPolicy === 'all' &&
+      backgroundPolicy === null &&
+      primaryProbeWindowMs !== null
+    ) {
+      window.setTimeout(() => {
+        if (happyEyeballsWonRef.current) return;
+        if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
+        if (allAttemptProgressedRef.current) return;
+        markSessionEvent(connectTelemetryRef.current, 'happy_eyeballs_probe_window_relay_start', {
+          primaryProbeWindowMs,
+        });
+        startConnectionAttempt(connectTelemetryRef.current, 'relay_probe_window_fallback');
+        void createAndConnectPeer('relay', RELAY_TIMEOUT_MS);
+      }, primaryProbeWindowMs);
     }
   };
 

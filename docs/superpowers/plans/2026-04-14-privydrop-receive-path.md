@@ -8,6 +8,11 @@
 
 **Tech Stack:** React 19, TypeScript, browser File System Access API, StreamSaver, Node built-in test runner
 
+## Status Update (2026-04-16)
+
+- Code and local verification for this plan are complete in the current codebase.
+- Remaining non-local work is browser/manual verification in real environments.
+
 ---
 
 ### Task 1: Lock strategy and orchestrator behavior with tests
@@ -17,9 +22,9 @@
 - Create: `services/receive/persistenceOrchestrator.test.ts`
 - Modify: `package.json`
 
-- [ ] Add strategy tests for desktop native FS preference, StreamSaver fallback, iOS IndexedDB buffering, and memory fallback.
-- [ ] Add orchestrator tests that prove finalize waits for queued flushes and marks files persisted only after save/close succeeds.
-- [ ] Add a repo test script for these receive-layer tests.
+- [x] Add strategy tests for desktop native FS preference, StreamSaver fallback, iOS IndexedDB buffering, and memory fallback.
+- [x] Add orchestrator tests that prove finalize waits for queued flushes and marks files persisted only after save/close succeeds.
+- [x] Add a repo test script for these receive-layer tests.
 
 ### Task 2: Extract streaming writer service
 
@@ -27,9 +32,9 @@
 - Create: `services/receive/streamingWriter.ts`
 - Create: `services/receive/streamingWriter.test.ts`
 
-- [ ] Build a dedicated writer service that owns streaming target state, pending chunk batching, flush queueing, close/abort, and native resume reopen.
-- [ ] Track committed bytes and buffered bytes so the recovery path can reason about real writer state instead of ad-hoc refs.
-- [ ] Cover writer batching/finalize/abort/resume behavior with focused unit tests.
+- [x] Build a dedicated writer service that owns streaming target state, pending chunk batching, flush queueing, close/abort, and native resume reopen.
+- [x] Track committed bytes and buffered bytes so the recovery path can reason about real writer state instead of ad-hoc refs.
+- [x] Cover writer batching/finalize/abort/resume behavior with focused unit tests.
 
 ### Task 3: Rewire Receiver to use the writer service
 
@@ -39,16 +44,22 @@
 - Modify: `services/receive/recoveryCoordinator.ts`
 - Modify: `services/receive/persistenceStrategy.ts`
 
-- [ ] Remove the current browser-download-first desktop preference and restore native streaming as the primary desktop strategy.
-- [ ] Route desktop chunk buffering, flush, finalize, and reopen-for-resume calls through the new writer service.
-- [ ] Restore native file picker usage for single-file desktop transfers while preserving browser-download fallback when native streaming is unavailable.
+- [x] Remove the current browser-download-first desktop preference and restore native streaming as the primary desktop strategy.
+- [x] Route desktop chunk buffering, flush, finalize, and reopen-for-resume calls through the new writer service.
+- [x] Restore native file picker usage for single-file desktop transfers while preserving browser-download fallback when native streaming is unavailable.
 
 ### Task 4: Verify end-to-end invariants
 
 **Files:**
 - Modify: `README.md` if behavior notes need updating
 
-- [ ] Run receive-layer tests.
-- [ ] Run `npm run typecheck`.
-- [ ] Run `npm run build`.
-- [ ] Summarize remaining runtime risks that still need browser/manual verification.
+- [x] Run receive-layer tests.
+- [x] Run `npm run typecheck`.
+- [x] Run `npm run build`.
+- [x] Summarize remaining runtime risks that still need browser/manual verification.
+
+### Remaining Runtime Risks
+
+- Native File System Access permission prompts and resume semantics still need browser verification on real desktop targets.
+- StreamSaver fallback behavior still needs manual browser validation outside local build/test coverage.
+- iOS / Safari IndexedDB buffering still needs real-device validation for large-file flows.

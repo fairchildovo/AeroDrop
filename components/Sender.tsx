@@ -40,7 +40,13 @@ import {
 import { waitForDataChannelDrain } from '../services/transfer/DataChannelTransmitter';
 import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChunkReader';
 import { useTransferStore } from '../stores/transferStore';
+import { createRouteProbeLogPayload } from '../services/routeProbeLog';
+import { getRouteSelectionDecision } from '../services/routeSelectionPolicy';
 import { createSenderSessionService } from '../services/senderSessionService';
+import {
+  getCommittedTransferDisposition,
+  isCommittedTransferMessageType,
+} from '../services/send/committedTransferGuard';
 import { createReceiverSessionRegistry } from '../services/send/receiverSessionRegistry';
 import { getVisiblePeerIds } from '../services/send/logicalReceiverSessions';
 import { createRouteCommitGate } from '../services/send/routeCommitGate';
@@ -141,6 +147,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const receiverSessionRegistryRef = useRef(createReceiverSessionRegistry());
   const routeCommitGateRef = useRef(createRouteCommitGate());
   const preservedSessionStateRef = useRef(new Map<string, ReturnType<typeof captureLogicalReceiverState>>());
+  const routeSelectionDecisionRef = useRef<ReturnType<typeof getRouteSelectionDecision> | null>(null);
   const connectionIdsRef = useRef(new WeakMap<DataConnection, string>());
 
   const getOrCreateConnectionId = (conn: DataConnection): string => {
@@ -578,6 +585,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       pathType: route?.pathType,
       rttMs: route?.rttMs,
       selectionReason,
+      routePolicyClass: routeSelectionDecisionRef.current?.policyClass,
+      routePolicyReasons: routeSelectionDecisionRef.current?.reasons,
+      routePolicyStartRelayDelayMs: routeSelectionDecisionRef.current?.startRelayDelayMs,
+      routePolicyP2pGraceWindowMs: routeSelectionDecisionRef.current?.p2pGraceWindowMs,
     });
   };
 
@@ -827,6 +838,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
     const networkProfile = getBrowserNetworkProfile();
+    routeSelectionDecisionRef.current = getRouteSelectionDecision({
+      isMobileDevice: networkProfile.isMobileDevice,
+      isConstrained: networkProfile.isConstrained,
+      relayRecommended: iceConfig.relayRecommended,
+      fetchLatencyMs: iceConfig.fetchLatencyMs,
+    });
     setPreparingStage('connecting_signaling');
     markIceConfigFetched(shareTelemetryRef.current);
     markSessionEvent(shareTelemetryRef.current, 'ice_strategy_selected', {
@@ -1143,6 +1160,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           
           conn.on('data', (data: any) => {
               const incoming = data as P2PMessage;
+              if (incoming.type === 'ROUTE_PROBE') {
+                  console.info('[route-probe]', createRouteProbeLogPayload({
+                    receiverSessionId: incoming.payload.receiverSessionId,
+                    attemptId: incoming.payload.attemptId,
+                    attemptKind: incoming.payload.attemptKind,
+                    openedAt: Date.now(),
+                    peerId: conn.peer,
+                  }));
+              }
               const routeHandshakeHandler = createSenderRouteHandshakeHandler({
                   registry: receiverSessionRegistryRef.current,
                   commitGate: routeCommitGateRef.current,
@@ -1178,6 +1204,33 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               });
               if (routeHandshakeHandler.handleMessage(conn, incoming)) {
                   return;
+              }
+
+              const connectionId = connectionIdsRef.current.get(conn) ?? null;
+              if (isCommittedTransferMessageType(incoming.type)) {
+                  const disposition = getCommittedTransferDisposition({
+                    connectionId,
+                    peerId: conn.peer,
+                    peerSessionIds: peerSessionIdsRef.current,
+                    commitGate: routeCommitGateRef.current,
+                  });
+
+                  if (disposition === 'reject') {
+                    console.warn('[route-protocol-misuse]', {
+                      role: 'sender',
+                      peerId: conn.peer,
+                      connectionId: connectionId || undefined,
+                      receiverSessionId: peerSessionIdsRef.current.get(conn.peer) || undefined,
+                      messageType: incoming.type,
+                      reason: 'non_committed_connection_sent_transfer_control',
+                    });
+                    try {
+                      if (conn.open) {
+                        conn.close();
+                      }
+                    } catch {}
+                    return;
+                  }
               }
               const msg = normalizeTransferMessage(incoming, TRANSFER_CONFIG.CHUNK_SIZE_WAN);
 
