@@ -246,6 +246,7 @@ declare global {
 
   interface Window {
     showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<FileSystemFileHandle>;
+    showDirectoryPicker?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
   }
 
   interface SaveFilePickerOptions {
@@ -262,6 +263,13 @@ declare global {
     readonly name: string;
     createWritable(options?: any): Promise<FileSystemWritableFileStream>;
     getFile(): Promise<File>;
+  }
+
+  interface FileSystemDirectoryHandle {
+    readonly kind: 'directory';
+    readonly name: string;
+    getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<FileSystemDirectoryHandle>;
+    getFileHandle(name: string, options?: { create?: boolean }): Promise<FileSystemFileHandle>;
   }
 
   interface FileSystemWritableFileStream extends WritableStream {

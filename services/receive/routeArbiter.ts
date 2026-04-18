@@ -1,5 +1,5 @@
-import { pickPreferredRouteKind, type RouteSnapshot } from '../routeSelectionPolicy';
-import type { RouteAttemptKind } from '../../types';
+import { pickPreferredRouteKind, type RouteSnapshot } from '../routeSelectionPolicy.ts';
+import type { RouteAttemptKind } from '../../types/index.ts';
 
 type ReadyRouteAttempt = RouteSnapshot & {
   attemptId: string;

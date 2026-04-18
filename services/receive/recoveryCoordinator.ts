@@ -1,5 +1,5 @@
-import { TransferState, type NormalizedFileRequest } from '../../types';
-import { createResumeRequestMessage, normalizeFileRequest } from '../protocol';
+import { TransferState, type NormalizedFileRequest } from '../../types/index.ts';
+import { createResumeRequestMessage, normalizeFileRequest } from '../protocol.ts';
 
 interface SendableConnection {
   open: boolean;

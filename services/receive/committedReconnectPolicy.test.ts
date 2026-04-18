@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { TransferState } from '../../types';
+import { TransferState } from '../../types/index.ts';
 import {
   getCommittedSessionReconnectDelayMs,
   shouldAutoReconnectCommittedSession,

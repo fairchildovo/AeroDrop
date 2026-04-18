@@ -18,12 +18,21 @@ export interface PersistenceStrategyInput {
 export const decidePersistenceStrategy = ({
   isIOS,
   isSafari,
+  preferBrowserDownload,
   supportsNativeFs,
   supportsStreamSaver,
   supportsIndexedDb,
   fileSize,
   indexedDbThresholdBytes,
 }: PersistenceStrategyInput): PersistenceStrategy => {
+  if (preferBrowserDownload) {
+    if ((isIOS || isSafari) && supportsIndexedDb && fileSize >= indexedDbThresholdBytes) {
+      return 'indexeddb-buffer';
+    }
+
+    return 'memory-blob';
+  }
+
   if (!isIOS && !isSafari && supportsNativeFs) {
     return 'native-fs';
   }

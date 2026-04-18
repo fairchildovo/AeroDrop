@@ -1,6 +1,6 @@
 import type { BrowserNetworkProfile } from './networkProfile';
 import type { IceConfigResult } from './stunService';
-import { getRouteSelectionTimings } from './routeSelectionPolicy';
+import { getRouteSelectionTimings } from './routeSelectionPolicy.ts';
 
 export type HappyEyeballsPlan = {
   initialPolicy: RTCIceTransportPolicy;

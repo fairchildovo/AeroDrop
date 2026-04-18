@@ -1,4 +1,4 @@
-import type { P2PMessage } from '../../types';
+import type { NormalizedTransferMessage } from '../../types/index.ts';
 import type { createRouteCommitGate } from './routeCommitGate';
 
 export type CommittedTransferMessageType =
@@ -10,7 +10,7 @@ export type CommittedTransferMessageType =
   | 'HEARTBEAT';
 
 export const isCommittedTransferMessageType = (
-  type: P2PMessage['type']
+  type: NormalizedTransferMessage['type']
 ): type is CommittedTransferMessageType =>
   type === 'ACCEPT_TRANSFER' ||
   type === 'FILE_REQUEST' ||

@@ -18,6 +18,7 @@ export interface ReceiveSessionCoordinatorOptions {
   getFileStartPersistenceCapabilities: (fileIndex: number) => {
     canUseNativeFs: boolean;
     usePreparedNativeWriter: boolean;
+    directSaveMode: 'native-fs' | 'directory-direct' | 'none';
   };
   supportsIndexedDb: () => boolean;
   setTransferActive: (active: boolean) => void;
@@ -37,6 +38,7 @@ export interface ReceiveSessionCoordinatorOptions {
     fileSize: number;
     persistenceStrategy: PersistenceStrategy;
     usePreparedNativeWriter: boolean;
+    directSaveMode: 'native-fs' | 'directory-direct' | 'none';
   }) => Promise<void>;
   setCurrentFileState: (args: {
     fileIndex: number;
@@ -55,6 +57,9 @@ export interface ReceiveSessionCoordinatorOptions {
   getPendingAutoRepairFile: () => number | null;
   hasPendingAutoRepair: () => boolean;
   finalizeCurrentFilePersistence: (fileName: string) => Promise<void>;
+  shouldStageFilesForArchive: () => boolean;
+  stageCurrentFileForArchive: () => Promise<boolean>;
+  finalizeArchiveDownload: () => Promise<boolean>;
   saveCurrentFile: () => Promise<boolean>;
   markCurrentFilePersisted: (fileName: string) => void;
   getExpectedFiles: () => number;
@@ -81,11 +86,11 @@ export const createReceiveSessionCoordinator = (
     const fileIndex = payload.fileIndex;
     const fileSize = payload.fileSize;
     const fileName = payload.fileName;
-    const { canUseNativeFs, usePreparedNativeWriter } = options.getFileStartPersistenceCapabilities(fileIndex);
+    const { canUseNativeFs, usePreparedNativeWriter, directSaveMode } = options.getFileStartPersistenceCapabilities(fileIndex);
     const persistenceStrategy = decidePersistenceStrategy({
       isIOS: options.isIOS,
       isSafari: options.isSafari,
-      preferBrowserDownload: options.preferBrowserDownload,
+      preferBrowserDownload: options.preferBrowserDownload || options.shouldStageFilesForArchive(),
       supportsNativeFs: canUseNativeFs,
       supportsStreamSaver: options.supportsStreamSaver,
       supportsIndexedDb: options.supportsIndexedDb(),
@@ -122,6 +127,7 @@ export const createReceiveSessionCoordinator = (
         fileSize,
         persistenceStrategy,
         usePreparedNativeWriter,
+        directSaveMode,
       });
     }
 
@@ -191,6 +197,15 @@ export const createReceiveSessionCoordinator = (
     }
 
     const currentFileName = options.getCurrentFileName();
+    if (options.shouldStageFilesForArchive()) {
+      const staged = await options.stageCurrentFileForArchive();
+      if (!staged) {
+        return;
+      }
+      options.markCurrentFilePersisted(currentFileName);
+      return;
+    }
+
     if (options.isStreaming() || options.isIndexedDbBuffering()) {
       await options.finalizeCurrentFilePersistence(currentFileName);
       return;
@@ -214,6 +229,14 @@ export const createReceiveSessionCoordinator = (
     if (expectedFiles > 0 && savedFiles < expectedFiles) {
       options.failTransferPersistence(`文件保存不完整（${savedFiles}/${expectedFiles}），请重试。`);
       return;
+    }
+
+    if (options.shouldStageFilesForArchive()) {
+      const exported = await options.finalizeArchiveDownload();
+      if (!exported) {
+        options.failTransferPersistence('多文件导出失败，请重试。');
+        return;
+      }
     }
 
     options.sendTransferProgress(0);

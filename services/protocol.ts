@@ -4,7 +4,7 @@ import {
   type NormalizedTransferMessage,
   type P2PMessage,
   type ResumePayload,
-} from '../types';
+} from '../types/index.ts';
 
 const DEFAULT_CHUNK_SIZE = 256 * 1024;
 

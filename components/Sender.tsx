@@ -1206,8 +1206,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   return;
               }
 
+              const msg = normalizeTransferMessage(incoming, TRANSFER_CONFIG.CHUNK_SIZE_WAN);
               const connectionId = connectionIdsRef.current.get(conn) ?? null;
-              if (isCommittedTransferMessageType(incoming.type)) {
+              if (isCommittedTransferMessageType(msg.type)) {
                   const disposition = getCommittedTransferDisposition({
                     connectionId,
                     peerId: conn.peer,
@@ -1218,12 +1219,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   if (disposition === 'reject') {
                     console.warn('[route-protocol-misuse]', {
                       role: 'sender',
-                      peerId: conn.peer,
-                      connectionId: connectionId || undefined,
-                      receiverSessionId: peerSessionIdsRef.current.get(conn.peer) || undefined,
-                      messageType: incoming.type,
-                      reason: 'non_committed_connection_sent_transfer_control',
-                    });
+                       peerId: conn.peer,
+                       connectionId: connectionId || undefined,
+                       receiverSessionId: peerSessionIdsRef.current.get(conn.peer) || undefined,
+                       messageType: msg.type,
+                       reason: 'non_committed_connection_sent_transfer_control',
+                     });
                     try {
                       if (conn.open) {
                         conn.close();
@@ -1232,8 +1233,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                     return;
                   }
               }
-              const msg = normalizeTransferMessage(incoming, TRANSFER_CONFIG.CHUNK_SIZE_WAN);
-
               if (msg.type === 'DEVICE_INFO') {
                   const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName : '';
                   updatePeerName(conn.peer, remoteName);

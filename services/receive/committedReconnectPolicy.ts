@@ -1,4 +1,4 @@
-import { TransferState } from '../../types';
+import { TransferState } from '../../types/index.ts';
 
 export const shouldAutoReconnectCommittedSession = (options: {
   currentState: TransferState;

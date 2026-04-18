@@ -7,7 +7,7 @@ test('prefers native fs for desktop when available', () => {
   const strategy = decidePersistenceStrategy({
     isIOS: false,
     isSafari: false,
-    preferBrowserDownload: true,
+    preferBrowserDownload: false,
     supportsNativeFs: true,
     supportsStreamSaver: true,
     supportsIndexedDb: true,
@@ -53,6 +53,21 @@ test('falls back to memory blob when no streaming path is available', () => {
     supportsNativeFs: false,
     supportsStreamSaver: false,
     supportsIndexedDb: false,
+    fileSize: 1024,
+    indexedDbThresholdBytes: 10 * 1024 * 1024,
+  });
+
+  assert.equal(strategy, 'memory-blob');
+});
+
+test('prefers browser staging over direct/native streaming when archive export mode is active', () => {
+  const strategy = decidePersistenceStrategy({
+    isIOS: false,
+    isSafari: false,
+    preferBrowserDownload: true,
+    supportsNativeFs: true,
+    supportsStreamSaver: true,
+    supportsIndexedDb: true,
     fileSize: 1024,
     indexedDbThresholdBytes: 10 * 1024 * 1024,
   });

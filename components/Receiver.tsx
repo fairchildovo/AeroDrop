@@ -58,6 +58,13 @@ import {
   type ReceiveStreamingTarget,
   type ReceiveStreamingWriter,
 } from '../services/receive/streamingWriter';
+import { createDirectorySaveSession } from '../services/receive/directorySaveSession';
+import { createReceivedFileManifest } from '../services/receive/receivedFileManifest';
+import { createArchiveExportSession } from '../services/receive/archiveExportSession';
+import {
+  resolveMultiFileSaveMode,
+  type ReceiveSaveMode,
+} from '../services/receive/saveCapabilityResolver';
 import {
   getOrCreateReceiverRouteSessionId,
   rotateReceiverRouteSessionId,
@@ -77,6 +84,20 @@ const sanitizeFileName = (name: string): string => {
     return `file_${Date.now()}`;
   }
   return cleaned;
+};
+
+const sanitizeRelativeReceivePath = (name: string): string => {
+  const normalized = name.replace(/\\/g, '/');
+  const parts = normalized
+    .split('/')
+    .map((part) => part.replace(/[\x00-\x1f]/g, '_').trim())
+    .filter((part) => part.length > 0 && part !== '.' && part !== '..');
+
+  if (parts.length === 0) {
+    return `file_${Date.now()}`;
+  }
+
+  return parts.join('/');
 };
 
 interface ReceiverProps {
@@ -234,6 +255,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receivePersistenceOrchestratorRef = useRef<ReceivePersistenceOrchestrator | null>(null);
   const receiveSessionCoordinatorRef = useRef<ReceiveSessionCoordinator | null>(null);
   const receiveStreamingWriterRef = useRef<ReceiveStreamingWriter | null>(null);
+  const directorySaveSessionRef = useRef(createDirectorySaveSession());
+  const receivedFileManifestRef = useRef(createReceivedFileManifest());
+  const archiveExportSessionRef = useRef(createArchiveExportSession());
+  const multiFileSaveModeRef = useRef<ReceiveSaveMode>('per-file-save-queue');
 
   if (!receiveStreamingWriterRef.current) {
     receiveStreamingWriterRef.current = createReceiveStreamingWriter({
@@ -862,8 +887,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       completedFileIndicesRef.current.add(currentFileIndexRef.current);
       receiveRecoveryCoordinatorRef.current?.clearRepairStateForFile(currentFileIndexRef.current);
       sendTransferProgress(lastReportedSpeedBytesRef.current);
+      if (multiFileSaveModeRef.current === 'directory-direct') {
+        receivedFileManifestRef.current.markSavedDirect(currentFileIndexRef.current, {
+          rootDirectoryName: directorySaveSessionRef.current.getRootDirectoryName(),
+          resolvedPath: fileName,
+          committedBytes: currentFileSizeRef.current,
+        });
+      }
       if (onNotification) {
-          onNotification(`文件 ${fileName} 已保存`, 'success');
+          const message =
+            multiFileSaveModeRef.current === 'archive-export'
+              ? `文件 ${fileName} 已接收，等待打包导出`
+              : `文件 ${fileName} 已保存`;
+          onNotification(message, 'success');
       }
   };
 
@@ -1082,6 +1118,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       setMetadata(meta);
       metadataRef.current = meta;
+      receivedFileManifestRef.current.seedFromMetadata(meta.files || []);
+      multiFileSaveModeRef.current = resolveMultiFileSaveMode({
+        fileCount: meta.files?.length ?? 0,
+        isIOS,
+        isSafari,
+        supportsDirectoryPicker: typeof window.showDirectoryPicker === 'function',
+        supportsArchiveExport: (meta.files?.length ?? 0) > 1,
+      }).mode;
       setTotalFiles(meta.files?.length || 0);
       setState(TransferState.PEER_CONNECTED);
       setCanResume(isResumable);
@@ -1104,9 +1148,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
     }
     else if (msg.type === 'FILE_START') {
+      const normalizedPath = sanitizeRelativeReceivePath(msg.payload.fileName || `file_${Date.now()}`);
+      receivedFileManifestRef.current.markReceiving(
+        msg.payload.fileIndex,
+        normalizedPath,
+        msg.payload.fileSize,
+        msg.payload.fileType
+      );
       await receiveSessionCoordinator.handleFileStart({
         ...msg.payload,
-        fileName: sanitizeFileName(msg.payload.fileName || `file_${Date.now()}`),
+        fileName: normalizedPath,
       });
     }
     else if (msg.type === 'FILE_COMPLETE') {
@@ -1477,6 +1528,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       receiveRecoveryCoordinator.reset();
       setEta('--');
       preparedNativeWriterFileIndexRef.current = null;
+      directorySaveSessionRef.current = createDirectorySaveSession();
+      receivedFileManifestRef.current.reset();
+      multiFileSaveModeRef.current = 'per-file-save-queue';
       receivePersistenceAdapter.reset();
       receivePersistenceOrchestrator.reset();
       writeQueueRef.current = Promise.resolve();
@@ -1488,17 +1542,34 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     fileSize,
     persistenceStrategy,
     usePreparedNativeWriter,
+    directSaveMode,
   }: {
     fileIndex: number;
     fileName: string;
     fileSize: number;
     persistenceStrategy: 'native-fs' | 'stream-saver' | 'indexeddb-buffer' | 'memory-blob';
     usePreparedNativeWriter: boolean;
+    directSaveMode: 'native-fs' | 'directory-direct' | 'none';
   }) => {
     if (usePreparedNativeWriter) {
       isStreamingRef.current = receiveStreamingWriter.isStreaming();
       preparedNativeWriterFileIndexRef.current = null;
       return;
+    }
+
+    if (persistenceStrategy === 'native-fs' && directSaveMode === 'directory-direct') {
+      try {
+        receiveStreamingWriter.attachTarget(
+          await directorySaveSessionRef.current.createStreamingTarget(fileName),
+          { committedBytes: 0 }
+        );
+        isStreamingRef.current = receiveStreamingWriter.isStreaming();
+        return;
+      } catch (error) {
+        console.warn('Directory direct save setup failed:', error);
+        receiveStreamingWriter.reset();
+        isStreamingRef.current = false;
+      }
     }
 
     if (persistenceStrategy === 'native-fs' && nativeFileHandleRef.current) {
@@ -1629,6 +1700,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       resetIndexedDbFileState: resetIndexedDbPersistedFileState,
       resetMemoryFileState,
       failTransferPersistence,
+      getArchiveEntries: () =>
+        receivedFileManifestRef.current.getStagedEntries().map((entry) => ({
+          relativePath: entry.relativePath,
+          fileName: entry.fileName,
+          blob: entry.stagedBlob!,
+        })),
+      stageCurrentFileForArchive: (entry) => {
+        receivedFileManifestRef.current.markStaged(entry.fileIndex, {
+          storageKind: entry.storageKind,
+          blob: entry.blob,
+        });
+      },
+      exportArchiveBlob: async (entries) => archiveExportSessionRef.current.exportZip(entries),
     });
   }
   const receivePersistenceAdapter = receivePersistenceAdapterRef.current!;
@@ -1675,15 +1759,22 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       getMetadataFileCount: () => metadataRef.current?.files?.length ?? 0,
       getFileStartPersistenceCapabilities: (fileIndex) => {
         const usePreparedNativeWriter = false;
+        const isMultiFile = (metadataRef.current?.files?.length ?? 0) > 1;
+        const directoryDirectActive =
+          isMultiFile && multiFileSaveModeRef.current === 'directory-direct';
         const canUseNativeFs =
-          !isIOS &&
-          !isSafari &&
-          !!window.showSaveFilePicker &&
-          (metadataRef.current?.files?.length ?? 0) === 1 &&
-          !!nativeFileHandleRef.current;
+          directoryDirectActive ||
+          (
+            !isIOS &&
+            !isSafari &&
+            !!window.showSaveFilePicker &&
+            (metadataRef.current?.files?.length ?? 0) === 1 &&
+            !!nativeFileHandleRef.current
+          );
         return {
           canUseNativeFs,
           usePreparedNativeWriter,
+          directSaveMode: directoryDirectActive ? 'directory-direct' : canUseNativeFs ? 'native-fs' : 'none',
         };
       },
       supportsIndexedDb: isIndexedDbSupported,
@@ -1713,6 +1804,35 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       prepareFilePersistenceTarget,
       setCurrentFileState: setCurrentFileTransferState,
       resetFileHasher: resetHasherForRepair,
+      shouldStageFilesForArchive: () => multiFileSaveModeRef.current === 'archive-export',
+      stageCurrentFileForArchive: async () => {
+        if (isIndexedDbBufferingRef.current && indexedDbBatchBytesRef.current > 0) {
+          const batch = indexedDbBatchRef.current;
+          const size = indexedDbBatchBytesRef.current;
+          const fileIndex = currentFileIndexRef.current;
+          indexedDbBatchRef.current = [];
+          indexedDbBatchBytesRef.current = 0;
+          await enqueueWrite(async () => {
+            if (size > 0) {
+              await flushIndexedDbBatch(fileIndex, batch, size);
+            }
+          });
+        }
+
+        return receivePersistenceAdapter.stageCurrentFileForArchive();
+      },
+      finalizeArchiveDownload: async () => {
+        const result = await receivePersistenceAdapter.saveReceivedFiles({
+          archiveName: `aerodrop-${Date.now().toString(36)}`,
+          files: receivedFileManifestRef.current.getStagedEntries().map((entry) => ({
+            relativePath: entry.relativePath,
+            downloadName: entry.fileName,
+            open: async () => entry.stagedBlob!,
+          })),
+        });
+
+        return result.mode === 'archive-export' || result.mode === 'per-file-save-queue';
+      },
       getCurrentFileIndex: () => currentFileIndexRef.current,
       getCurrentFileName: () => currentFileNameRef.current,
       getCurrentFileSize: () => currentFileSizeRef.current,
@@ -2032,9 +2152,38 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const acceptTransfer = async () => {
     if (connRef.current?.open) {
       resetStateForNewTransfer();
+      if (metadataRef.current?.files) {
+        receivedFileManifestRef.current.seedFromMetadata(metadataRef.current.files);
+      }
       isTransferActiveRef.current = true;
       preparedNativeWriterFileIndexRef.current = null;
       nativeFileHandleRef.current = null;
+      const multiFileResolution = resolveMultiFileSaveMode({
+        fileCount: metadataRef.current?.files?.length ?? 0,
+        isIOS,
+        isSafari,
+        supportsDirectoryPicker: typeof window.showDirectoryPicker === 'function',
+        supportsArchiveExport: (metadataRef.current?.files?.length ?? 0) > 1,
+      });
+      multiFileSaveModeRef.current = multiFileResolution.mode;
+
+      if (multiFileResolution.shouldPromptForDirectory && window.showDirectoryPicker) {
+        try {
+          const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+          directorySaveSessionRef.current.attachRootDirectory(directoryHandle);
+          multiFileSaveModeRef.current = 'directory-direct';
+          if (onNotification) {
+            onNotification('已选择保存目录，将按原始目录结构直接写入。', 'success');
+          }
+        } catch {
+          multiFileSaveModeRef.current = multiFileResolution.supportsArchiveExport
+            ? 'archive-export'
+            : 'per-file-save-queue';
+          if (onNotification) {
+            onNotification('未授予目录保存权限，将回退到浏览器导出模式。', 'info');
+          }
+        }
+      }
 
       if (
         !isIOS &&
@@ -2060,9 +2209,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         }
       } else if (isIOS || isSafari) {
           isStreamingRef.current = false;
-          if (onNotification) onNotification("iOS 模式：文件将在传输完成后保存", 'info');
+          if (onNotification) onNotification("iOS 模式：文件将在传输完成后导出保存", 'info');
       } else if (onNotification) {
-          onNotification("当前将优先尝试流式写入备用模式；若不可用则回退到浏览器保存。", 'info');
+          if ((metadataRef.current?.files?.length ?? 0) > 1 && multiFileSaveModeRef.current === 'archive-export') {
+            onNotification("当前浏览器将先稳定接收，再自动打包导出。", 'info');
+          } else {
+            onNotification("当前将优先尝试流式写入备用模式；若不可用则回退到浏览器保存。", 'info');
+          }
       }
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });

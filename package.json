@@ -2,18 +2,26 @@
   "name": "aerodrop",
   "private": true,
   "version": "0.0.0",
+  "packageManager": "npm@10.8.2",
   "type": "module",
+  "engines": {
+    "node": "18.20.8",
+    "npm": "10.8.2"
+  },
   "scripts": {
     "dev": "vite",
     "dev:worker": "wrangler dev --config wrangler.jsonc",
     "build": "vite build",
     "preview": "npm run build && wrangler dev --config wrangler.jsonc",
-    "test:receive": "node --test services/receive/*.test.ts",
+    "test:receive": "node ./scripts/run-node-tests.mjs services/receive",
+    "test:send": "node ./scripts/run-node-tests.mjs services/send",
+    "test:services": "node ./scripts/run-node-tests.mjs services",
     "typecheck": "tsc --noEmit",
     "deploy": "npm run build && wrangler deploy --config wrangler.jsonc",
     "deploy:worker": "npm run deploy"
   },
   "dependencies": {
+    "@zip.js/zip.js": "^2.8.26",
     "lucide-react": "^0.555.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -30,6 +38,7 @@
     "@types/streamsaver": "^2.0.5",
     "@vitejs/plugin-react": "^5.0.0",
     "tailwindcss": "^4.1.18",
+    "tsx": "^4.20.6",
     "typescript": "~5.8.2",
     "vite": "^6.2.0",
     "wrangler": "^4.80.0"

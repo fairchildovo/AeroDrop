@@ -61,7 +61,7 @@ const createHarness = () => {
         peerId: conn.peer,
         receiverSessionId,
         selectedKind,
-        replacedConnectionId,
+        ...(replacedConnectionId ? { replacedConnectionId } : {}),
       });
     },
   });

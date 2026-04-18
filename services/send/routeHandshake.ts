@@ -96,12 +96,13 @@ export const createSenderRouteHandshakeHandler = <TConn extends SenderRouteHands
           payload: { deviceName: options.deviceName },
         });
         conn.send({ type: 'METADATA', payload: options.metadata });
-        options.onRouteCommitted?.({
+        const committedArgs = {
           conn,
           receiverSessionId: msg.payload.receiverSessionId,
           selectedKind: msg.payload.selectedKind,
-          replacedConnectionId,
-        });
+          ...(replacedConnectionId ? { replacedConnectionId } : {}),
+        };
+        options.onRouteCommitted?.(committedArgs);
       } catch (error) {
         console.error('Failed to send committed route metadata', error);
       }

@@ -1,4 +1,4 @@
-import type { RouteAttemptKind } from '../types';
+import type { RouteAttemptKind } from '../types/index.ts';
 
 export type RouteSelectionContext = {
   isMobileDevice: boolean;
