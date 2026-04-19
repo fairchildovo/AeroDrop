@@ -8,37 +8,14 @@ import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
+import {
+  getInitialRouteState,
+  type InitialRouteState,
+  type Mode,
+} from './services/initialRouteState';
 import { appendNetworkProfileQuery, getBrowserNetworkProfile } from './services/networkProfile';
+import { writeScreenShareViewSession } from './services/screenShareViewerSession';
 import { logDebug } from './services/diagnostics';
-
-type Mode = 'send' | 'receive' | 'screen';
-
-type InitialRouteState = {
-  code: string;
-  hadDeepLink: boolean;
-  mode: Mode;
-  viewId: string;
-};
-
-const getInitialRouteState = (): InitialRouteState => {
-  if (typeof window === 'undefined') {
-    return { mode: 'send', code: '', viewId: '', hadDeepLink: false };
-  }
-
-  const params = new URLSearchParams(window.location.search);
-  const code = params.get('code') ?? '';
-  const viewId = params.get('view') ?? '';
-
-  if (code) {
-    return { mode: 'receive', code, viewId: '', hadDeepLink: true };
-  }
-
-  if (viewId) {
-    return { mode: 'screen', code: '', viewId, hadDeepLink: true };
-  }
-
-  return { mode: 'send', code: '', viewId: '', hadDeepLink: false };
-};
 
 type IdleCapableWindow = Window & {
   cancelIdleCallback?: (handle: number) => void;
@@ -285,6 +262,17 @@ const App: React.FC = () => {
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, [initialRoute.hadDeepLink]);
+
+  useEffect(() => {
+    if (initialRoute.mode !== 'screen' || !initialRoute.viewId) {
+      return;
+    }
+
+    writeScreenShareViewSession(
+      (key, value) => window.sessionStorage.setItem(key, value),
+      initialRoute.viewId,
+    );
+  }, [initialRoute.mode, initialRoute.viewId]);
 
   useEffect(() => {
     // Touch/coarse-pointer devices don't benefit from mouse glow tracking.

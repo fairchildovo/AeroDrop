@@ -6,6 +6,10 @@ import {
   getScreenShareBrowserProfile,
   shouldEnableLayeredScreenShareEncoding,
 } from '../services/screenShareCompatibility';
+import {
+  clearScreenShareViewSession,
+  writeScreenShareViewSession,
+} from '../services/screenShareViewerSession';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
 import { logDebug } from '../services/diagnostics';
 
@@ -102,6 +106,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }),
     [],
   );
+
+  const persistViewerSession = useCallback((sharerId: string) => {
+    if (typeof window === 'undefined') return;
+    writeScreenShareViewSession(
+      (key, value) => window.sessionStorage.setItem(key, value),
+      sharerId,
+    );
+  }, []);
+
+  const clearPersistedViewerSession = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    clearScreenShareViewSession((key) => window.sessionStorage.removeItem(key));
+  }, []);
 
   const getAggregateQualityLevel = useCallback((): 'high' | 'medium' | 'low' => {
     const levels = Array.from(peerQualityLevelRef.current.values());
@@ -994,22 +1011,24 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     // 只有手动停止时才清除目标ID，方便重连
     if (isManual) {
+      clearPersistedViewerSession();
       setTargetSharerId(null);
       setError(null);
       reconnectAttemptsRef.current = 0;
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
     }
-  }, []);
+  }, [clearPersistedViewerSession]);
 
   const handleRemoteShareEnded = useCallback((reason = '共享已结束') => {
     if (remoteShareEndHandledRef.current) return;
     remoteShareEndHandledRef.current = true;
     remoteShareEndedRef.current = true;
+    clearPersistedViewerSession();
     stopViewing(false);
     setError(reason);
     onNotification(reason, 'info');
-  }, [onNotification, stopViewing]);
+  }, [clearPersistedViewerSession, onNotification, stopViewing]);
 
 
   const connectToSharer = useCallback(async (sharerId: string, isRetry = false) => {
@@ -1035,6 +1054,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setIsConnecting(true);
     setViewerConnectingStage('fetching_ice');
     setTargetSharerId(sharerId);
+    persistViewerSession(sharerId);
 
     // 设置全局连接超时（弱网场景下放宽）
     // 如果超时内没有建立连接（没有进入 isViewing 状态），则判定失败
@@ -1260,7 +1280,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       setIsConnecting(false);
     });
-  }, [onNotification, stopViewing, handleRemoteShareEnded]);
+  }, [onNotification, stopViewing, handleRemoteShareEnded, persistViewerSession]);
 
 
   const cancelConnecting = useCallback(() => {
@@ -1600,6 +1620,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       cancelConnecting={cancelConnecting}
       retryConnection={retryConnection}
       dismissConnectionError={() => {
+        clearPersistedViewerSession();
         setTargetSharerId(null);
         setError(null);
       }}
