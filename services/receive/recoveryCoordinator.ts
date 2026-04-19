@@ -12,6 +12,7 @@ export interface ReceiveRecoveryCoordinatorOptions {
   setTransferActive: (active: boolean) => void;
   getCurrentFileIndex: () => number;
   getReceivedSize: () => number;
+  getCommittedStreamBytes?: () => number;
   isFileCompleted: (fileIndex: number) => boolean;
   hasRetainedCurrentFileData: (fileIndex: number) => boolean;
   flushPendingStreamWrites: () => Promise<boolean>;
@@ -157,9 +158,12 @@ export const createReceiveRecoveryCoordinator = (
       byteOffset = receivedSize;
       canResumeCurrentFile = byteOffset > 0;
     } else if (receivedSize > 0) {
-      const reopened = await options.reopenNativeWriterForResume(currentIdx, receivedSize);
+      const durableOffset = typeof options.getCommittedStreamBytes === 'function'
+        ? Math.max(0, Math.min(receivedSize, options.getCommittedStreamBytes()))
+        : receivedSize;
+      const reopened = await options.reopenNativeWriterForResume(currentIdx, durableOffset);
       if (reopened) {
-        byteOffset = receivedSize;
+        byteOffset = durableOffset;
         canResumeCurrentFile = byteOffset > 0;
       }
     }

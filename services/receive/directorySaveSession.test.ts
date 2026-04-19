@@ -6,6 +6,7 @@ import { createDirectorySaveSession } from './directorySaveSession.ts';
 class MockWritableFileStream {
   readonly writes: Uint8Array[] = [];
   readonly truncates: number[] = [];
+  readonly seeks: number[] = [];
   closed = false;
 
   async write(data: BufferSource | Blob | string | Uint8Array) {
@@ -33,6 +34,10 @@ class MockWritableFileStream {
     this.truncates.push(size);
   }
 
+  async seek(position: number) {
+    this.seeks.push(position);
+  }
+
   async close() {
     this.closed = true;
   }
@@ -41,12 +46,14 @@ class MockWritableFileStream {
 class MockFileHandle {
   lastWritable: MockWritableFileStream | null = null;
   currentSize = 0;
+  lastCreateWritableOptions: unknown = null;
 
   constructor(public readonly name: string) {}
 
-  async createWritable() {
+  async createWritable(options?: unknown) {
     const writable = new MockWritableFileStream();
     this.lastWritable = writable;
+    this.lastCreateWritableOptions = options ?? null;
     return writable;
   }
 
@@ -143,4 +150,26 @@ test('creates a native-fs streaming target for a resolved file', async () => {
   );
   assert.deepEqual(reportHandle.lastWritable?.truncates, [0]);
   assert.equal(reportHandle.lastWritable?.closed, true);
+});
+
+test('reopens a streaming target with existing data preserved and seeks to the resume offset', async () => {
+  const root = new MockDirectoryHandle('root');
+  const session = createDirectorySaveSession({
+    rootDirectoryHandle: root as unknown as FileSystemDirectoryHandle,
+  });
+
+  const target = await (session as any).createStreamingTarget('docs/report.txt', {
+    keepExistingData: true,
+    startOffset: 5,
+  });
+  await target.write(new Uint8Array([6, 7]));
+
+  const reportHandle = root.directories.get('docs')?.files.get('report.txt') as MockFileHandle;
+
+  assert.deepEqual(reportHandle.lastCreateWritableOptions, { keepExistingData: true });
+  assert.deepEqual(reportHandle.lastWritable?.seeks, [5]);
+  assert.deepEqual(
+    reportHandle.lastWritable?.writes.map((chunk) => Array.from(chunk)),
+    [[6, 7]]
+  );
 });

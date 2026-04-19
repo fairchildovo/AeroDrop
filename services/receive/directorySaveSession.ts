@@ -2,6 +2,7 @@ import { type ReceiveStreamingTarget } from './streamingWriter.ts';
 
 export interface DirectorySaveSessionWritableFileStream {
   write: (data: BufferSource | Blob | string | Uint8Array) => Promise<void>;
+  seek?: (position: number) => Promise<void>;
   truncate: (size: number) => Promise<void>;
   close: () => Promise<void>;
 }
@@ -46,7 +47,13 @@ export interface DirectorySaveSession {
   getRootDirectoryName: () => string;
   resolveFile: (relativePath: string) => Promise<DirectorySaveSessionResolvedFile>;
   resolveFileHandle: (relativePath: string) => Promise<LegacyResolvedFileHandle>;
-  createStreamingTarget: (relativePath: string) => Promise<ReceiveStreamingTarget>;
+  createStreamingTarget: (
+    relativePath: string,
+    options?: {
+      keepExistingData?: boolean;
+      startOffset?: number;
+    }
+  ) => Promise<ReceiveStreamingTarget>;
 }
 
 const CONTROL_CHARACTERS = /[\x00-\x1f]/;
@@ -225,7 +232,7 @@ export const createDirectorySaveSession = (options?: {
       };
     },
 
-    createStreamingTarget: async (relativePath) => {
+    createStreamingTarget: async (relativePath, options) => {
       const resolved = await resolver.resolveNormalizedPath(
         normalizeStrictRelativePath(relativePath).join('/')
       );
@@ -234,7 +241,17 @@ export const createDirectorySaveSession = (options?: {
         throw new Error('DIRECTORY_SAVE_TARGET_UNWRITABLE');
       }
 
-      const writable = await resolved.fileHandle.createWritable();
+      const writable = await resolved.fileHandle.createWritable({
+        keepExistingData: options?.keepExistingData === true,
+      });
+      const resumeOffset = Math.max(0, options?.startOffset ?? 0);
+
+      if (resumeOffset > 0) {
+        if (typeof writable.seek !== 'function') {
+          throw new Error('DIRECTORY_SAVE_TARGET_UNSEEKABLE');
+        }
+        await writable.seek(resumeOffset);
+      }
 
       return {
         kind: 'native-fs',

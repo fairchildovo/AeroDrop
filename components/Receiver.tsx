@@ -948,26 +948,49 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const reopenNativeWriterForResume = async (targetFileIndex: number, byteOffset: number): Promise<boolean> => {
+    const reopenStreamingTarget = async (
+      factory: (resumeOffset: number) => Promise<ReceiveStreamingTarget>
+    ): Promise<boolean> => {
+      try {
+        const reopened = await receiveStreamingWriter.reopenForResume(factory, byteOffset);
+        isStreamingRef.current = receiveStreamingWriter.isStreaming();
+        preparedNativeWriterFileIndexRef.current = reopened ? targetFileIndex : null;
+        return reopened;
+      } catch (error) {
+        console.warn('Failed to reopen writer for resume:', error);
+        receiveStreamingWriter.reset();
+        isStreamingRef.current = false;
+        return false;
+      }
+    };
+
+    if (multiFileSaveModeRef.current === 'directory-direct') {
+      const relativePath =
+        currentFileIndexRef.current === targetFileIndex
+          ? currentFileNameRef.current
+          : sanitizeRelativeReceivePath(
+              metadataRef.current?.files?.[targetFileIndex]?.name || `file_${Date.now()}`
+            );
+      if (!relativePath) return false;
+
+      return reopenStreamingTarget((resumeOffset) =>
+        directorySaveSessionRef.current.createStreamingTarget(relativePath, {
+          keepExistingData: true,
+          startOffset: resumeOffset,
+        })
+      );
+    }
+
     const handle = nativeFileHandleRef.current;
     if (!handle) return false;
     const meta = metadataRef.current;
     if (!meta || meta.files.length !== 1 || targetFileIndex !== 0) return false;
 
-    try {
-      const reopened = await receiveStreamingWriter.reopenForResume(async (resumeOffset) => {
+    return reopenStreamingTarget(async (resumeOffset) => {
         const writable = await handle.createWritable({ keepExistingData: true });
         await writable.seek(resumeOffset);
         return createNativeStreamingTarget(handle, writable);
-      }, byteOffset);
-      isStreamingRef.current = receiveStreamingWriter.isStreaming();
-      preparedNativeWriterFileIndexRef.current = reopened ? targetFileIndex : null;
-      return reopened;
-    } catch (error) {
-      console.warn('Failed to reopen native writer for resume:', error);
-      receiveStreamingWriter.reset();
-      isStreamingRef.current = false;
-      return false;
-    }
+      });
   };
 
   const hasRetainedCurrentFileData = (fileIndex: number): boolean => {
@@ -1669,6 +1692,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       },
       getCurrentFileIndex: () => currentFileIndexRef.current,
       getReceivedSize: () => receivedSizeRef.current,
+      getCommittedStreamBytes: () => receiveStreamingWriter.getCommittedBytes(),
       isFileCompleted: (fileIndex) => completedFileIndicesRef.current.has(fileIndex),
       hasRetainedCurrentFileData,
       flushPendingStreamWrites,
