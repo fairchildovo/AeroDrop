@@ -65,6 +65,8 @@ import {
   resolveMultiFileSaveMode,
   type ReceiveSaveMode,
 } from '../services/receive/saveCapabilityResolver';
+import { createSerialAsyncProcessor } from '../services/receive/serialAsyncProcessor';
+import { createSessionDirectoryHandleCache } from '../services/receive/sessionDirectoryHandleCache';
 import {
   getOrCreateReceiverRouteSessionId,
   rotateReceiverRouteSessionId,
@@ -259,6 +261,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receivedFileManifestRef = useRef(createReceivedFileManifest());
   const archiveExportSessionRef = useRef(createArchiveExportSession());
   const multiFileSaveModeRef = useRef<ReceiveSaveMode>('per-file-save-queue');
+  const incomingDataProcessorRef = useRef(createSerialAsyncProcessor());
+  const sessionDirectoryHandleCacheRef = useRef(createSessionDirectoryHandleCache());
 
   if (!receiveStreamingWriterRef.current) {
     receiveStreamingWriterRef.current = createReceiveStreamingWriter({
@@ -1294,101 +1298,105 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       );
     };
 
-    conn.on('data', async (data: any) => {
-      if (data == null) return;
+    conn.on('data', (data: any) => {
+      void incomingDataProcessorRef.current.enqueue(async () => {
+        if (data == null) return;
 
-      const currentState = stateRef.current;
-      if (!isTransferActiveRef.current && currentState !== TransferState.IDLE && currentState !== TransferState.WAITING_FOR_PEER && currentState !== TransferState.PEER_CONNECTED) {
-          return;
-      }
-
-      const isBinary = data instanceof ArrayBuffer || (data.constructor && data.constructor.name === 'ArrayBuffer') || ArrayBuffer.isView(data);
-
-      if (isBinary) {
-         if (connRef.current !== conn) {
-           return;
-         }
-         if (!await receivePersistenceOrchestrator.awaitPendingFileFinalize('binary_chunk')) return;
-         if (!isTransferActiveRef.current) return;
- 
-         const chunkData = ((): ArrayBuffer => {
-              if (ArrayBuffer.isView(data)) {
-                  const view = data as ArrayBufferView;
-                 return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-             }
-             return data as ArrayBuffer;
-         })();
-         const byteLength = chunkData.byteLength;
-
-          if (byteLength > 0) {
-              receivedChunksCountRef.current++;
-              receivedSizeRef.current += byteLength;
-              try {
-                getFileHasher().update(new Uint8Array(chunkData));
-              } catch {
-                failTransferPersistence("文件校验计算失败，请重试传输。");
-                return;
-              }
-             hashedBytesRef.current += byteLength;
-             
-             if (isStreamingRef.current) {
-                 void receiveStreamingWriter.enqueueChunk(new Uint8Array(chunkData)).catch((error) => {
-                   void handleStreamingWriteFailure(error);
-                 });
-             } else if (isIndexedDbBufferingRef.current) {
-                 indexedDbBatchRef.current.push(chunkData);
-                 indexedDbBatchBytesRef.current += byteLength;
-
-                 if (indexedDbBatchBytesRef.current >= BUFFER_FLUSH_THRESHOLD) {
-                     const fileIndexForBatch = currentFileIndexRef.current;
-                     const batch = indexedDbBatchRef.current;
-                     const batchSize = indexedDbBatchBytesRef.current;
-
-                     indexedDbBatchRef.current = [];
-                     indexedDbBatchBytesRef.current = 0;
-
-                     writeQueueRef.current = writeQueueRef.current.then(() => flushIndexedDbBatch(fileIndexForBatch, batch, batchSize));
-                 }
-              } else {
-                  chunksRef.current.push(chunkData);
-              }
-          }
-          return;
-      }
-
-      const msg = data as P2PMessage;
-
-      if (msg.type === 'ROUTE_READY') {
-        await handleRouteReady(msg);
-        return;
-      }
-
-      if (connRef.current !== conn) {
-        if (isRouteAttemptTransferControlMessage(msg.type)) {
-          const disposition = getNonWinningRouteMessageDisposition({
-            winnerCommitted: happyEyeballsWonRef.current,
-            messageType: msg.type,
-          });
-
-          if (disposition === 'buffer') {
-            bufferRouteMessage(attemptId, msg);
-          } else {
-            console.warn('[route-protocol-misuse]', {
-              role: 'receiver',
-              receiverSessionId: receiverSessionIdRef.current,
-              attemptId,
-              attemptKind,
-              peerId: conn.peer,
-              messageType: msg.type,
-              reason: 'losing_route_received_transfer_control',
-            });
-            closeRouteAttempt(attemptId, 'lost_race');
-          }
+        const currentState = stateRef.current;
+        if (!isTransferActiveRef.current && currentState !== TransferState.IDLE && currentState !== TransferState.WAITING_FOR_PEER && currentState !== TransferState.PEER_CONNECTED) {
+            return;
         }
-        return;
-      }
 
-      await handleIncomingMessage(conn, msg);
+        const isBinary = data instanceof ArrayBuffer || (data.constructor && data.constructor.name === 'ArrayBuffer') || ArrayBuffer.isView(data);
+
+        if (isBinary) {
+           if (connRef.current !== conn) {
+             return;
+           }
+           if (!await receivePersistenceOrchestrator.awaitPendingFileFinalize('binary_chunk')) return;
+           if (!isTransferActiveRef.current) return;
+   
+           const chunkData = ((): ArrayBuffer => {
+                if (ArrayBuffer.isView(data)) {
+                    const view = data as ArrayBufferView;
+                   return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+               }
+               return data as ArrayBuffer;
+           })();
+           const byteLength = chunkData.byteLength;
+
+            if (byteLength > 0) {
+                receivedChunksCountRef.current++;
+                receivedSizeRef.current += byteLength;
+                try {
+                  getFileHasher().update(new Uint8Array(chunkData));
+                } catch {
+                  failTransferPersistence("文件校验计算失败，请重试传输。");
+                  return;
+                }
+               hashedBytesRef.current += byteLength;
+               
+               if (isStreamingRef.current) {
+                   void receiveStreamingWriter.enqueueChunk(new Uint8Array(chunkData)).catch((error) => {
+                     void handleStreamingWriteFailure(error);
+                   });
+               } else if (isIndexedDbBufferingRef.current) {
+                   indexedDbBatchRef.current.push(chunkData);
+                   indexedDbBatchBytesRef.current += byteLength;
+
+                   if (indexedDbBatchBytesRef.current >= BUFFER_FLUSH_THRESHOLD) {
+                       const fileIndexForBatch = currentFileIndexRef.current;
+                       const batch = indexedDbBatchRef.current;
+                       const batchSize = indexedDbBatchBytesRef.current;
+
+                       indexedDbBatchRef.current = [];
+                       indexedDbBatchBytesRef.current = 0;
+
+                       writeQueueRef.current = writeQueueRef.current.then(() => flushIndexedDbBatch(fileIndexForBatch, batch, batchSize));
+                   }
+                } else {
+                    chunksRef.current.push(chunkData);
+                }
+            }
+            return;
+        }
+
+        const msg = data as P2PMessage;
+
+        if (msg.type === 'ROUTE_READY') {
+          await handleRouteReady(msg);
+          return;
+        }
+
+        if (connRef.current !== conn) {
+          if (isRouteAttemptTransferControlMessage(msg.type)) {
+            const disposition = getNonWinningRouteMessageDisposition({
+              winnerCommitted: happyEyeballsWonRef.current,
+              messageType: msg.type,
+            });
+
+            if (disposition === 'buffer') {
+              bufferRouteMessage(attemptId, msg);
+            } else {
+              console.warn('[route-protocol-misuse]', {
+                role: 'receiver',
+                receiverSessionId: receiverSessionIdRef.current,
+                attemptId,
+                attemptKind,
+                peerId: conn.peer,
+                messageType: msg.type,
+                reason: 'losing_route_received_transfer_control',
+              });
+              closeRouteAttempt(attemptId, 'lost_race');
+            }
+          }
+          return;
+        }
+
+        await handleIncomingMessage(conn, msg);
+      }).catch((error) => {
+        console.warn('Receive message processing failed:', error);
+      });
     });
 
     conn.on('close', () => {
@@ -1531,6 +1539,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       directorySaveSessionRef.current = createDirectorySaveSession();
       receivedFileManifestRef.current.reset();
       multiFileSaveModeRef.current = 'per-file-save-queue';
+      incomingDataProcessorRef.current.reset();
       receivePersistenceAdapter.reset();
       receivePersistenceOrchestrator.reset();
       writeQueueRef.current = Promise.resolve();
@@ -2168,19 +2177,30 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       multiFileSaveModeRef.current = multiFileResolution.mode;
 
       if (multiFileResolution.shouldPromptForDirectory && window.showDirectoryPicker) {
-        try {
-          const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-          directorySaveSessionRef.current.attachRootDirectory(directoryHandle);
+        const rememberedHandle = await sessionDirectoryHandleCacheRef.current.getReusableHandle();
+
+        if (rememberedHandle) {
+          directorySaveSessionRef.current.attachRootDirectory(rememberedHandle);
           multiFileSaveModeRef.current = 'directory-direct';
           if (onNotification) {
-            onNotification('已选择保存目录，将按原始目录结构直接写入。', 'success');
+            onNotification('继续使用当前会话已授权的保存目录。', 'info');
           }
-        } catch {
-          multiFileSaveModeRef.current = multiFileResolution.supportsArchiveExport
-            ? 'archive-export'
-            : 'per-file-save-queue';
-          if (onNotification) {
-            onNotification('未授予目录保存权限，将回退到浏览器导出模式。', 'info');
+        } else {
+          try {
+            const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+            sessionDirectoryHandleCacheRef.current.remember(directoryHandle);
+            directorySaveSessionRef.current.attachRootDirectory(directoryHandle);
+            multiFileSaveModeRef.current = 'directory-direct';
+            if (onNotification) {
+              onNotification('已选择保存目录，将按原始目录结构直接写入。', 'success');
+            }
+          } catch {
+            multiFileSaveModeRef.current = multiFileResolution.supportsArchiveExport
+              ? 'archive-export'
+              : 'per-file-save-queue';
+            if (onNotification) {
+              onNotification('未授予目录保存权限，将回退到浏览器导出模式。', 'info');
+            }
           }
         }
       }
