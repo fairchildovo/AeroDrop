@@ -1,6 +1,11 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { loadPeerRuntime, type Peer, type MediaConnection, type DataConnection } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
+import {
+  getPreferredScreenShareCodecOrder,
+  getScreenShareBrowserProfile,
+  shouldEnableLayeredScreenShareEncoding,
+} from '../services/screenShareCompatibility';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
 import { logDebug } from '../services/diagnostics';
 
@@ -67,10 +72,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 观看者端：连接过程的全局超时定时器
   const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-
-  const audioContextRef = useRef<AudioContext | null>(null);
-
-
   const bandwidthMonitorsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
 
 
@@ -91,6 +92,16 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     medium: '高清',
     low: '流畅',
   }), []);
+
+  const browserProfile = useMemo(
+    () =>
+      getScreenShareBrowserProfile({
+        userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+        platform: typeof navigator === 'undefined' ? '' : navigator.platform,
+        maxTouchPoints: typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints,
+      }),
+    [],
+  );
 
   const getAggregateQualityLevel = useCallback((): 'high' | 'medium' | 'low' => {
     const levels = Array.from(peerQualityLevelRef.current.values());
@@ -230,14 +241,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     if (typeof RTCRtpReceiver === 'undefined' || typeof RTCRtpReceiver.getCapabilities !== 'function') return;
     const caps = RTCRtpReceiver.getCapabilities('video');
     if (!caps?.codecs?.length) return;
+    const preferredOrder = getPreferredScreenShareCodecOrder(browserProfile).map((codec) => codec.toLowerCase());
 
     const rankCodec = (mimeType: string) => {
       const mt = mimeType.toLowerCase();
-      if (mt.includes('av1')) return 0;
-      if (mt.includes('vp9')) return 1;
-      if (mt.includes('h264')) return 2;
-      if (mt.includes('vp8')) return 3;
-      return 4;
+      const preferredIndex = preferredOrder.indexOf(mt);
+      return preferredIndex === -1 ? preferredOrder.length : preferredIndex;
     };
 
     const sorted = [...caps.codecs].sort((a, b) => rankCodec(a.mimeType) - rankCodec(b.mimeType));
@@ -251,7 +260,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         logDebug('warn', 'setCodecPreferences failed:', err);
       }
     });
-  }, []);
+  }, [browserProfile]);
 
 
   const applyBitrateConstraints = useCallback(async (
@@ -331,6 +340,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [bitrateLimits, qualityCaptureConstraints]);
 
   const configureAdaptiveVideoLayers = useCallback(async (call: MediaConnection) => {
+    if (!shouldEnableLayeredScreenShareEncoding(browserProfile)) {
+      peerLayerModeRef.current.set(call.peer, 'single');
+      return;
+    }
     const pc = call.peerConnection;
     if (!pc) return;
     const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
@@ -383,7 +396,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
 
     peerLayerModeRef.current.set(call.peer, mode);
-  }, []);
+  }, [browserProfile]);
 
 
   useEffect(() => {
@@ -924,68 +937,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
 
-  const createDummyStream = useCallback(() => {
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch((error) => {
-        logDebug('warn', 'Failed to close audio context', error);
-      });
-      audioContextRef.current = null;
-    }
-
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 1;
-    canvas.height = 1;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, 1, 1);
-    }
-    // Keep placeholder stream alive with a reasonable frame cadence to avoid
-    // strict clients treating an ultra-low-FPS pre-negotiation stream as stalled.
-    const videoStream = canvas.captureStream(15);
-
-
-
-    const audioContext = new AudioContext();
-    audioContextRef.current = audioContext;
-
-    const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
-
-
-    gainNode.gain.value = 0;
-
-
-    const destination = audioContext.createMediaStreamDestination();
-    oscillator.connect(gainNode);
-    gainNode.connect(destination);
-
-
-    oscillator.start();
-
-
-    const combinedStream = new MediaStream();
-
-
-    videoStream.getVideoTracks().forEach(track => {
-      combinedStream.addTrack(track);
-    });
-
-
-    destination.stream.getAudioTracks().forEach(track => {
-      combinedStream.addTrack(track);
-    });
-
-      logDebug('log', 'Created dummy stream with tracks:', {
-      video: combinedStream.getVideoTracks().length,
-      audio: combinedStream.getAudioTracks().length
-    });
-
-    return combinedStream;
-  }, []);
-
   const broadcastShareEnded = useCallback((reason: 'stopped' | 'window_closed' = 'stopped') => {
     activeDataConnectionsRef.current.forEach((conn) => {
       if (!conn.open) return;
@@ -1161,10 +1112,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
       // 2. 建立媒体连接
-      const dummyStream = createDummyStream();
-
-
-      const call = peer.call(sharerId, dummyStream);
+      const call = peer.call(sharerId);
 
       if (!call) {
         setError('无法发起连接，请检查连接 ID');
@@ -1312,7 +1260,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       setIsConnecting(false);
     });
-  }, [onNotification, createDummyStream, stopViewing, handleRemoteShareEnded]);
+  }, [onNotification, stopViewing, handleRemoteShareEnded]);
 
 
   const cancelConnecting = useCallback(() => {
@@ -1382,6 +1330,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
     videoRef.current = video;
+    video.setAttribute('webkit-playsinline', 'true');
+    video.playsInline = true;
 
     const stream = streamRef.current;
     if (!stream) {
@@ -1394,6 +1344,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     logDebug('log', 'Callback ref: Attaching stream to video element...');
     video.srcObject = stream;
+    video.defaultMuted = true;
     video.muted = true;
 
     video.play()
@@ -1428,12 +1379,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
-      }
-
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch((error) => {
-          logDebug('warn', 'Failed to close audio context', error);
-        });
       }
 
       activeCallsRef.current.forEach(call => call.close());
@@ -1662,7 +1607,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       needsPlayClick={needsPlayClick}
       onViewerPlayClick={() => {
         if (videoRef.current) {
-          videoRef.current.muted = true;
+          const hasAudioTrack = (streamRef.current?.getAudioTracks().length ?? 0) > 0;
+          videoRef.current.muted = !hasAudioTrack;
           videoRef.current.play()
             .then(() => {
               setNeedsPlayClick(false);

@@ -951,12 +951,17 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     return connection;
   }
 
-  call(targetPeerId: string, stream: MediaStream): MediaConnection {
+  call(targetPeerId: string, stream?: MediaStream): MediaConnection {
     const peerConnection = new RTCPeerConnection(this.config);
     const call = new MediaConnection(this, targetPeerId, createId('media'), peerConnection);
-    stream.getTracks().forEach((track) => {
-      peerConnection.addTrack(track, stream);
-    });
+    if (stream) {
+      stream.getTracks().forEach((track) => {
+        peerConnection.addTrack(track, stream);
+      });
+    } else {
+      peerConnection.addTransceiver('video', { direction: 'recvonly' });
+      peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+    }
     this.addConnection(call);
     void this.startOutgoingOffer(call, 'media');
     return call;
