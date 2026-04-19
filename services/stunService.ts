@@ -6,6 +6,7 @@ import {
   type RelayReason,
   watchNetworkProfileChanges,
 } from './networkProfile';
+import { logDebug } from './diagnostics';
 
 type IceServerConfig = {
   urls: string | string[];
@@ -120,11 +121,11 @@ const logIceConfig = (
     data,
   };
   if (level === 'warn') {
-    console.warn('[ice-config]', payload);
+    logDebug('warn', '[ice-config]', payload);
   } else if (level === 'error') {
-    console.error('[ice-config]', payload);
+    logDebug('error', '[ice-config]', payload);
   } else {
-    console.info('[ice-config]', payload);
+    logDebug('info', '[ice-config]', payload);
   }
   pushIceConfigLog(payload);
 };

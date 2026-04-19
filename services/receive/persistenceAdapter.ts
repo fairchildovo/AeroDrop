@@ -4,6 +4,7 @@ import {
   type ArchiveExportSession,
   type ArchiveExportSource,
 } from './archiveExportSession.ts';
+import { logDebug } from '../diagnostics.ts';
 
 type StagedArchiveEntry = {
   relativePath: string;
@@ -383,7 +384,7 @@ export const createReceivePersistenceAdapter = (
       try {
         await options.deleteIndexedDbChunksForFile(options.getCurrentFileIndex());
       } catch (error) {
-        console.warn('IndexedDB cleanup after save failed:', error);
+        logDebug('warn', 'IndexedDB cleanup after save failed:', error);
       }
       options.resetIndexedDbFileState();
     }
@@ -419,7 +420,7 @@ export const createReceivePersistenceAdapter = (
       try {
         await options.deleteIndexedDbChunksForFile(options.getCurrentFileIndex());
       } catch (error) {
-        console.warn('IndexedDB cleanup after staging failed:', error);
+        logDebug('warn', 'IndexedDB cleanup after staging failed:', error);
       }
       options.resetIndexedDbFileState();
     }
@@ -459,7 +460,7 @@ export const createReceivePersistenceAdapter = (
       options.clearArchiveEntries?.();
       return true;
     } catch (error) {
-      console.warn('Archive export failed:', error);
+      logDebug('warn', 'Archive export failed:', error);
       return false;
     }
   };

@@ -9,6 +9,7 @@ import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
 import { appendNetworkProfileQuery, getBrowserNetworkProfile } from './services/networkProfile';
+import { logDebug } from './services/diagnostics';
 
 type Mode = 'send' | 'receive' | 'screen';
 
@@ -226,7 +227,7 @@ const App: React.FC = () => {
           setShowRiskBanner(true);
         }
       } catch (error) {
-        console.error('Failed to check network status:', error);
+        logDebug('warn', 'Failed to check network status:', error);
       }
     };
 
@@ -256,7 +257,7 @@ const App: React.FC = () => {
         if (!isUnmounted && res.ok) {
           const text = await res.text();
           if (text !== 'pong') {
-            console.warn('Unexpected heartbeat response:', text);
+            logDebug('warn', 'Unexpected heartbeat response:', text);
           }
         }
       } catch {

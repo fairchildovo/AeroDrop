@@ -1,5 +1,6 @@
 import { TransferState, type NormalizedFileRequest } from '../../types/index.ts';
 import { createResumeRequestMessage, normalizeFileRequest } from '../protocol.ts';
+import { logDebug } from '../diagnostics.ts';
 
 interface SendableConnection {
   open: boolean;
@@ -102,7 +103,7 @@ export const createReceiveRecoveryCoordinator = (
       await options.awaitWriteQueue();
       await options.deleteIndexedDbChunksForFile(fileIndex);
     } catch (error) {
-      console.warn('IndexedDB cleanup before repair failed:', error);
+      logDebug('warn', 'IndexedDB cleanup before repair failed:', error);
     }
 
     try {

@@ -77,6 +77,7 @@ import {
 } from '../services/routeSelectionPolicy';
 import { useTransferStore } from '../stores/transferStore';
 import { createReceiverSessionService } from '../services/receiverSessionService';
+import { logDebug } from '../services/diagnostics';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
 
 const sanitizeFileName = (name: string): string => {
@@ -461,7 +462,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           : route.remoteUrl?.startsWith('turn')
             ? route.remoteUrl
             : '';
-        console.info('[route-selected]', {
+        logDebug('info', '[route-selected]', {
           role: 'receiver',
           receiverSessionId: receiverSessionIdRef.current,
           selectedKind,
@@ -668,7 +669,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         tx.onabort = () => reject(tx.error || new Error('INDEXED_DB_PRUNE_DELETE_TX_ABORTED'));
       });
     } catch (err) {
-      console.warn('IndexedDB stale session cleanup failed:', err);
+      logDebug('warn', 'IndexedDB stale session cleanup failed:', err);
     } finally {
       releaseIndexedDbPruneLock();
     }
@@ -839,7 +840,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     if (!closeOk) {
-      console.warn('Streaming target close after write failure was not clean; preserving partial file state.');
+      logDebug('warn', 'Streaming target close after write failure was not clean; preserving partial file state.');
     }
 
     isStreamingRef.current = receiveStreamingWriter.isStreaming();
@@ -852,7 +853,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         preserveCommittedBytes: true,
       });
       if (!ok) {
-        console.warn("Stream abort warning: failed to close active target cleanly");
+        logDebug('warn', 'Stream abort warning: failed to close active target cleanly');
       }
       isStreamingRef.current = receiveStreamingWriter.isStreaming();
       resetIndexedDbBufferRuntime();
@@ -957,7 +958,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         preparedNativeWriterFileIndexRef.current = reopened ? targetFileIndex : null;
         return reopened;
       } catch (error) {
-        console.warn('Failed to reopen writer for resume:', error);
+        logDebug('warn', 'Failed to reopen writer for resume:', error);
         receiveStreamingWriter.reset();
         isStreamingRef.current = false;
         return false;
@@ -1252,7 +1253,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         allAttemptProgressedRef.current = true;
       }
 
-      console.info('[route-probe]', createRouteProbeLogPayload({
+      logDebug('info', '[route-probe]', createRouteProbeLogPayload({
         receiverSessionId: receiverSessionIdRef.current,
         attemptId,
         attemptKind,
@@ -1598,7 +1599,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         isStreamingRef.current = receiveStreamingWriter.isStreaming();
         return;
       } catch (error) {
-        console.warn('Directory direct save setup failed:', error);
+        logDebug('warn', 'Directory direct save setup failed:', error);
         receiveStreamingWriter.reset();
         isStreamingRef.current = false;
       }

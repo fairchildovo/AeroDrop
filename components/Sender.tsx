@@ -55,6 +55,7 @@ import {
   restoreLogicalReceiverState,
 } from '../services/send/sessionTransferState';
 import { createSenderRouteHandshakeHandler } from '../services/send/routeHandshake';
+import { logDebug, shouldSuppressNoisyPeerError } from '../services/diagnostics';
 import { SenderUI } from './sender/SenderUI';
 
 interface SenderProps {
@@ -490,7 +491,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               ].join('|');
               if (peerRouteLogSignatureRef.current.get(conn.peer) !== routeSignature) {
                 peerRouteLogSignatureRef.current.set(conn.peer, routeSignature);
-                console.info('[ice-route:selected]', {
+                logDebug('info', '[ice-route:selected]', {
                   role: 'sender',
                   peerId: conn.peer,
                   protocol,
@@ -569,7 +570,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     }
     committedRouteLogSignatureRef.current.set(receiverSessionId, routeSignature);
 
-    console.info('[route-selected]', {
+    logDebug('info', '[route-selected]', {
       role: 'sender',
       receiverSessionId,
       peerId: conn.peer,
@@ -619,7 +620,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         if ('wakeLock' in navigator) {
           wakeLock = await navigator.wakeLock.request('screen');
         }
-      } catch (err) { console.warn('Wake Lock request failed:', err); }
+      } catch (err) { logDebug('warn', 'Wake Lock request failed:', err); }
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && state === TransferState.TRANSFERRING) {
@@ -1115,7 +1116,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               setState(TransferState.CONFIGURING);
           } else {
               if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
-              console.error("Peer Error:", err);
+              if (!shouldSuppressNoisyPeerError({
+                errorType: err?.type,
+                transferState: state,
+                activeConnections: activeConnections.current.size,
+              })) {
+                logDebug('error', 'Peer Error:', err);
+              }
               markConnectionFailure(shareTelemetryRef.current, `peer_error:${err.type}`);
               if (activeConnections.current.size === 0) {
                  setErrorMsg(`连接错误: ${err.type}`);
@@ -1161,7 +1168,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           conn.on('data', (data: any) => {
               const incoming = data as P2PMessage;
               if (incoming.type === 'ROUTE_PROBE') {
-                  console.info('[route-probe]', createRouteProbeLogPayload({
+                  logDebug('info', '[route-probe]', createRouteProbeLogPayload({
                     receiverSessionId: incoming.payload.receiverSessionId,
                     attemptId: incoming.payload.attemptId,
                     attemptKind: incoming.payload.attemptKind,
@@ -1329,7 +1336,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           });
           
           conn.on('error', (err) => {
-              console.warn("Connection error", err);
+              if (!shouldSuppressNoisyPeerError({
+                errorType: err?.type,
+                transferState: state,
+                activeConnections: activeConnections.current.size,
+              })) {
+                logDebug('warn', 'Connection error', err);
+              }
           });
       });
   };
@@ -1562,7 +1575,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     
     activeConnections.current.forEach(conn => {
         if (conn.open) {
-            try { conn.send({ type: 'TRANSFER_CANCELLED' }); } catch(e) { console.error(e); }
+            try { conn.send({ type: 'TRANSFER_CANCELLED' }); } catch(e) { logDebug('warn', 'Failed to send transfer cancellation', e); }
             conn.close();
         }
     });
@@ -1623,7 +1636,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           setTimeout(() => setCopied(false), 2000);
           onNotification('口令已复制', 'success');
       } catch (err) {
-          console.warn('Clipboard write failed:', err);
+          logDebug('warn', 'Clipboard write failed:', err);
           onNotification('复制失败，请手动复制', 'error');
       }
   };
@@ -1662,7 +1675,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           setTimeout(() => setLinkCopied(false), 2000);
           onNotification('链接已复制', 'success');
       } catch (err) {
-          console.warn('Clipboard write failed:', err);
+          logDebug('warn', 'Clipboard write failed:', err);
           onNotification('复制失败，请手动复制', 'error');
       }
   };

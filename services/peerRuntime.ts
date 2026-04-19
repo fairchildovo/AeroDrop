@@ -1,3 +1,5 @@
+import { logDebug } from './diagnostics';
+
 type Listener = (...args: any[]) => void;
 
 type PeerRuntimeErrorType =
@@ -569,11 +571,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       data,
     };
     if (level === 'warn') {
-      console.warn('[signal-metrics]', payload);
+      logDebug('warn', '[signal-metrics]', payload);
     } else if (level === 'error') {
-      console.error('[signal-metrics]', payload);
+      logDebug('error', '[signal-metrics]', payload);
     } else if (!QUIET_SIGNAL_EVENTS.has(event) && IMPORTANT_SIGNAL_INFO_EVENTS.has(event)) {
-      console.info('[signal-metrics]', payload);
+      logDebug('info', '[signal-metrics]', payload);
     }
     pushSignalLog(payload);
   }

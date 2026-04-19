@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { loadPeerRuntime, type Peer, type MediaConnection, type DataConnection } from '../services/peerRuntime';
 import { getIceConfig } from '../services/stunService';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
+import { logDebug } from '../services/diagnostics';
 
 interface ScreenShareProps {
   onNotification: (message: string, type: 'success' | 'info' | 'error') => void;
@@ -221,7 +222,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       constraints.resizeMode = 'none';
       await videoTrack.applyConstraints(constraints);
     } catch (err) {
-      console.warn('Failed to apply local track constraints:', err);
+      logDebug('warn', 'Failed to apply local track constraints:', err);
     }
   }, [qualityCaptureConstraints, getCaptureTargetResolution]);
 
@@ -247,7 +248,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       try {
         transceiver.setCodecPreferences(sorted);
       } catch (err) {
-        console.warn('setCodecPreferences failed:', err);
+        logDebug('warn', 'setCodecPreferences failed:', err);
       }
     });
   }, []);
@@ -322,9 +323,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       try {
         await videoSender.setParameters(params);
-        console.log(`Applied ${level} quality bitrate cap: ${(boundedMaxBitrate / 1000000).toFixed(2)}Mbps`);
+        logDebug('log', `Applied ${level} quality bitrate cap: ${(boundedMaxBitrate / 1000000).toFixed(2)}Mbps`);
       } catch (err) {
-        console.error('Failed to set bitrate parameters:', err);
+        logDebug('warn', 'Failed to set bitrate parameters:', err);
       }
     }
   }, [bitrateLimits, qualityCaptureConstraints]);
@@ -613,7 +614,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           consecutiveHighBandwidth = 0;
         }
       } catch (err) {
-        console.error('Bandwidth monitoring error:', err);
+      logDebug('warn', 'Bandwidth monitoring error:', err);
       }
     };
 
@@ -714,7 +715,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
 
     peer.on('open', (openedId) => {
-      console.log('Peer ID:', openedId);
+      logDebug('log', 'Peer ID:', openedId);
       if (sharerReconnectTimerRef.current) {
         clearTimeout(sharerReconnectTimerRef.current);
         sharerReconnectTimerRef.current = null;
@@ -727,7 +728,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     // 监听传入的数据连接（用于发送画质状态给观看者）
     peer.on('connection', (conn) => {
-      console.log('Data connection received from:', conn.peer);
+      logDebug('log', 'Data connection received from:', conn.peer);
       activeDataConnectionsRef.current.push(conn);
 
       // 初始化该观看者的心跳时间
@@ -814,7 +815,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
 
     peer.on('disconnected', () => {
-      console.log('Peer disconnected');
+      logDebug('log', 'Peer disconnected');
       setIsPeerReady(false);
       if (!peer.destroyed) {
         try {
@@ -844,7 +845,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       activeDataConnectionsRef.current.forEach(conn => {
         const lastHeartbeat = viewerHeartbeatsRef.current[conn.peer];
         if (lastHeartbeat && now - lastHeartbeat > timeoutThreshold) {
-          console.log(`Viewer ${conn.peer} timed out, closing connection`);
+          logDebug('log', `Viewer ${conn.peer} timed out, closing connection`);
           deadPeers.push(conn.peer);
           conn.close();
         }
@@ -926,7 +927,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const createDummyStream = useCallback(() => {
 
     if (audioContextRef.current) {
-      audioContextRef.current.close().catch(console.error);
+      audioContextRef.current.close().catch((error) => {
+        logDebug('warn', 'Failed to close audio context', error);
+      });
       audioContextRef.current = null;
     }
 
@@ -975,7 +978,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       combinedStream.addTrack(track);
     });
 
-    console.log('Created dummy stream with tracks:', {
+      logDebug('log', 'Created dummy stream with tracks:', {
       video: combinedStream.getVideoTracks().length,
       audio: combinedStream.getAudioTracks().length
     });
@@ -1088,7 +1091,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     connectingTimeoutRef.current = setTimeout(() => {
       // 检查是否还在连接中（如果没有成功进入 viewing，且没有被手动取消）
       // 注意：这里无法直接访问最新的 state，但可以通过清理函数触发
-      console.log('Global connection timed out');
+        logDebug('log', 'Global connection timed out');
       setError('连接超时，无法建立 P2P 通道，请检查网络或防火墙');
       setIsConnecting(false);
       // 触发一次清理，但不标记为手动停止，以便允许用户重试
@@ -1118,7 +1121,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peerRef.current = peer;
 
     peer.on('open', () => {
-      console.log('Viewer peer opened, calling:', sharerId);
+        logDebug('log', 'Viewer peer opened, calling:', sharerId);
       // 连接成功，重置重连计数
       reconnectAttemptsRef.current = 0;
       setViewerConnectingStage('connecting_media');
@@ -1127,7 +1130,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       const dataConn = peer.connect(sharerId);
 
       dataConn.on('open', () => {
-        console.log('Data connection opened');
+          logDebug('log', 'Data connection opened');
 
         // 启动心跳发送（每3秒一次）
         if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
@@ -1139,7 +1142,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       });
 
       dataConn.on('data', (data: any) => {
-        console.log('Received data:', data);
+            logDebug('log', 'Received data:', data);
         if (data && data.type === 'quality' && data.value) {
           setRemoteQuality(data.value as 'high' | 'medium' | 'low');
           return;
@@ -1174,7 +1177,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       call.on('stream', (remoteStream) => {
         if (hasReceivedStream) {
-          console.log('Stream event fired again, skipping duplicate handling');
+              logDebug('log', 'Stream event fired again, skipping duplicate handling');
           return;
         }
         hasReceivedStream = true;
@@ -1203,7 +1206,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                 receivers.forEach((receiver: any) => {
                   if (receiver.track?.kind === 'video' && 'playoutDelayHint' in receiver) {
                     receiver.playoutDelayHint = 0; // 0 表示尽可能实时
-                    console.log('Set playoutDelayHint to 0 for real-time latency');
+                    logDebug('log', 'Set playoutDelayHint to 0 for real-time latency');
                   }
                 });
               }
@@ -1211,7 +1214,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           });
         }
 
-        console.log('Received remote stream:', {
+                logDebug('log', 'Received remote stream:', {
           audioTracks: audioTracks.length,
           videoTracks: videoTracks.length,
           audioDetails: audioTracks.map(t => ({ label: t.label, enabled: t.enabled, muted: t.muted })),
@@ -1228,7 +1231,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       });
 
       call.on('close', () => {
-        console.log('Call closed');
+                logDebug('log', 'Call closed');
 
         if (remoteShareEndedRef.current) {
           handleRemoteShareEnded('共享方已结束共享');
@@ -1237,7 +1240,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
         // 只有非手动停止时，才触发重连逻辑
         if (!isManualStopRef.current) {
-          console.log('Unexpected disconnection, attempting reconnect...');
+                  logDebug('log', 'Unexpected disconnection, attempting reconnect...');
           stopViewing(false); // 不清除 targetId
 
           if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
@@ -1366,7 +1369,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       if (isSharing && !isViewing) {
         video.muted = true;
-        video.play().catch(console.error);
+        video.play().catch((error) => {
+          logDebug('warn', 'Muted video autoplay failed', error);
+        });
       }
     }
   }, [isSharing, isViewing]);
@@ -1380,27 +1385,27 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     const stream = streamRef.current;
     if (!stream) {
-      console.log('No stream available yet');
+      logDebug('log', 'No stream available yet');
       return;
     }
 
 
     if (video.srcObject === stream) return;
 
-    console.log('Callback ref: Attaching stream to video element...');
+    logDebug('log', 'Callback ref: Attaching stream to video element...');
     video.srcObject = stream;
     video.muted = true;
 
     video.play()
       .then(() => {
-        console.log('Video playback started (muted)');
+          logDebug('log', 'Video playback started (muted)');
         setNeedsPlayClick(false);
       })
       .catch(error => {
         if (error.name === 'AbortError') {
-          console.log('Play request was interrupted');
+            logDebug('log', 'Play request was interrupted');
         } else {
-          console.error('Autoplay failed:', error);
+          logDebug('warn', 'Autoplay failed:', error);
           setNeedsPlayClick(true);
         }
       });
@@ -1426,7 +1431,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
 
       if (audioContextRef.current) {
-        audioContextRef.current.close().catch(console.error);
+        audioContextRef.current.close().catch((error) => {
+          logDebug('warn', 'Failed to close audio context', error);
+        });
       }
 
       activeCallsRef.current.forEach(call => call.close());
@@ -1496,7 +1503,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
 
-        videoRef.current.play().catch(console.error);
+        videoRef.current.play().catch((error) => {
+          logDebug('warn', 'Share preview playback failed', error);
+        });
       }
 
 
@@ -1547,7 +1556,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       if (videoRef.current) {
         videoRef.current.srcObject = newStream;
-        videoRef.current.play().catch(console.error);
+        videoRef.current.play().catch((error) => {
+          logDebug('warn', 'Window switch preview playback failed', error);
+        });
       }
 
 
@@ -1656,7 +1667,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             .then(() => {
               setNeedsPlayClick(false);
             })
-            .catch(console.error);
+            .catch((error) => {
+              logDebug('warn', 'Viewer play button retry failed', error);
+            });
         }
       }}
       stopViewing={() => stopViewing(true)}

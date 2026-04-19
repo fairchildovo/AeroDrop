@@ -1,3 +1,5 @@
+import { logDebug } from '../diagnostics.ts';
+
 interface FinalizeBatch<T> {
   batch: T[];
   size: number;
@@ -43,7 +45,7 @@ export const createReceivePersistenceOrchestrator = (
     try {
       await pendingFinalizePromise;
     } catch (error) {
-      console.warn(`Pending file finalize failed before ${reason}:`, error);
+      logDebug('warn', `Pending file finalize failed before ${reason}:`, error);
     }
 
     return options.getState() !== 'ERROR';

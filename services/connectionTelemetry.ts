@@ -1,3 +1,5 @@
+import { logDebug } from './diagnostics';
+
 type TelemetryRole = 'sender' | 'receiver' | 'screen-share' | 'screen-viewer';
 
 type TelemetryStatus = 'in_progress' | 'connected' | 'failed' | 'closed';
@@ -99,9 +101,9 @@ const log = (level: 'info' | 'warn', session: ConnectionSession, event: string, 
     data,
   };
   if (level === 'warn') {
-    console.warn('[conn-metrics]', payload);
+    logDebug('warn', '[conn-metrics]', payload);
   } else if (!QUIET_INFO_EVENTS.has(event)) {
-    console.info('[conn-metrics]', payload);
+    logDebug('info', '[conn-metrics]', payload);
   }
   pushGlobal(payload);
 };
