@@ -76,6 +76,7 @@ import {
   getRouteSelectionDecision,
   getRouteSelectionTimings,
 } from '../services/routeSelectionPolicy';
+import { resolveFileType } from '../services/fileType';
 import {
   shouldHandleReceiverActivity,
   shouldRunReceiverScheduledReconnect,
@@ -2432,6 +2433,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const primaryFile = metadata?.files?.[0];
   const isMultiFile = (metadata?.files?.length || 0) > 1;
+  const primaryFileType =
+    !isMultiFile && primaryFile
+      ? resolveFileType({
+          fileName: primaryFile.name,
+          mimeType: primaryFile.type,
+        })
+      : null;
   const formatEta = (seconds: number): string => {
     if (!Number.isFinite(seconds) || seconds <= 0) return '--';
     if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
@@ -2515,6 +2523,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       senderDeviceName={senderDeviceName}
       isMultiFile={isMultiFile}
       primaryFileName={primaryFile?.name}
+      primaryFileType={primaryFileType}
       canResume={canResume}
       isStreaming={isStreamingRef.current}
       onResumeTransfer={resumeTransfer}
@@ -2530,6 +2539,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     />
   );
 };
+
 
 
 
