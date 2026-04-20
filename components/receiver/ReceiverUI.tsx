@@ -1,7 +1,9 @@
 import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
-import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
+import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, ClipboardPaste, Layers, PlayCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import type { FileType } from '../../services/fileType';
+import { FileTypeIcon } from '../FileTypeIcon';
 import {
   getReceiverWaitingStatusCopy,
   type ReceiverWaitingStage,
@@ -25,7 +27,15 @@ interface ReceiverUIProps {
   metadata: FileMetadata | null;
   senderDeviceName: string;
   isMultiFile: boolean;
+  selectedFiles: Array<{
+    name: string;
+    size: number;
+    fileType: FileType;
+  }>;
+  showFileList: boolean;
+  onToggleFileList: () => void;
   primaryFileName?: string;
+  primaryFileType?: FileType | null;
   canResume: boolean;
   isStreaming: boolean;
   onResumeTransfer: () => void;
@@ -56,7 +66,11 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
   metadata,
   senderDeviceName,
   isMultiFile,
+  selectedFiles,
+  showFileList,
+  onToggleFileList,
   primaryFileName,
+  primaryFileType,
   canResume,
   isStreaming,
   onResumeTransfer,
@@ -142,13 +156,47 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
           )}
           <div className="flex items-start gap-4 mb-6">
             <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
-              {isMultiFile ? <Layers size={24} className="text-brand-500" /> : <FileIcon size={24} />}
+              {isMultiFile ? (
+                <Layers size={24} className="text-brand-500" />
+              ) : (
+                <FileTypeIcon
+                  type={primaryFileType ?? 'unknown'}
+                  size={24}
+                  className="text-slate-500 dark:text-slate-300"
+                />
+              )}
             </div>
             <div className="flex-1">
               <h4 className="font-bold text-slate-800 dark:text-white text-lg leading-tight mb-1 truncate">{isMultiFile ? `${metadata.files.length} 个文件` : primaryFileName}</h4>
               <p className="text-sm text-slate-500 dark:text-slate-400">{formatFileSize(metadata.totalSize)}</p>
             </div>
           </div>
+
+          {isMultiFile && selectedFiles.length > 0 && (
+            <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden mb-6 animate-slide-up">
+              <button onClick={onToggleFileList} className="w-full px-4 py-2 bg-slate-50 dark:bg-slate-900 flex justify-between text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-700 dark:text-slate-300">
+                <span>文件列表 ({selectedFiles.length})</span>
+                {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </button>
+              {showFileList && (
+                <div className="max-h-48 overflow-y-auto bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700 p-1">
+                  {selectedFiles.map((file, i) => (
+                    <div key={`${file.name}-${i}`} className="flex justify-between items-center text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-slate-700 rounded">
+                      <div className="flex items-center gap-2 truncate flex-1 mr-4 min-w-0">
+                        <FileTypeIcon
+                          type={file.fileType}
+                          size={14}
+                          className="text-slate-400 dark:text-slate-300 shrink-0"
+                        />
+                        <span className="truncate text-slate-600 dark:text-slate-300">{file.name}</span>
+                      </div>
+                      <span className="text-slate-400 font-mono">{formatFileSize(file.size)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {state === TransferState.PEER_CONNECTED && (
             <div className="space-y-3">

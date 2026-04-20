@@ -1,7 +1,9 @@
 import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
+import type { FileType } from '../../services/fileType';
 import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Monitor } from 'lucide-react';
+import { FileTypeIcon } from '../FileTypeIcon';
 
 export type SenderPeerTransferStat = {
   peerId: string;
@@ -10,6 +12,12 @@ export type SenderPeerTransferStat = {
   speed: string;
   progress: number;
   status: 'waiting' | 'transferring' | 'completed';
+};
+
+export type SenderSelectedFile = {
+  name: string;
+  size: number;
+  fileType: FileType;
 };
 
 interface SenderUIProps {
@@ -21,6 +29,7 @@ interface SenderUIProps {
   showFileList: boolean;
   onToggleFileList: () => void;
   stopSharing: () => void;
+  selectedFiles: SenderSelectedFile[];
   expiryOption: string;
   setExpiryOption: React.Dispatch<React.SetStateAction<string>>;
   customCodeInput: string;
@@ -58,6 +67,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
   showFileList,
   onToggleFileList,
   stopSharing,
+  selectedFiles,
   expiryOption,
   setExpiryOption,
   customCodeInput,
@@ -123,10 +133,26 @@ export const SenderUI: React.FC<SenderUIProps> = ({
       {state === TransferState.CONFIGURING && metadata && (
         <div className="space-y-6">
           <div className="bg-slate-50 dark:bg-slate-900 p-4 rounded-xl flex items-center gap-4 border border-slate-100 dark:border-slate-800 animate-slide-up">
-            <div className="flex-1 min-w-0">
-              <h4 className="font-bold text-slate-800 dark:text-white">已选择 {metadata.files.length} 个文件</h4>
-              <p className="text-xs text-slate-500 dark:text-slate-400">总大小: {formatFileSize(metadata.totalSize)}</p>
-            </div>
+            {metadata.files.length === 1 && selectedFiles[0] ? (
+              <>
+                <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
+                  <FileTypeIcon
+                    type={selectedFiles[0].fileType}
+                    size={24}
+                    className="text-slate-500 dark:text-slate-300"
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="font-bold text-slate-800 dark:text-white truncate">{selectedFiles[0].name}</h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">{formatFileSize(selectedFiles[0].size)}</p>
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 min-w-0">
+                <h4 className="font-bold text-slate-800 dark:text-white">已选择 {metadata.files.length} 个文件</h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400">总大小: {formatFileSize(metadata.totalSize)}</p>
+              </div>
+            )}
             <button onClick={stopSharing} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20} /></button>
           </div>
 
@@ -138,9 +164,16 @@ export const SenderUI: React.FC<SenderUIProps> = ({
               </button>
               {showFileList && (
                 <div className="max-h-48 overflow-y-auto bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700 p-1">
-                  {metadata.files.map((f, i) => (
-                    <div key={i} className="flex justify-between text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-slate-700 rounded">
-                      <span className="truncate flex-1 mr-4 text-slate-600 dark:text-slate-300">{f.name}</span>
+                  {selectedFiles.map((f, i) => (
+                    <div key={i} className="flex justify-between items-center text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-slate-700 rounded">
+                      <div className="flex items-center gap-2 truncate flex-1 mr-4 min-w-0">
+                        <FileTypeIcon
+                          type={f.fileType}
+                          size={14}
+                          className="text-slate-400 dark:text-slate-300 shrink-0"
+                        />
+                        <span className="truncate text-slate-600 dark:text-slate-300">{f.name}</span>
+                      </div>
                       <span className="text-slate-400 font-mono">{formatFileSize(f.size)}</span>
                     </div>
                   ))}
