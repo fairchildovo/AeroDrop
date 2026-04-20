@@ -1,7 +1,9 @@
 import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
-import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
+import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
+import type { FileType } from '../../services/fileType';
+import { FileTypeIcon } from '../FileTypeIcon';
 import {
   getReceiverWaitingStatusCopy,
   type ReceiverWaitingStage,
@@ -26,6 +28,7 @@ interface ReceiverUIProps {
   senderDeviceName: string;
   isMultiFile: boolean;
   primaryFileName?: string;
+  primaryFileType?: FileType | null;
   canResume: boolean;
   isStreaming: boolean;
   onResumeTransfer: () => void;
@@ -57,6 +60,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
   senderDeviceName,
   isMultiFile,
   primaryFileName,
+  primaryFileType,
   canResume,
   isStreaming,
   onResumeTransfer,
@@ -142,7 +146,15 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
           )}
           <div className="flex items-start gap-4 mb-6">
             <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
-              {isMultiFile ? <Layers size={24} className="text-brand-500" /> : <FileIcon size={24} />}
+              {isMultiFile ? (
+                <Layers size={24} className="text-brand-500" />
+              ) : (
+                <FileTypeIcon
+                  type={primaryFileType ?? 'unknown'}
+                  size={24}
+                  className="text-slate-500 dark:text-slate-300"
+                />
+              )}
             </div>
             <div className="flex-1">
               <h4 className="font-bold text-slate-800 dark:text-white text-lg leading-tight mb-1 truncate">{isMultiFile ? `${metadata.files.length} 个文件` : primaryFileName}</h4>

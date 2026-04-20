@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   TransferState,
   FileMetadata,
@@ -43,6 +43,7 @@ import { useTransferStore } from '../stores/transferStore';
 import { createRouteProbeLogPayload } from '../services/routeProbeLog';
 import { getRouteSelectionDecision } from '../services/routeSelectionPolicy';
 import { createSessionActivityTracker } from '../services/sessionActivityTracker';
+import { resolveFileType } from '../services/fileType';
 import {
   getCommittedTransferDisposition,
   isCommittedTransferMessageType,
@@ -1677,6 +1678,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const shareLink = `${window.location.origin}${window.location.pathname}?code=${transferCode}`;
+  const selectedFiles = useMemo(
+    () =>
+      (metadata?.files ?? []).map((file) => ({
+        ...file,
+        fileType: resolveFileType({
+          fileName: file.name,
+          mimeType: file.type,
+        }),
+      })),
+    [metadata?.files]
+  );
+
   const formatEta = (seconds: number): string => {
       if (!Number.isFinite(seconds) || seconds <= 0) return '--';
       if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
@@ -1778,6 +1791,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       showFileList={showFileList}
       onToggleFileList={() => setShowFileList((prev) => !prev)}
       stopSharing={stopSharing}
+      selectedFiles={selectedFiles}
       expiryOption={expiryOption}
       setExpiryOption={setExpiryOption}
       customCodeInput={customCodeInput}

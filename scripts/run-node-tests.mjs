@@ -1,6 +1,10 @@
 import { readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const tsxLoaderPath = pathToFileURL(resolve(scriptDir, '../node_modules/tsx/dist/loader.mjs')).href;
 
 const rawTargets = process.argv.slice(2);
 const targets = rawTargets.length > 0 ? rawTargets : ['services'];
@@ -37,9 +41,11 @@ if (testFiles.length === 0) {
   throw new Error(`No test files found for targets: ${targets.join(', ')}`);
 }
 
+export const buildNodeTestArgs = (files) => ['--import', tsxLoaderPath, '--test', ...files];
+
 const result = spawnSync(
   process.execPath,
-  ['--import', 'tsx', '--test', ...testFiles],
+  buildNodeTestArgs(testFiles),
   {
     stdio: 'inherit',
   }

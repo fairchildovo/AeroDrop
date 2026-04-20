@@ -1,5 +1,5 @@
 export const NO_TURN_WARNING_MESSAGE =
-  '当前服务未启用 TURN 中继，跨网络或手机流量下可能无法连接。请改用同一局域网，或为 Worker 配置 CF_TURN_TOKEN_ID 与 CF_TURN_API_TOKEN。';
+  '当前服务未启用 TURN 中继，跨网络或手机流量下可能无法连接。';
 
 export const getReceiverPreTransferFailureMessage = (hasTurn: boolean): string => {
   if (hasTurn) {

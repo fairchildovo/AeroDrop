@@ -1,7 +1,9 @@
 import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
+import type { FileType } from '../../services/fileType';
 import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Monitor } from 'lucide-react';
+import { FileTypeIcon } from '../FileTypeIcon';
 
 export type SenderPeerTransferStat = {
   peerId: string;
@@ -10,6 +12,12 @@ export type SenderPeerTransferStat = {
   speed: string;
   progress: number;
   status: 'waiting' | 'transferring' | 'completed';
+};
+
+export type SenderSelectedFile = {
+  name: string;
+  size: number;
+  fileType: FileType;
 };
 
 interface SenderUIProps {
@@ -21,6 +29,7 @@ interface SenderUIProps {
   showFileList: boolean;
   onToggleFileList: () => void;
   stopSharing: () => void;
+  selectedFiles: SenderSelectedFile[];
   expiryOption: string;
   setExpiryOption: React.Dispatch<React.SetStateAction<string>>;
   customCodeInput: string;
@@ -58,6 +67,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
   showFileList,
   onToggleFileList,
   stopSharing,
+  selectedFiles,
   expiryOption,
   setExpiryOption,
   customCodeInput,
@@ -138,9 +148,16 @@ export const SenderUI: React.FC<SenderUIProps> = ({
               </button>
               {showFileList && (
                 <div className="max-h-48 overflow-y-auto bg-white dark:bg-slate-800 border-t border-slate-100 dark:border-slate-700 p-1">
-                  {metadata.files.map((f, i) => (
-                    <div key={i} className="flex justify-between text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-slate-700 rounded">
-                      <span className="truncate flex-1 mr-4 text-slate-600 dark:text-slate-300">{f.name}</span>
+                  {selectedFiles.map((f, i) => (
+                    <div key={i} className="flex justify-between items-center text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-slate-700 rounded">
+                      <div className="flex items-center gap-2 truncate flex-1 mr-4 min-w-0">
+                        <FileTypeIcon
+                          type={f.fileType}
+                          size={14}
+                          className="text-slate-400 dark:text-slate-300 shrink-0"
+                        />
+                        <span className="truncate text-slate-600 dark:text-slate-300">{f.name}</span>
+                      </div>
                       <span className="text-slate-400 font-mono">{formatFileSize(f.size)}</span>
                     </div>
                   ))}
