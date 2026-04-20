@@ -56,6 +56,26 @@ const baseProps = {
   avgSpeed: '0 KB/s',
 };
 
+test('shows the selected single file summary with icon, name, and size', () => {
+  const singleFileMetadata: FileMetadata = {
+    files: [{ name: 'report.pdf', size: 1024, type: 'application/pdf', lastModified: 0 }],
+    totalSize: 1024,
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(SenderUI, {
+      ...baseProps,
+      metadata: singleFileMetadata,
+      selectedFiles: [{ name: 'report.pdf', size: 1024, fileType: 'document' as const }],
+      showFileList: false,
+    })
+  );
+
+  assert.match(html, /report\.pdf/);
+  assert.match(html, /lucide-file-text/);
+  assert.doesNotMatch(html, /已选择 1 个文件/);
+});
+
 test('renders semantic file type icons in expanded sender file list', () => {
   const html = renderToStaticMarkup(React.createElement(SenderUI, baseProps));
   assert.match(html, /lucide-file-text/);

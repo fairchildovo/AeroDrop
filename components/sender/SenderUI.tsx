@@ -133,10 +133,26 @@ export const SenderUI: React.FC<SenderUIProps> = ({
       {state === TransferState.CONFIGURING && metadata && (
         <div className="space-y-6">
           <div className="bg-slate-50 dark:bg-slate-900 p-4 rounded-xl flex items-center gap-4 border border-slate-100 dark:border-slate-800 animate-slide-up">
-            <div className="flex-1 min-w-0">
-              <h4 className="font-bold text-slate-800 dark:text-white">已选择 {metadata.files.length} 个文件</h4>
-              <p className="text-xs text-slate-500 dark:text-slate-400">总大小: {formatFileSize(metadata.totalSize)}</p>
-            </div>
+            {metadata.files.length === 1 && selectedFiles[0] ? (
+              <>
+                <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 shrink-0">
+                  <FileTypeIcon
+                    type={selectedFiles[0].fileType}
+                    size={24}
+                    className="text-slate-500 dark:text-slate-300"
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="font-bold text-slate-800 dark:text-white truncate">{selectedFiles[0].name}</h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">{formatFileSize(selectedFiles[0].size)}</p>
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 min-w-0">
+                <h4 className="font-bold text-slate-800 dark:text-white">已选择 {metadata.files.length} 个文件</h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400">总大小: {formatFileSize(metadata.totalSize)}</p>
+              </div>
+            )}
             <button onClick={stopSharing} className="text-slate-400 hover:text-red-500 transition-colors"><X size={20} /></button>
           </div>
 

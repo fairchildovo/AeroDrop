@@ -185,6 +185,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const [senderDeviceName, setSenderDeviceName] = useState<string>('');
   const [connectingStage, setConnectingStage] = useState<ReceiverConnectingStage>('');
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [showFileList, setShowFileList] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -2433,6 +2434,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const primaryFile = metadata?.files?.[0];
   const isMultiFile = (metadata?.files?.length || 0) > 1;
+  const selectedFiles = (metadata?.files ?? []).map((file) => ({
+    name: file.name,
+    size: file.size,
+    fileType: resolveFileType({
+      fileName: file.name,
+      mimeType: file.type,
+    }),
+  }));
   const primaryFileType =
     !isMultiFile && primaryFile
       ? resolveFileType({
@@ -2522,6 +2531,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       metadata={metadata}
       senderDeviceName={senderDeviceName}
       isMultiFile={isMultiFile}
+      selectedFiles={selectedFiles}
+      showFileList={showFileList}
+      onToggleFileList={() => setShowFileList((prev) => !prev)}
       primaryFileName={primaryFile?.name}
       primaryFileType={primaryFileType}
       canResume={canResume}
@@ -2539,7 +2551,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     />
   );
 };
-
 
 
 
