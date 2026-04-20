@@ -1,4 +1,5 @@
 import { logDebug } from './diagnostics';
+import { getAeroDropE2EHooks, type AeroDropPeerRuntimeModuleLike } from './e2eHooks';
 
 type Listener = (...args: any[]) => void;
 
@@ -114,12 +115,16 @@ const DEFAULT_SIGNALING_PING_INTERVAL_MS = 20_000;
 const DEFAULT_SIGNALING_PONG_TIMEOUT_MS = 10_000;
 const DEFAULT_SIGNALING_RECONNECT_BASE_MS = 1_000;
 const MAX_SIGNALING_RECONNECT_DELAY_MS = 10_000;
+const runtimeEnv =
+  ((import.meta as ImportMeta & {
+    env?: Record<string, string | boolean | undefined>;
+  }).env) ?? {};
 const SIGNALING_BASE =
-  (import.meta.env.VITE_SIGNALING_WS_URL as string | undefined)?.trim() ||
-  (import.meta.env.VITE_SIGNALING_BASE_URL as string | undefined)?.trim() ||
-  (import.meta.env.DEV ? DEFAULT_DEV_SIGNALING_BASE : window.location.origin);
+  (runtimeEnv.VITE_SIGNALING_WS_URL as string | undefined)?.trim() ||
+  (runtimeEnv.VITE_SIGNALING_BASE_URL as string | undefined)?.trim() ||
+  (runtimeEnv.DEV ? DEFAULT_DEV_SIGNALING_BASE : window.location.origin);
 const SIGNALING_PATH =
-  ((import.meta.env.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/ws-signaling').replace(/\/?$/, '');
+  ((runtimeEnv.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/ws-signaling').replace(/\/?$/, '');
 const QUIET_SIGNAL_EVENTS = new Set([
   'signaling_ping_received',
   'signaling_pong_received',
@@ -554,10 +559,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.id = typeof idOrOptions === 'string' ? idOrOptions : createId('peer');
     this.options = (typeof idOrOptions === 'string' ? maybeOptions : idOrOptions) ?? {};
     this.config = this.options.config ?? {};
-    this.readyPromise = new Promise<void>((resolve, reject) => {
-      this.readyPromiseResolve = resolve;
-      this.readyPromiseReject = reject;
-    });
+    this.readyPromise = this.createReadyPromise();
     this.connectSignaling();
   }
 
@@ -589,11 +591,32 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     });
   }
 
-  private resetReadyPromise(): void {
-    this.readyPromise = new Promise<void>((resolve, reject) => {
+  private createReadyPromise(): Promise<void> {
+    const promise = new Promise<void>((resolve, reject) => {
       this.readyPromiseResolve = resolve;
       this.readyPromiseReject = reject;
     });
+
+    // Registration failures can happen before any outgoing offer awaits readiness.
+    // Mark the promise as handled up front so pre-registration disconnects do not
+    // surface as global unhandled rejections for listener-only peers.
+    promise.catch(() => {});
+    return promise;
+  }
+
+  private resetReadyPromise(): void {
+    this.readyPromise = this.createReadyPromise();
+  }
+
+  private rejectReadyPromise(reason: unknown): void {
+    const reject = this.readyPromiseReject;
+    if (!reject) {
+      return;
+    }
+
+    this.readyPromiseResolve = null;
+    this.readyPromiseReject = null;
+    reject(reason);
   }
 
   private connectSignaling(): void {
@@ -621,6 +644,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.websocket.onerror = () => {
       if (this.destroyed) return;
       const error = createRuntimeError('socket-error', 'Signaling WebSocket connection failed');
+      if (!this.openedOnce) {
+        this.rejectReadyPromise(error);
+      }
       this.log('error', 'signaling_ws_error');
       this.emit('error', error);
     };
@@ -638,7 +664,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         wasOpened,
       });
       if (!wasOpened) {
-        this.emit('error', createRuntimeError('disconnected', 'Signaling WebSocket closed before registration'));
+        const error = createRuntimeError('disconnected', 'Signaling WebSocket closed before registration');
+        this.rejectReadyPromise(error);
+        this.emit('error', error);
       }
       if (wasOpened) {
         this.emit('disconnected');
@@ -1037,6 +1065,13 @@ export type Peer = WorkerSignaledPeer;
 let peerRuntimePromise: Promise<PeerRuntimeModule> | null = null;
 
 export const loadPeerRuntime = (): Promise<PeerRuntimeModule> => {
+  const e2eModule = getAeroDropE2EHooks()?.createPeerRuntimeModule?.();
+  if (e2eModule) {
+    return Promise.resolve(e2eModule as Promise<AeroDropPeerRuntimeModuleLike>).then(
+      (module) => module as PeerRuntimeModule
+    );
+  }
+
   if (!peerRuntimePromise) {
     peerRuntimePromise = Promise.resolve({
       default: WorkerSignaledPeer,

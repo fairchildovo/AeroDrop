@@ -70,7 +70,8 @@ export interface SenderSessionSnapshot extends TransferSessionState {
 
 export interface ReceiverSessionSnapshot extends TransferSessionState {
   code: string;
-  connectingStage: 'fetching_ice' | 'connecting_signaling' | 'connecting_peer' | 'waiting_response' | '';
+  connectingStage: 'fetching_ice' | 'connecting_signaling' | 'connecting_peer' | 'waiting_response' | 'reconnecting' | '';
+  reconnectAttempt: number;
   metadata: FileMetadata | null;
   senderDeviceName: string;
   canResume: boolean;

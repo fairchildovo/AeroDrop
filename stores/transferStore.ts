@@ -41,6 +41,7 @@ const createDefaultReceiverSnapshot = (): ReceiverSessionSnapshot => ({
   errorMsg: '',
   code: '',
   connectingStage: '',
+  reconnectAttempt: 0,
   metadata: null,
   senderDeviceName: '',
   canResume: false,

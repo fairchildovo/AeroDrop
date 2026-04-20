@@ -1,5 +1,12 @@
-# Logs
-logs
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+
+# Logs and transient debug output
+logs/
 *.log
 .tmp-*
 npm-debug.log*
@@ -7,35 +14,44 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.codex-*
+e2e-run.log
 
-node_modules
-dist
-dist-ssr
+# Environment and local overrides
 *.local
+.env*
+!.env.example
+.dev.vars*
+!.dev.vars.example
+
+# Test and coverage artifacts
+test-results/
+playwright-report/
+blob-report/
+coverage/
+.nyc_output/
+
+# Tooling caches and local worker state
+.wrangler/
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-figma/*
+
+# Local auxiliary directories
+figma/
 .claude/*
 .claude/settings.local.json
-.codex-*
-
-# wrangler files
-.wrangler
-.dev.vars*
-!.dev.vars.example
-.env*
-!.env.example
-
-# Local private documents
 private-docs/
 docs/
 skills/
+
+# Defensive rule for accidental OS/cache dumps into repo root
+%SystemDrive%/

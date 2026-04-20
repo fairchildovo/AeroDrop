@@ -6,6 +6,7 @@ import {
   type RelayReason,
   watchNetworkProfileChanges,
 } from './networkProfile';
+import { getAeroDropE2EHooks } from './e2eHooks';
 import { logDebug } from './diagnostics';
 
 type IceServerConfig = {
@@ -62,6 +63,11 @@ const ensureNetworkProfileListeners = () => {
 };
 
 export const getIceConfig = async (): Promise<IceConfigResult> => {
+  const e2eOverride = getAeroDropE2EHooks()?.getIceConfigOverride?.();
+  if (e2eOverride) {
+    return e2eOverride;
+  }
+
   ensureNetworkProfileListeners();
   const now = Date.now();
   const profile = getBrowserNetworkProfile();

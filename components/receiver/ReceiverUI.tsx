@@ -2,8 +2,12 @@ import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
 import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, File as FileIcon, ClipboardPaste, Layers, PlayCircle } from 'lucide-react';
+import {
+  getReceiverWaitingStatusCopy,
+  type ReceiverWaitingStage,
+} from '../../services/receiverStatusCopy';
 
-export type ReceiverConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_peer' | 'waiting_response' | '';
+export type ReceiverConnectingStage = ReceiverWaitingStage;
 
 interface ReceiverUIProps {
   state: TransferState;
@@ -16,6 +20,7 @@ interface ReceiverUIProps {
   onBackspace: () => void;
   onClear: () => void;
   connectingStage: ReceiverConnectingStage;
+  reconnectAttempt: number;
   onReset: () => void;
   metadata: FileMetadata | null;
   senderDeviceName: string;
@@ -46,6 +51,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
   onBackspace,
   onClear,
   connectingStage,
+  reconnectAttempt,
   onReset,
   metadata,
   senderDeviceName,
@@ -64,6 +70,11 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
   errorMsg,
   onRetry,
 }) => {
+  const waitingStatus = getReceiverWaitingStatusCopy({
+    stage: connectingStage,
+    reconnectAttempt,
+  });
+
   return (
     <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
       <div className="text-center mb-6">
@@ -114,21 +125,10 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
       {state === TransferState.WAITING_FOR_PEER && (
         <div className="flex flex-col items-center py-10 animate-pop-in">
           <Loader2 size={40} className="animate-spin text-brand-500 mb-4" />
-          <p className="text-slate-600 dark:text-slate-300 font-medium">
-            {connectingStage === 'fetching_ice' && '正在获取网络配置...'}
-            {connectingStage === 'connecting_signaling' && '正在连接信号服务器...'}
-            {connectingStage === 'connecting_peer' && '正在建立 P2P 通道...'}
-            {connectingStage === 'waiting_response' && '正在等待发送方响应...'}
-            {!connectingStage && '正在连接发送方...'}
-          </p>
-          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
-            {connectingStage === 'fetching_ice' && '获取 STUN/TURN 服务器信息'}
-            {connectingStage === 'connecting_signaling' && '连接 PeerJS 信令服务'}
-            {connectingStage === 'connecting_peer' && '通过 WebRTC 建立端到端连接'}
-            {connectingStage === 'waiting_response' && '已连接，等待发送方确认'}
-          </p>
+          <p className="text-slate-600 dark:text-slate-300 font-medium">{waitingStatus.title}</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">{waitingStatus.detail}</p>
           <button onClick={onReset} className="mt-8 px-6 py-2 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 rounded-full text-sm hover:bg-slate-50 dark:hover:bg-slate-600 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm active:scale-95">
-            取消
+            {waitingStatus.cancelLabel}
           </button>
         </div>
       )}

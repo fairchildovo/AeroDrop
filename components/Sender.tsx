@@ -42,7 +42,7 @@ import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChun
 import { useTransferStore } from '../stores/transferStore';
 import { createRouteProbeLogPayload } from '../services/routeProbeLog';
 import { getRouteSelectionDecision } from '../services/routeSelectionPolicy';
-import { createSenderSessionService } from '../services/senderSessionService';
+import { createSessionActivityTracker } from '../services/sessionActivityTracker';
 import {
   getCommittedTransferDisposition,
   isCommittedTransferMessageType,
@@ -150,6 +150,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const preservedSessionStateRef = useRef(new Map<string, ReturnType<typeof captureLogicalReceiverState>>());
   const routeSelectionDecisionRef = useRef<ReturnType<typeof getRouteSelectionDecision> | null>(null);
   const connectionIdsRef = useRef(new WeakMap<DataConnection, string>());
+  const shareActivityTrackerRef = useRef(createSessionActivityTracker());
 
   const getOrCreateConnectionId = (conn: DataConnection): string => {
     const existing = connectionIdsRef.current.get(conn);
@@ -805,6 +806,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const startSharing = async () => {
     if (!fileList.length || !metadata) return;
+    const shareActivityToken = shareActivityTrackerRef.current.begin();
     shareTelemetryRef.current = createConnectionSession('sender', {
       fileCount: fileList.length,
       totalSize: metadata.totalSize,
@@ -838,6 +840,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const metadataWithConstraints: FileMetadata = { ...metadata, protocolVersion: P2P_PROTOCOL_VERSION, constraints: { expiresAt } };
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
+    if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || isDestroyingRef.current || !isMountedRef.current) {
+      return;
+    }
     const networkProfile = getBrowserNetworkProfile();
     routeSelectionDecisionRef.current = getRouteSelectionDecision({
       isMobileDevice: networkProfile.isMobileDevice,
@@ -895,19 +900,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           }
         });
       } catch {
+        if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) {
+          return;
+        }
         setErrorMsg('加载连接模块失败，请重试');
         setState(TransferState.ERROR);
         return;
       }
 
-      if (isDestroyingRef.current || !isMountedRef.current) {
+      if (
+        !shareActivityTrackerRef.current.isCurrent(shareActivityToken) ||
+        isDestroyingRef.current ||
+        !isMountedRef.current
+      ) {
         try { customPeer.destroy(); } catch {}
         return;
       }
 
       clearSignalingOpenTimeout();
       signalingOpenTimeoutRef.current = window.setTimeout(() => {
-        if (isDestroyingRef.current) return;
+        if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || isDestroyingRef.current) return;
         if (peerRef.current !== customPeer) return;
         markSessionEvent(shareTelemetryRef.current, 'signaling_open_timeout', { attempt });
         try { customPeer.destroy(); } catch {}
@@ -922,7 +934,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
       customPeer.on('open', clearSignalingOpenTimeout);
       customPeer.on('error', clearSignalingOpenTimeout);
-      setupPeerListeners(customPeer, finalCode, metadataWithConstraints);
+      setupPeerListeners(customPeer, finalCode, metadataWithConstraints, shareActivityToken);
     };
 
     void createSharePeer(0);
@@ -1097,9 +1109,17 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       }, 100);
   };
 
-  const setupPeerListeners = (peer: Peer, code: string, sessionMetadata: FileMetadata) => {
+  const setupPeerListeners = (
+    peer: Peer,
+    code: string,
+    sessionMetadata: FileMetadata,
+    shareActivityToken: number
+  ) => {
       peerRef.current = peer;
       peer.on('open', () => {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || peerRef.current !== peer) {
+              return;
+          }
           markSignalingOpen(shareTelemetryRef.current);
           markConnectionSuccess(shareTelemetryRef.current, { code });
           setTransferCode(code);
@@ -1107,9 +1127,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           setState(TransferState.WAITING_FOR_PEER);
       });
       peer.on('disconnected', () => {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || peerRef.current !== peer) {
+              return;
+          }
           if (peer && !peer.destroyed) peer.reconnect();
       });
       peer.on('error', (err) => {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || peerRef.current !== peer) {
+              return;
+          }
           if (err.type === 'unavailable-id') {
               markConnectionFailure(shareTelemetryRef.current, 'code_unavailable');
               setErrorMsg('该口令已被占用，请换一个。');
@@ -1132,6 +1158,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           }
       });
       peer.on('connection', (conn) => {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || peerRef.current !== peer) {
+             try { conn.close(); } catch {}
+             return;
+          }
           if (sessionMetadata.constraints?.expiresAt && Date.now() > sessionMetadata.constraints.expiresAt) {
              conn.on('open', () => {
                  conn.send({ type: 'REJECT_TRANSFER', payload: { reason: '分享已过期' } });
@@ -1567,6 +1597,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
 
   const stopSharing = () => {
     isDestroyingRef.current = true;
+    shareActivityTrackerRef.current.begin();
     if (signalingOpenTimeoutRef.current !== null) {
       window.clearTimeout(signalingOpenTimeoutRef.current);
       signalingOpenTimeoutRef.current = null;
@@ -1598,9 +1629,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerHeartbeatAtRef.current.clear();
     peerAdaptiveFlowRef.current.clear();
     committedRouteLogSignatureRef.current.clear();
+    const peerToDestroy = peerRef.current;
+    peerRef.current = null;
 
     setTimeout(() => {
-        if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
+        if (peerToDestroy && !peerToDestroy.destroyed) {
+          peerToDestroy.destroy();
+        }
     }, 100);
     
     activeTransfersCount.current = 0;
@@ -1732,13 +1767,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     transferredBytes,
   ]);
 
-  const senderSessionService = createSenderSessionService({
-    startShare: startSharing,
-    stopShare: stopSharing,
-    copyShareCode: handleCopyCode,
-    copyShareLink: handleCopyLink,
-    getSenderSessionSnapshot: () => useTransferStore.getState().sender,
-  });
 
   return (
     <SenderUI
@@ -1749,20 +1777,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       metadata={metadata}
       showFileList={showFileList}
       onToggleFileList={() => setShowFileList((prev) => !prev)}
-      stopSharing={senderSessionService.stopShare}
+      stopSharing={stopSharing}
       expiryOption={expiryOption}
       setExpiryOption={setExpiryOption}
       customCodeInput={customCodeInput}
       setCustomCodeInput={setCustomCodeInput}
       errorMsg={errorMsg}
-      startSharing={senderSessionService.startShare}
+      startSharing={startSharing}
       preparingStage={preparingStage}
-      handleCopyCode={senderSessionService.copyShareCode}
+      handleCopyCode={handleCopyCode}
       copied={copied}
       transferCode={transferCode}
       linkCopied={linkCopied}
       shareLink={shareLink}
-      handleCopyLink={senderSessionService.copyShareLink}
+      handleCopyLink={handleCopyLink}
       remainingTime={remainingTime}
       connectionStatus={connectionStatus}
       individualStats={individualStats}
@@ -1779,3 +1807,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     />
   );
 };
+
+
+
+
+

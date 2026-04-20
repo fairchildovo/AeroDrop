@@ -289,17 +289,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const videoSender = senders.find(s => s.track?.kind === 'video');
 
     if (videoSender) {
-      // 1. 尝试强制使用 VP9 编码（效率更高，同码率画质更好）
-      // 注意：这需要浏览器支持，Chrome/Edge 默认支持
-      const codecs = RTCRtpReceiver.getCapabilities('video')?.codecs;
-      const vp9Codec = codecs?.find(c => c.mimeType === 'video/VP9');
-
-      if (vp9Codec) {
-        // 如果支持 VP9，尝试将其设置为首选
-        // 注意：setParameters 不支持直接切换 codec，这里主要是为了后续 SDP 协商
-        // 实际 codec 选择主要由 SDP 决定，但我们可以尝试在参数中寻找相关设置
-        // 目前标准 API 中 setParameters 主要用于调整编码参数（码率、分辨率等）
-      }
 
       const params = videoSender.getParameters();
       if (!params.encodings || params.encodings.length === 0) {
@@ -1154,26 +1143,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         const audioTracks = remoteStream.getAudioTracks();
         const videoTracks = remoteStream.getVideoTracks();
 
-        // 关键优化：移除播放缓冲延迟 (Jitter Buffer)
-        // 跨网络时，浏览器默认会有较大的抖动缓冲，导致"追赶"现象
-        // 强制接收端尽可能实时播放
-        if (typeof (window as any).RTCRtpReceiver !== 'undefined' && 'playoutDelayHint' in (window as any).RTCRtpReceiver.prototype) {
-          // 注意：这里我们无法直接获取 receiver 实例，只能尝试通过 track 设置
-          // 但实际上 playoutDelayHint 是 receiver 的属性。
-          // 对于 PeerJS，我们可以在 on('track') 时处理，但这里我们通过 hack 方式：
-          // 如果浏览器支持，在 video 元素上也尽量设置低延迟属性
-        }
-
-        // 补充：直接设置接收端 receiver 的 playoutDelayHint
-        // 我们需要遍历 peer connection 的 receivers
-        if (peerRef.current) {
+        // Keep receiver playout delay near real-time when the browser exposes
+        // RTCRtpReceiver.playoutDelayHint on the active peer connections.
+        if (
+          typeof (window as any).RTCRtpReceiver !== 'undefined' &&
+          'playoutDelayHint' in (window as any).RTCRtpReceiver.prototype &&
+          peerRef.current
+        ) {
           Object.values(peerRef.current.connections).forEach((conns: any) => {
             conns.forEach((conn: any) => {
               if (conn.peerConnection) {
                 const receivers = conn.peerConnection.getReceivers();
                 receivers.forEach((receiver: any) => {
                   if (receiver.track?.kind === 'video' && 'playoutDelayHint' in receiver) {
-                    receiver.playoutDelayHint = 0; // 0 表示尽可能实时
+                    receiver.playoutDelayHint = 0;
                     logDebug('log', 'Set playoutDelayHint to 0 for real-time latency');
                   }
                 });
@@ -1438,10 +1421,59 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     };
   }, [isSharing, broadcastShareEnded]);
 
+  const getScreenShareAudioSuffix = useCallback((stream: MediaStream) => {
+    return stream.getAudioTracks().length > 0 ? '（含音频）' : '';
+  }, []);
+
+  const prepareCapturedStream = useCallback(async (stream: MediaStream) => {
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack && 'contentHint' in videoTrack) {
+      (videoTrack as any).contentHint = 'detail';
+    }
+    await applyLocalTrackConstraints(stream, qualityLevelRef.current);
+    return stream;
+  }, [applyLocalTrackConstraints]);
+
+  const attachSharePreviewStream = useCallback((stream: MediaStream, logMessage: string) => {
+    streamRef.current = stream;
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch((error) => {
+        logDebug('warn', logMessage, error);
+      });
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.onended = () => {
+        stopScreenShare();
+      };
+    }
+  }, []);
+
+  const replaceActiveCallTracks = useCallback((stream: MediaStream) => {
+    const nextVideoTrack = stream.getVideoTracks()[0];
+    const nextAudioTrack = stream.getAudioTracks()[0];
+
+    activeCallsRef.current.forEach((call) => {
+      const senders = call.peerConnection?.getSenders();
+      if (!senders) return;
+
+      const videoSender = senders.find((sender) => sender.track?.kind === 'video');
+      if (videoSender && nextVideoTrack) {
+        videoSender.replaceTrack(nextVideoTrack);
+      }
+
+      const audioSender = senders.find((sender) => sender.track?.kind === 'audio');
+      if (audioSender && nextAudioTrack) {
+        audioSender.replaceTrack(nextAudioTrack);
+      }
+    });
+  }, []);
 
   const startScreenShare = async () => {
     setError(null);
-
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
       setError('您的浏览器不支持屏幕共享，请使用桌面端浏览器:Chrome、Edge 或 Firefox');
@@ -1450,42 +1482,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
 
     try {
+      const stream = await prepareCapturedStream(
+        await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints())
+      );
 
-      const stream = await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints());
-
-      // 屏幕共享以文字和细节为主，优先保证清晰度
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack && 'contentHint' in videoTrack) {
-        (videoTrack as any).contentHint = 'detail';
-      }
-      await applyLocalTrackConstraints(stream, qualityLevelRef.current);
-
-
-
-      streamRef.current = stream;
-
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-
-        videoRef.current.play().catch((error) => {
-          logDebug('warn', 'Share preview playback failed', error);
-        });
-      }
-
-
-      stream.getVideoTracks()[0].onended = () => {
-        stopScreenShare();
-      };
-
+      attachSharePreviewStream(stream, 'Share preview playback failed');
       setIsSharing(true);
-
-
-
       initializePeer();
-
-      const audioInfo = stream.getAudioTracks().length > 0 ? '（含音频）' : '';
-      onNotification(`屏幕共享已开始${audioInfo}`, 'success');
+      onNotification(`屏幕共享已开始${getScreenShareAudioSuffix(stream)}`, 'success');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : '无法启动屏幕共享';
 
@@ -1498,61 +1502,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   };
 
-
   const changeScreenSource = async () => {
     try {
-
-      const newStream = await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints());
-
-      const videoTrack = newStream.getVideoTracks()[0];
-      if (videoTrack && 'contentHint' in videoTrack) {
-        (videoTrack as any).contentHint = 'detail';
-      }
-      await applyLocalTrackConstraints(newStream, qualityLevelRef.current);
-
+      const newStream = await prepareCapturedStream(
+        await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints())
+      );
 
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
 
-
-      streamRef.current = newStream;
-
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = newStream;
-        videoRef.current.play().catch((error) => {
-          logDebug('warn', 'Window switch preview playback failed', error);
-        });
-      }
-
-
-      newStream.getVideoTracks()[0].onended = () => {
-        stopScreenShare();
-      };
-
-
-      activeCallsRef.current.forEach((call) => {
-        const senders = call.peerConnection?.getSenders();
-        if (!senders) return;
-
-
-        const videoTrack = newStream.getVideoTracks()[0];
-        const videoSender = senders.find(s => s.track?.kind === 'video');
-        if (videoSender && videoTrack) {
-          videoSender.replaceTrack(videoTrack);
-        }
-
-
-        const audioTrack = newStream.getAudioTracks()[0];
-        const audioSender = senders.find(s => s.track?.kind === 'audio');
-        if (audioSender && audioTrack) {
-          audioSender.replaceTrack(audioTrack);
-        }
-      });
-
-      const audioInfo = newStream.getAudioTracks().length > 0 ? '（含音频）' : '';
-      onNotification(`已切换共享窗口${audioInfo}`, 'success');
+      attachSharePreviewStream(newStream, 'Window switch preview playback failed');
+      replaceActiveCallTracks(newStream);
+      onNotification(`已切换共享窗口${getScreenShareAudioSuffix(newStream)}`, 'success');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : '无法切换共享窗口';
       if (!errorMessage.includes('Permission denied') && !errorMessage.includes('NotAllowedError')) {
@@ -1560,7 +1522,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
     }
   };
-
 
   const stopScreenShare = () => {
     broadcastShareEnded('stopped');
@@ -1575,13 +1536,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       streamRef.current = null;
     }
 
-    // 关闭所有数据连接
-    activeDataConnectionsRef.current.forEach(conn => conn.close());
+    activeDataConnectionsRef.current.forEach((conn) => conn.close());
     activeDataConnectionsRef.current = [];
     viewerHeartbeatsRef.current = {};
 
-    // 关闭所有媒体连接并重置人数
-    activeCallsRef.current.forEach(call => call.close());
+    activeCallsRef.current.forEach((call) => call.close());
     activeCallsRef.current = [];
     setViewerCount(0);
     peerQualityLevelRef.current.clear();
@@ -1592,12 +1551,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     qualityLevelRef.current = 'high';
     stopBandwidthMonitoring();
 
-
     if (peerRef.current) {
       peerRef.current.destroy();
       peerRef.current = null;
     }
-
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
@@ -1655,3 +1612,5 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     />
   );
 };
+
+

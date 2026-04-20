@@ -13,6 +13,7 @@ import {
   type InitialRouteState,
   type Mode,
 } from './services/initialRouteState';
+import { shouldEnqueueNotification } from './services/notificationPolicy';
 import { appendNetworkProfileQuery, getBrowserNetworkProfile } from './services/networkProfile';
 import { writeScreenShareViewSession } from './services/screenShareViewerSession';
 import { logDebug } from './services/diagnostics';
@@ -50,6 +51,7 @@ interface NetworkCheckResponse {
 }
 
 const RISK_BANNER_DISMISS_UNTIL_KEY = 'aerodrop-risk-banner-dismiss-until';
+const NOTIFICATION_DEDUPE_WINDOW_MS = 1500;
 
 const App: React.FC = () => {
   const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
@@ -311,8 +313,14 @@ const App: React.FC = () => {
   }, []);
 
   const addNotification = (message: string, type: 'success' | 'info' | 'error') => {
-    const id = Date.now().toString() + Math.random().toString(36).substring(2, 9);
-    setNotifications(prev => [...prev, { id, message, type, timestamp: Date.now() }]);
+    const now = Date.now();
+    const id = now.toString() + Math.random().toString(36).substring(2, 9);
+    setNotifications((prev) => {
+      if (!shouldEnqueueNotification(prev, { message, type, now, dedupeWindowMs: NOTIFICATION_DEDUPE_WINDOW_MS })) {
+        return prev;
+      }
+      return [...prev, { id, message, type, timestamp: now }];
+    });
 
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));

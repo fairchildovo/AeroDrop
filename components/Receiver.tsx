@@ -71,12 +71,17 @@ import {
   getOrCreateReceiverRouteSessionId,
   rotateReceiverRouteSessionId,
 } from '../services/receive/receiverRouteSessionId';
+import { createSessionActivityTracker } from '../services/sessionActivityTracker';
 import {
   getRouteSelectionDecision,
   getRouteSelectionTimings,
 } from '../services/routeSelectionPolicy';
+import {
+  shouldHandleReceiverActivity,
+  shouldRunReceiverScheduledReconnect,
+} from '../services/receiverActivityPolicy';
+import { createTimeoutGroup } from '../services/timeoutGroup';
 import { useTransferStore } from '../stores/transferStore';
-import { createReceiverSessionService } from '../services/receiverSessionService';
 import { logDebug } from '../services/diagnostics';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
 
@@ -178,6 +183,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const [eta, setEta] = useState<string>('--');
   const [senderDeviceName, setSenderDeviceName] = useState<string>('');
   const [connectingStage, setConnectingStage] = useState<ReceiverConnectingStage>('');
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -211,6 +217,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     relay: null,
   });
   const receiveRouteArbiterRef = useRef<ReturnType<typeof createReceiveRouteArbiter> | null>(null);
+  const receiverActivityTrackerRef = useRef(createSessionActivityTracker());
+  const backgroundTimeoutGroupRef = useRef(createTimeoutGroup());
 
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -507,6 +515,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       clearConnectionTimeout();
       clearHeartbeatTimer();
       clearCommittedReconnectTimer();
+      backgroundTimeoutGroupRef.current.clearAll();
       resetRouteAttemptState();
       if (connRef.current) {
         markIntentionalConnectionClose(connRef.current);
@@ -1156,6 +1165,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }).mode;
       setTotalFiles(meta.files?.length || 0);
       setState(TransferState.PEER_CONNECTED);
+      setReconnectAttempt(0);
       setCanResume(isResumable);
       committedReconnectAttemptsRef.current = 0;
       isTransferActiveRef.current = false;
@@ -1212,10 +1222,17 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const setupConnListeners = (
     conn: DataConnection,
     attemptKind: RouteAttemptKind,
-    attemptId: string
+    attemptId: string,
+    activityToken: number
   ) => {
     let reconnectScheduled = false;
     registerRouteAttempt({ attemptId, attemptKind, conn });
+
+    const isCurrentActivity = () =>
+      shouldHandleReceiverActivity({
+        activityToken,
+        currentActivityToken: receiverActivityTrackerRef.current.current(),
+      });
 
     const scheduleFastReconnect = () => {
       if (reconnectScheduled) return true;
@@ -1229,18 +1246,37 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       retryCountRef.current += 1;
       const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
       markConnectionRetry(connectTelemetryRef.current, 'data_channel_close_or_error');
-      window.setTimeout(() => {
-        if (!peerRef.current || peerRef.current.destroyed) return;
-        if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
+      backgroundTimeoutGroupRef.current.schedule(() => {
+        const activePeer = peerRef.current;
+        if (
+          !shouldRunReceiverScheduledReconnect({
+            activityToken,
+            currentActivityToken: receiverActivityTrackerRef.current.current(),
+            state: stateRef.current,
+            hasPeer: activePeer !== null,
+            peerDestroyed: activePeer?.destroyed === true,
+          })
+        ) {
+          return;
+        }
+        if (!activePeer) {
+          return;
+        }
         startConnectionAttempt(connectTelemetryRef.current, 'fast_retry');
-        const nextConn = peerRef.current.connect(`aerodrop-${codeRef.current}`, { serialization: 'binary' });
+        const nextConn = activePeer.connect(`aerodrop-${codeRef.current}`, { serialization: 'binary' });
         const nextAttemptId = getNextRouteAttemptId('all');
-        setupConnListeners(nextConn, 'all', nextAttemptId);
+        setupConnListeners(nextConn, 'all', nextAttemptId, activityToken);
       }, delay);
       return true;
     };
 
     conn.on('open', () => {
+      if (!isCurrentActivity()) {
+        unregisterRouteAttempt(attemptId);
+        markIntentionalConnectionClose(conn);
+        try { conn.close(); } catch {}
+        return;
+      }
       clearConnectionTimeout();
       retryCountRef.current = 0;
 
@@ -1324,6 +1360,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
     conn.on('data', (data: any) => {
       void incomingDataProcessorRef.current.enqueue(async () => {
+        if (!isCurrentActivity()) {
+          return;
+        }
         if (data == null) return;
 
         const currentState = stateRef.current;
@@ -1424,6 +1463,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('close', () => {
+       if (!isCurrentActivity()) {
+        unregisterRouteAttempt(attemptId);
+        intentionalConnectionCloseRef.current.delete(conn);
+        return;
+       }
        if (connRef.current !== conn) {
         unregisterRouteAttempt(attemptId);
         if (happyEyeballsWonRef.current) return;
@@ -1467,14 +1511,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         committedReconnectAttemptsRef.current += 1;
         const reconnectAttempt = committedReconnectAttemptsRef.current;
         const reconnectDelayMs = getCommittedSessionReconnectDelayMs(reconnectAttempt);
+        setReconnectAttempt(reconnectAttempt);
         setErrorMsg('连接中断，正在尝试恢复...');
-        setConnectingStage('connecting_signaling');
+        setConnectingStage('reconnecting');
         setState(TransferState.WAITING_FOR_PEER);
         if (onNotification) {
           onNotification(`连接中断，正在尝试第 ${reconnectAttempt} 次重连...`, 'info');
         }
         committedReconnectTimerRef.current = window.setTimeout(() => {
           committedReconnectTimerRef.current = null;
+          if (!isCurrentActivity()) return;
           if (codeRef.current.length !== 4) return;
           void handleConnectRef.current({ preserveCommittedReconnectAttempts: true });
         }, reconnectDelayMs);
@@ -1500,6 +1546,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     });
 
     conn.on('error', () => {
+      if (!isCurrentActivity()) {
+        unregisterRouteAttempt(attemptId);
+        intentionalConnectionCloseRef.current.delete(conn);
+        return;
+      }
       if (connRef.current !== conn) {
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current === TransferState.WAITING_FOR_PEER) {
@@ -1679,6 +1730,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const markReceiveSessionCompleted = () => {
     setState(TransferState.COMPLETED);
+    setReconnectAttempt(0);
     if (onNotification) onNotification("所有文件接收完毕", 'success');
     resetStateForNewTransfer();
     isTransferActiveRef.current = false;
@@ -1900,10 +1952,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const handleConnect = async (options?: { preserveCommittedReconnectAttempts?: boolean }) => {
     if (!code || code.length !== 4) return;
+    const receiverActivityToken = receiverActivityTrackerRef.current.begin();
     clearCommittedReconnectTimer();
+    backgroundTimeoutGroupRef.current.clearAll();
     if (!options?.preserveCommittedReconnectAttempts) {
       committedReconnectAttemptsRef.current = 0;
       pendingCommittedReconnectResumeRef.current = false;
+      setReconnectAttempt(0);
     }
     connectTelemetryRef.current = createConnectionSession('receiver', { code });
     setState(TransferState.WAITING_FOR_PEER);
@@ -1921,6 +1976,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
 
     const iceConfig = await getIceConfig();
+    if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+      return;
+    }
     const networkProfile = getBrowserNetworkProfile();
     const connectionPlan = createHappyEyeballsPlan(iceConfig, networkProfile, {
       defaultInitialTimeoutMs: INITIAL_TIMEOUT_MS,
@@ -2016,6 +2074,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       clearConnectionTimeout();
       connectionTimeoutRef.current = setTimeout(() => {
         connectionTimeoutRef.current = null;
+        if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+          return;
+        }
 
         // If happy-eyeballs already connected, ignore the timeout.
         if (happyEyeballsWonRef.current) return;
@@ -2042,6 +2103,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     };
 
     const createAndConnectPeer = async (policy: RTCIceTransportPolicy, timeoutMs: number) => {
+      if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+        return;
+      }
       // For relay fallback via happy-eyeballs, keep the P2P peer alive.
       if (policy !== 'relay' && peerRef.current && !peerRef.current.destroyed) {
         peerRef.current.destroy();
@@ -2060,18 +2124,28 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           }
         });
       } catch {
+        if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+          return;
+        }
         clearConnectionTimeout();
         setErrorMsg('加载连接模块失败，请重试');
         setState(TransferState.ERROR);
         return;
       }
 
-      if (stateRef.current !== TransferState.WAITING_FOR_PEER) {
+      if (
+        !receiverActivityTrackerRef.current.isCurrent(receiverActivityToken) ||
+        stateRef.current !== TransferState.WAITING_FOR_PEER
+      ) {
         try { peer.destroy(); } catch {}
         return;
       }
 
       peer.on('open', () => {
+        if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+          peer.destroy();
+          return;
+        }
         if (happyEyeballsWonRef.current) { peer.destroy(); return; }
         markSignalingOpen(connectTelemetryRef.current);
         setConnectingStage('connecting_peer');
@@ -2082,10 +2156,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (policy === 'relay') {
           relayConnRef.current = conn;
         }
-        setupConnListeners(conn, attemptKind, attemptId);
+        setupConnListeners(conn, attemptKind, attemptId, receiverActivityToken);
       });
 
       peer.on('error', (err) => {
+        if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+          return;
+        }
         if (happyEyeballsWonRef.current) return;
         if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
           // Skip peer-unavailable retries for the background relay attempt
@@ -2094,13 +2171,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           retryCountRef.current++;
           const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
           markConnectionRetry(connectTelemetryRef.current, 'peer_unavailable');
-          window.setTimeout(() => {
+          backgroundTimeoutGroupRef.current.schedule(() => {
+            if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) return;
             if (happyEyeballsWonRef.current) return;
             if (peer && !peer.destroyed) {
               startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
               const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
               const attemptId = getNextRouteAttemptId('all');
-              setupConnListeners(conn, 'all', attemptId);
+              setupConnListeners(conn, 'all', attemptId, receiverActivityToken);
             }
           }, delay);
         } else {
@@ -2149,7 +2227,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       backgroundDelayMs !== null &&
       backgroundTimeoutMs !== null
     ) {
-      window.setTimeout(() => {
+      backgroundTimeoutGroupRef.current.schedule(() => {
+        if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) return;
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
         markSessionEvent(
@@ -2170,7 +2249,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       backgroundPolicy === null &&
       primaryProbeWindowMs !== null
     ) {
-      window.setTimeout(() => {
+      backgroundTimeoutGroupRef.current.schedule(() => {
+        if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) return;
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current !== TransferState.WAITING_FOR_PEER) return;
         if (allAttemptProgressedRef.current) return;
@@ -2265,6 +2345,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       connRef.current.send({ type: 'ACCEPT_TRANSFER' });
       setState(TransferState.TRANSFERRING);
+      setReconnectAttempt(0);
     } else {
       setErrorMsg("连接已断开，请重新连接发送方。");
       setState(TransferState.ERROR);
@@ -2277,29 +2358,43 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const reset = () => {
+    const resetActivityToken = receiverActivityTrackerRef.current.begin();
     isStreamingRef.current = false;
     isTransferActiveRef.current = false;
     happyEyeballsWonRef.current = false;
     clearConnectionTimeout();
     clearHeartbeatTimer();
     clearCommittedReconnectTimer();
+    backgroundTimeoutGroupRef.current.clearAll();
     resetRouteAttemptState();
     pendingCommittedReconnectResumeRef.current = false;
+    const previousSessionId = receiverSessionIdRef.current;
+    const closingConn = connRef.current;
+    const closingPeer = peerRef.current;
+    const closingRelayPeer = relayPeerRef.current;
+    connRef.current = null;
+    peerRef.current = null;
+    relayPeerRef.current = null;
     
     abortStreams().then(() => {
-        const previousSessionId = receiverSessionIdRef.current;
         deleteIndexedDbChunksForSession(previousSessionId).catch(() => {});
-        if (connRef.current) {
-          markIntentionalConnectionClose(connRef.current);
-          connRef.current.close();
+        if (closingConn) {
+          markIntentionalConnectionClose(closingConn);
+          closingConn.close();
         }
-        if (peerRef.current) peerRef.current.destroy();
-        if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} relayPeerRef.current = null; }
+        if (closingPeer) closingPeer.destroy();
+        if (closingRelayPeer) {
+          try { closingRelayPeer.destroy(); } catch {}
+        }
+        if (!receiverActivityTrackerRef.current.isCurrent(resetActivityToken)) {
+          return;
+        }
         setMetadata(null);
         setCode('');
         setState(TransferState.IDLE);
         setErrorMsg('');
         setConnectingStage('');
+        setReconnectAttempt(0);
         setProgress(0);
         setDownloadSpeedBytes(0);
         setSenderDeviceName('');
@@ -2364,6 +2459,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       errorMsg,
       code,
       connectingStage,
+      reconnectAttempt,
       metadata,
       senderDeviceName,
       canResume,
@@ -2383,6 +2479,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     canResume,
     code,
     connectingStage,
+    reconnectAttempt,
     currentFileName,
     downloadSpeed,
     downloadSpeedBytes,
@@ -2399,19 +2496,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     totalFiles,
   ]);
 
-  const receiverSessionService = createReceiverSessionService({
-    connect: async (nextCode: string) => {
-      if (nextCode !== code) {
-        setCode(nextCode);
-        return;
-      }
-      await handleConnect();
-    },
-    acceptTransfer,
-    resumeTransfer,
-    resetReceiverSession: reset,
-    getReceiverSessionSnapshot: () => useTransferStore.getState().receiver,
-  });
 
   return (
     <ReceiverUI
@@ -2425,15 +2509,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       onBackspace={handleBackspace}
       onClear={handleClear}
       connectingStage={connectingStage}
-      onReset={receiverSessionService.resetReceiverSession}
+      reconnectAttempt={reconnectAttempt}
+      onReset={reset}
       metadata={metadata}
       senderDeviceName={senderDeviceName}
       isMultiFile={isMultiFile}
       primaryFileName={primaryFile?.name}
       canResume={canResume}
       isStreaming={isStreamingRef.current}
-      onResumeTransfer={receiverSessionService.resumeTransfer}
-      onAcceptTransfer={receiverSessionService.acceptTransfer}
+      onResumeTransfer={resumeTransfer}
+      onAcceptTransfer={acceptTransfer}
       progress={progress}
       downloadSpeed={downloadSpeed}
       eta={eta}
@@ -2445,3 +2530,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     />
   );
 };
+
+
+
+
+
