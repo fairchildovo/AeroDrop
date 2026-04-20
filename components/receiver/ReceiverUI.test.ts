@@ -11,7 +11,7 @@ const singleFileMetadata: FileMetadata = {
   totalSize: 1024,
 };
 
-const baseProps = {
+const baseProps: React.ComponentProps<typeof ReceiverUI> = {
   state: TransferState.PEER_CONNECTED,
   code: '',
   inputRef: { current: null },
