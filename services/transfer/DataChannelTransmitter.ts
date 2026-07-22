@@ -5,8 +5,29 @@ type FlowControlConfig = {
   lowWaterMark: number;
 };
 
+export const DEFAULT_SAFE_DATA_CHANNEL_MESSAGE_SIZE = 64 * 1024;
+
 const BUFFER_DRAIN_TIMEOUT_MS = 30_000;
 const BUFFER_DRAIN_POLL_INTERVAL_MS = 100;
+
+export const resolveDataChannelChunkSize = (
+  routeChunkCap: number,
+  maxMessageSize?: number | null,
+) => {
+  const negotiatedLimit = maxMessageSize === Number.POSITIVE_INFINITY
+    ? routeChunkCap
+    : typeof maxMessageSize === 'number' && Number.isFinite(maxMessageSize) && maxMessageSize > 0
+      ? Math.floor(maxMessageSize)
+      : DEFAULT_SAFE_DATA_CHANNEL_MESSAGE_SIZE;
+
+  return Math.max(1, Math.min(Math.floor(routeChunkCap), negotiatedLimit));
+};
+
+export const isDataChannelMessageTooLargeError = (error: unknown) => {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'TypeError'
+    || /message.{0,20}(too large|size)|maxmessagesize|sctp/i.test(error.message);
+};
 
 const isTransportUnavailable = (
   conn: DataConnection,

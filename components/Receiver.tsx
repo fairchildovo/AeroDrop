@@ -17,6 +17,7 @@ import {
   getReceiverDisconnectedMessage,
   getReceiverPreTransferFailureMessage,
   NO_TURN_WARNING_MESSAGE,
+  RATE_LIMITED_CONNECTION_MESSAGE,
 } from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
 import { TRANSFER_CONFIG } from '../constants/transfer';
@@ -25,7 +26,6 @@ import {
   collectIceRouteWithRetry,
   ConnectionSession,
   createConnectionSession,
-  type IceRoute,
   markConnectionFailure,
   markConnectionRetry,
   markConnectionSuccess,
@@ -263,6 +263,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const lastSpeedUpdateRef = useRef<number>(0);
   const lastSpeedBytesRef = useRef<number>(0);
   const lastReportedSpeedBytesRef = useRef<number>(0);
+  const lastProgressAckBytesRef = useRef<number>(0);
+  const progressAckTimerRef = useRef<number | null>(null);
   const receivePersistenceAdapterRef = useRef<ReceivePersistenceAdapter | null>(null);
   const receiveRecoveryCoordinatorRef = useRef<ReceiveRecoveryCoordinator | null>(null);
   const receivePersistenceOrchestratorRef = useRef<ReceivePersistenceOrchestrator | null>(null);
@@ -278,6 +280,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   if (!receiveStreamingWriterRef.current) {
     receiveStreamingWriterRef.current = createReceiveStreamingWriter({
       flushThresholdBytes: BUFFER_FLUSH_THRESHOLD,
+      maxPendingBytes: TRANSFER_CONFIG.MAX_PENDING_WRITE_BYTES,
     });
   }
   const receiveStreamingWriter = receiveStreamingWriterRef.current;
@@ -300,6 +303,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (heartbeatTimerRef.current) {
       clearInterval(heartbeatTimerRef.current);
       heartbeatTimerRef.current = null;
+    }
+  };
+
+  const clearProgressAckTimer = () => {
+    if (progressAckTimerRef.current !== null) {
+      clearTimeout(progressAckTimerRef.current);
+      progressAckTimerRef.current = null;
     }
   };
 
@@ -516,6 +526,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       isMountedRef.current = false;
       clearConnectionTimeout();
       clearHeartbeatTimer();
+      clearProgressAckTimer();
       clearCommittedReconnectTimer();
       backgroundTimeoutGroupRef.current.clearAll();
       resetRouteAttemptState();
@@ -1084,7 +1095,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       currentIndex >= 0 &&
       currentIndex < files.length &&
       !completedFileIndicesRef.current.has(currentIndex)
-    ) ? Math.min(receivedSizeRef.current, files[currentIndex].size) : 0;
+    )
+      ? Math.min(
+          receiveStreamingWriter.isStreaming()
+            ? receiveStreamingWriter.getCommittedBytes()
+            : isIndexedDbBufferingRef.current
+              ? indexedDbBufferedBytesRef.current
+              : receivedSizeRef.current,
+          files[currentIndex].size
+        )
+      : 0;
     const overallTransferredBytes = Math.min(overallTotalBytes, completedBytes + currentFileBytes);
     return { overallTransferredBytes, overallTotalBytes };
   };
@@ -1093,6 +1113,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const conn = connRef.current;
     if (!conn || !conn.open) return;
     const { overallTransferredBytes, overallTotalBytes } = getOverallTransferSnapshot();
+    clearProgressAckTimer();
     try {
       conn.send({
         type: 'TRANSFER_PROGRESS',
@@ -1100,11 +1121,30 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           overallTransferredBytes,
           overallTotalBytes,
           speedBytes: Math.max(0, speedBytes),
+          receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
         }
       });
+      lastProgressAckBytesRef.current = overallTransferredBytes;
     } catch {
       // Ignore transient progress sync failures; next tick will retry.
     }
+  };
+
+  const scheduleCommittedProgress = () => {
+    const { overallTransferredBytes } = getOverallTransferSnapshot();
+    if (overallTransferredBytes <= lastProgressAckBytesRef.current) return;
+    if (
+      overallTransferredBytes - lastProgressAckBytesRef.current >=
+      TRANSFER_CONFIG.WRITE_BATCH_BYTES
+    ) {
+      sendTransferProgress(lastReportedSpeedBytesRef.current);
+      return;
+    }
+    if (progressAckTimerRef.current !== null) return;
+    progressAckTimerRef.current = window.setTimeout(() => {
+      progressAckTimerRef.current = null;
+      sendTransferProgress(lastReportedSpeedBytesRef.current);
+    }, 50);
   };
 
   const flushSpecificBatch = async (batch: Uint8Array[], totalLen: number) => {
@@ -1114,6 +1154,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const failTransferPersistence = (message: string) => {
       isTransferActiveRef.current = false;
+      clearProgressAckTimer();
       receiveRecoveryCoordinatorRef.current?.reset();
       setErrorMsg(message);
       setState(TransferState.ERROR);
@@ -1133,8 +1174,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     else if (msg.type === 'METADATA') {
       const meta = msg.payload as FileMetadata;
       const remoteProtocolVersion = typeof meta.protocolVersion === 'number' ? meta.protocolVersion : 1;
-      if (remoteProtocolVersion > P2P_PROTOCOL_VERSION) {
-          setErrorMsg(`发送方协议版本(${remoteProtocolVersion})高于当前版本(${P2P_PROTOCOL_VERSION})，请升级接收端。`);
+      if (remoteProtocolVersion !== P2P_PROTOCOL_VERSION) {
+          setErrorMsg(`发送方协议版本(${remoteProtocolVersion})与当前版本(${P2P_PROTOCOL_VERSION})不兼容，请升级两端后重试。`);
           setState(TransferState.ERROR);
           conn.close();
           return;
@@ -1320,27 +1361,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
     });
 
-    const buildRouteSnapshot = (route: IceRoute | null) => {
-      if (!route) {
-        return {
-          isDirect: attemptKind === 'all',
-          isLanDirect: false,
-        };
-      }
-
-      const isRelay =
-        route.localCandidateType === 'relay' ||
-        route.remoteCandidateType === 'relay';
-      const isDirect = !isRelay;
-      const isLanDirect = isDirect && route.pathType === 'LAN';
-
-      return {
-        isDirect,
-        isLanDirect,
-      };
-    };
-
-    const handleRouteReady = async (msg: P2PMessage) => {
+    const handleRouteReady = (msg: P2PMessage) => {
       if (msg.type !== 'ROUTE_READY') return;
       if (msg.payload.receiverSessionId !== receiverSessionIdRef.current) return;
       if (msg.payload.attemptId !== attemptId) return;
@@ -1349,18 +1370,23 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       const registeredAttempt = routeAttemptsRef.current.get(attemptId);
       if (!registeredAttempt || registeredAttempt.conn !== conn) return;
 
-      const route = conn.peerConnection
-        ? await collectIceRouteWithRetry(conn.peerConnection)
-        : null;
-
       receiveRouteArbiterRef.current?.markAttemptReady(
         attemptId,
         attemptKind,
-        buildRouteSnapshot(route)
       );
     };
 
     conn.on('data', (data: any) => {
+      const isBinaryData = data instanceof ArrayBuffer ||
+        (data?.constructor && data.constructor.name === 'ArrayBuffer') ||
+        ArrayBuffer.isView(data);
+      if (!isBinaryData && (data as P2PMessage | null)?.type === 'ROUTE_READY') {
+        if (isCurrentActivity()) {
+          handleRouteReady(data as P2PMessage);
+        }
+        return;
+      }
+
       void incomingDataProcessorRef.current.enqueue(async () => {
         if (!isCurrentActivity()) {
           return;
@@ -1402,9 +1428,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                hashedBytesRef.current += byteLength;
                
                if (isStreamingRef.current) {
-                   void receiveStreamingWriter.enqueueChunk(new Uint8Array(chunkData)).catch((error) => {
-                     void handleStreamingWriteFailure(error);
-                   });
+                   try {
+                     await receiveStreamingWriter.enqueueChunk(new Uint8Array(chunkData));
+                   } catch (error) {
+                     await handleStreamingWriteFailure(error);
+                     return;
+                   }
+                   scheduleCommittedProgress();
                } else if (isIndexedDbBufferingRef.current) {
                    indexedDbBatchRef.current.push(chunkData);
                    indexedDbBatchBytesRef.current += byteLength;
@@ -1417,21 +1447,19 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                        indexedDbBatchRef.current = [];
                        indexedDbBatchBytesRef.current = 0;
 
-                       writeQueueRef.current = writeQueueRef.current.then(() => flushIndexedDbBatch(fileIndexForBatch, batch, batchSize));
+                       await enqueueWrite(() => flushIndexedDbBatch(fileIndexForBatch, batch, batchSize));
+                       if (stateRef.current === TransferState.ERROR) return;
+                       scheduleCommittedProgress();
                    }
                 } else {
                     chunksRef.current.push(chunkData);
+                    scheduleCommittedProgress();
                 }
             }
             return;
         }
 
         const msg = data as P2PMessage;
-
-        if (msg.type === 'ROUTE_READY') {
-          await handleRouteReady(msg);
-          return;
-        }
 
         if (connRef.current !== conn) {
           if (isRouteAttemptTransferControlMessage(msg.type)) {
@@ -1482,6 +1510,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
        unregisterRouteAttempt(attemptId);
        connRef.current = null;
        clearHeartbeatTimer();
+       clearProgressAckTimer();
        const currentState = stateRef.current;
        const intentionalClose = intentionalConnectionCloseRef.current.delete(conn);
        if (currentState === TransferState.WAITING_FOR_PEER && scheduleFastReconnect()) {
@@ -1561,6 +1590,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         return;
       }
       clearHeartbeatTimer();
+      clearProgressAckTimer();
       if (scheduleFastReconnect()) {
         return;
       }
@@ -1610,6 +1640,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setDownloadSpeed('0 KB/s');
       setDownloadSpeedBytes(0);
       lastReportedSpeedBytesRef.current = 0;
+      lastProgressAckBytesRef.current = 0;
+      clearProgressAckTimer();
       receiveRecoveryCoordinator.reset();
       setEta('--');
       preparedNativeWriterFileIndexRef.current = null;
@@ -2166,7 +2198,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           return;
         }
         if (happyEyeballsWonRef.current) return;
-        if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
+        if (err.type === 'rate-limited') {
+          clearConnectionTimeout();
+          markConnectionFailure(connectTelemetryRef.current, 'rate_limited');
+          setErrorMsg(RATE_LIMITED_CONNECTION_MESSAGE);
+          setState(TransferState.ERROR);
+        } else if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
           // Skip peer-unavailable retries for the background relay attempt
           // to avoid burning the shared retry budget and routing through the wrong peer.
           if (policy === 'relay') return;
@@ -2345,7 +2382,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           }
       }
 
-      connRef.current.send({ type: 'ACCEPT_TRANSFER' });
+      const { overallTransferredBytes } = getOverallTransferSnapshot();
+      connRef.current.send({
+        type: 'ACCEPT_TRANSFER',
+        payload: {
+          persistedOverallBytes: overallTransferredBytes,
+          receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
+        },
+      });
+      lastProgressAckBytesRef.current = overallTransferredBytes;
       setState(TransferState.TRANSFERRING);
       setReconnectAttempt(0);
     } else {
@@ -2366,6 +2411,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     happyEyeballsWonRef.current = false;
     clearConnectionTimeout();
     clearHeartbeatTimer();
+    clearProgressAckTimer();
     clearCommittedReconnectTimer();
     backgroundTimeoutGroupRef.current.clearAll();
     resetRouteAttemptState();

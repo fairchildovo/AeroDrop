@@ -72,7 +72,20 @@ npm run dev:worker
 
 ## TURN Configuration (Recommended)
 
-当前仅保留 Cloudflare 官方 TURN 短期凭证模式，在 Worker 运行环境配置：
+可配置自管 coturn 作为 Cloudflare TURN 不可用时的后备。Worker 使用 TURN REST HMAC-SHA1 生成短期凭证：
+
+- `TURN_URLS`：逗号或换行分隔的 `turn:` / `turns:` 地址
+- `TURN_SHARED_SECRET`：coturn `static-auth-secret`，必须保存为 Worker Secret
+- `TURN_REALM`：与 coturn `realm` 保持一致
+- `TURN_TTL_SECONDS`：可选，默认 `3600`，有效范围 `60`–`86400`
+
+示例：
+
+```bash
+npx wrangler secret put TURN_SHARED_SECRET
+```
+
+生产默认优先使用 Cloudflare 官方 TURN 短期凭证模式：
 
 - `CF_TURN_TOKEN_ID`
 - `CF_TURN_API_TOKEN`
@@ -82,7 +95,7 @@ npm run dev:worker
 
 - 如果这些值是在 Cloudflare Dashboard 里手动添加的，`wrangler deploy` 默认会以下发配置为准覆盖远端变量。
 - 本项目已在 [`wrangler.jsonc`](./wrangler.jsonc) 中启用 `keep_vars = true` 对应的 `keep_vars: true`，用于保留 Dashboard 上已有的变量。
-- `CF_TURN_API_TOKEN` 属于敏感值，建议在 Dashboard 里以 Secret 方式保存；Cloudflare 文档说明 Secrets 不会在普通 `wrangler deploy` 时被删除。
+- `TURN_SHARED_SECRET` 和 `CF_TURN_API_TOKEN` 属于敏感值，必须以 Secret 方式保存；Cloudflare Secrets 不会在普通 `wrangler deploy` 时被删除。
 
 Worker 会按照 Cloudflare 官方方式，在服务端调用：
 
@@ -90,7 +103,9 @@ Worker 会按照 Cloudflare 官方方式，在服务端调用：
 POST https://rtc.live.cloudflare.com/v1/turn/keys/<CF_TURN_TOKEN_ID>/credentials/generate-ice-servers
 ```
 
-并将返回的短期 `iceServers` 提供给前端，避免在前端暴露长期 TURN 凭证。未配置 Cloudflare TURN 时，Worker 会自动回退到内置 STUN-only 配置，不再保留旧的静态 TURN 用户名/密码方案。
+凭证优先级为：Cloudflare TURN、自管 TURN、内置 STUN-only。文件仍通过 WebRTC DataChannel 传输，Worker 仅下发短期 ICE 配置，不接收文件数据。ICE policy 保持 `all`，TURN 只作为 P2P 不可用时的候选路线。
+
+当前生产 ICE 配置会过滤 TURN/UDP，仅保留 TURN/TCP 与 TURN/TLS。P2P 的 UDP 直连候选不受影响。该限制用于规避已在多个 TURN 提供者上复现的外部 UDP relay 长时间停滞。
 
 ## Diagnostics
 

@@ -118,3 +118,42 @@ test('closeCurrentTarget keeps native data intact by default', async () => {
   assert.equal(closed, true);
   assert.deepEqual(events, ['close']);
 });
+
+test('counts an in-flight batch against the pending byte limit', async () => {
+  let releaseWrite!: () => void;
+  const blockedWrite = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  const writer = createReceiveStreamingWriter({
+    flushThresholdBytes: 4,
+    maxPendingBytes: 4,
+  });
+
+  writer.attachTarget({
+    kind: 'native-fs',
+    write: () => blockedWrite,
+    close: async () => {},
+  });
+
+  const pendingWrite = writer.enqueueChunk(new Uint8Array(4));
+  await Promise.resolve();
+  assert.equal(writer.getBufferedBytes(), 4);
+
+  releaseWrite();
+  await pendingWrite;
+  assert.equal(writer.getBufferedBytes(), 0);
+  assert.equal(writer.getCommittedBytes(), 4);
+});
+
+test('rejects a single chunk larger than the pending byte limit', async () => {
+  const writer = createReceiveStreamingWriter({
+    flushThresholdBytes: 4,
+    maxPendingBytes: 4,
+  });
+  writer.attachTarget(createMemoryTarget([]));
+
+  await assert.rejects(
+    writer.enqueueChunk(new Uint8Array(5)),
+    /STREAMING_CHUNK_EXCEEDS_PENDING_LIMIT/
+  );
+});

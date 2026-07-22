@@ -2,18 +2,20 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: ['rtc-datachannel.spec.ts', 'product-transfer.spec.ts'],
-  timeout: 30_000,
+  testMatch: 'rtc-datachannel.spec.ts',
+  timeout: 180_000,
   fullyParallel: false,
+  workers: 1,
   retries: 0,
   reporter: 'list',
   use: {
     baseURL: 'http://127.0.0.1:3401',
-    trace: 'on-first-retry',
+    // TURN credentials are passed into the page; do not persist them in traces.
+    trace: 'off',
   },
   projects: [
     {
-      name: 'chromium',
+      name: 'chromium-rtc',
       use: {
         browserName: 'chromium',
       },

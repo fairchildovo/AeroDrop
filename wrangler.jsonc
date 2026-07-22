@@ -7,6 +7,11 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    "TURN_URLS": "turn:turn.tianzora.uno:3478?transport=tcp,turns:turn.tianzora.uno:5349?transport=tcp",
+    "TURN_REALM": "turn.tianzora.uno",
+    "TURN_TTL_SECONDS": "3600"
+  },
   "durable_objects": {
     "bindings": [
       {

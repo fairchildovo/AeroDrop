@@ -168,7 +168,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
               },
             ],
             totalSize: 1024,
-            protocolVersion: 2,
+            protocolVersion: 3,
           },
           holdNextOpen: false,
           connectionCount: 0,
