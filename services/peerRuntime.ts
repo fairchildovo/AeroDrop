@@ -7,6 +7,7 @@ type PeerRuntimeErrorType =
   | 'unavailable-id'
   | 'invalid-id'
   | 'peer-unavailable'
+  | 'rate-limited'
   | 'disconnected'
   | 'network'
   | 'server-error'
@@ -395,6 +396,7 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
         readyState: this.dataChannel?.readyState,
       });
       this.handleError(createRuntimeError('webrtc-error', 'Data channel error'));
+      this.close();
     };
     this.dataChannel.onmessage = async (event) => {
       const payload = event.data;
@@ -800,7 +802,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         const connection = this.connectionIndex.get(message.connectionId);
         if (connection) {
           this.emitConnectionError(connection, error);
-          if (message.code === 'peer-unavailable' || message.code === 'invalid-id') {
+          if (message.code === 'peer-unavailable' || message.code === 'invalid-id' || message.code === 'rate-limited') {
             connection.close();
           }
         }

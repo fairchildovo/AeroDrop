@@ -11,6 +11,7 @@ export interface ReceiveStreamingTarget {
 
 export interface ReceiveStreamingWriterOptions {
   flushThresholdBytes: number;
+  maxPendingBytes?: number;
 }
 
 export interface ReceiveStreamingWriter {
@@ -44,6 +45,7 @@ export const createReceiveStreamingWriter = (
   let activeTarget: ReceiveStreamingTarget | null = null;
   let pendingChunks: Uint8Array[] = [];
   let pendingBytes = 0;
+  let queuedBytes = 0;
   let committedBytes = 0;
   let writeQueue: Promise<void> = Promise.resolve();
   let failedError: unknown = null;
@@ -73,12 +75,15 @@ export const createReceiveStreamingWriter = (
     return { chunks, totalLen };
   };
 
-  const scheduleWrite = (task: () => Promise<void>): Promise<void> => {
+  const scheduleWrite = (task: () => Promise<void>, byteLength: number): Promise<void> => {
+    queuedBytes += byteLength;
     writeQueue = writeQueue.then(async () => {
       if (failedError) {
         throw failedError;
       }
       await task();
+    }).finally(() => {
+      queuedBytes = Math.max(0, queuedBytes - byteLength);
     });
 
     return writeQueue.catch((error) => {
@@ -116,7 +121,7 @@ export const createReceiveStreamingWriter = (
     const { chunks, totalLen } = snapshotPending();
     await scheduleWrite(async () => {
       await flushBatch(chunks, totalLen);
-    });
+    }, totalLen);
   };
 
   const clearTarget = (preserveCommittedBytes: boolean) => {
@@ -148,6 +153,14 @@ export const createReceiveStreamingWriter = (
         throw failedError;
       }
       ensureHealthy();
+      const maxPendingBytes = options.maxPendingBytes ?? Number.POSITIVE_INFINITY;
+      if (chunk.byteLength > maxPendingBytes) {
+        throw new Error('STREAMING_CHUNK_EXCEEDS_PENDING_LIMIT');
+      }
+      if (pendingBytes + queuedBytes + chunk.byteLength > maxPendingBytes) {
+        await flushPending();
+        await writeQueue;
+      }
       pendingChunks.push(chunk);
       pendingBytes += chunk.byteLength;
 
@@ -249,7 +262,7 @@ export const createReceiveStreamingWriter = (
     isStreaming: () => activeTarget !== null,
     hasRetainedData: () => pendingBytes > 0 || activeTarget !== null,
     getCommittedBytes: () => committedBytes,
-    getBufferedBytes: () => pendingBytes,
+    getBufferedBytes: () => pendingBytes + queuedBytes,
     reset: () => {
       activeTarget = null;
       committedBytes = 0;

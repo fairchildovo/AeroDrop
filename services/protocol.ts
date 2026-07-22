@@ -5,6 +5,7 @@ import {
   type P2PMessage,
   type ResumePayload,
 } from '../types/index.ts';
+import { TRANSFER_CONFIG } from '../constants/transfer.ts';
 
 const DEFAULT_CHUNK_SIZE = 256 * 1024;
 
@@ -21,6 +22,10 @@ export const normalizeFileRequest = (
     fileIndex: typeof payload?.fileIndex === 'number' ? Math.max(0, payload.fileIndex) : 0,
     byteOffset,
     silent: payload?.silent === true,
+    receiveWindowBytes:
+      typeof payload?.receiveWindowBytes === 'number' && payload.receiveWindowBytes > 0
+        ? payload.receiveWindowBytes
+        : TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
   };
 };
 
@@ -38,9 +43,12 @@ export const normalizeTransferMessage = (
   return message;
 };
 
-export const createResumeRequestMessage = (request: NormalizedFileRequest) =>
+export const createResumeRequestMessage = (
+  request: NormalizedFileRequest,
+) =>
   createP2PMessage('RESUME_REQUEST', {
     fileIndex: request.fileIndex,
     byteOffset: request.byteOffset,
     silent: request.silent,
+    receiveWindowBytes: request.receiveWindowBytes,
   });

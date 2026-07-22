@@ -1,5 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import { resolveIceTransportPolicyDecision } from '../services/iceConfigPolicy';
+import { createSignalingRateLimiter } from '../services/signalingRateLimitPolicy';
+import {
+  createSelfHostedTurnIceServer,
+  hasTurnIceServers,
+  selectReliableIceServers,
+} from '../services/turnCredentials';
 
 interface AssetBinding {
   fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
@@ -12,6 +18,10 @@ interface Env {
   CF_TURN_KEY_ID?: string;
   CF_TURN_API_TOKEN?: string;
   CF_TURN_TTL_SECONDS?: string;
+  TURN_URLS?: string;
+  TURN_SHARED_SECRET?: string;
+  TURN_REALM?: string;
+  TURN_TTL_SECONDS?: string;
 }
 
 type IceServerConfig = {
@@ -411,6 +421,19 @@ const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload 
   return inflightCfIceConfig;
 };
 
+const createSelfHostedTurnIceConfig = async (env: Env): Promise<IceConfigPayload | null> => {
+  try {
+    const turnServer = await createSelfHostedTurnIceServer(env);
+    return turnServer ? createIceConfigPayload([...STUN_SERVERS, turnServer]) : null;
+  } catch (error) {
+    console.error(
+      'Failed to generate self-hosted TURN credentials',
+      error instanceof Error ? error.message : 'Unknown error',
+    );
+    return null;
+  }
+};
+
 const handleIceConfig = async (request: Request, env: Env): Promise<Response> => {
   if (!isAllowedSameOriginRequest(request)) {
     return json(
@@ -425,15 +448,21 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
   }
 
   const networkRisk = assessNetworkRisk(request);
-  const cfIceConfig = await fetchCloudflareTurnIceConfig(env);
-  const basePayload = cfIceConfig ?? createIceConfigPayload(STUN_SERVERS);
+  const [cloudflareIceConfig, selfHostedIceConfig] = await Promise.all([
+    fetchCloudflareTurnIceConfig(env),
+    createSelfHostedTurnIceConfig(env),
+  ]);
+  const reliableIceServers = selectReliableIceServers([
+    cloudflareIceConfig?.iceServers ?? [],
+    selfHostedIceConfig?.iceServers ?? [],
+  ], STUN_SERVERS);
   const policyDecision = resolveIceTransportPolicyDecision({
-    hasTurn: basePayload.hasTurn,
+    hasTurn: hasTurnIceServers(reliableIceServers),
     isRisk: networkRisk.isRisk,
     riskReason: networkRisk.reason,
   });
   const payload = createIceConfigPayload(
-    basePayload.iceServers,
+    reliableIceServers,
     policyDecision.iceTransportPolicy,
     policyDecision.relayReason,
     policyDecision.relayRecommended,
@@ -553,12 +582,25 @@ export default {
 };
 
 type SessionAttachment = {
+  clientKey: string;
   peerId: string;
+};
+
+const getSignalingClientKey = (request: Request): string => {
+  const cfConnectingIp = request.headers.get('CF-Connecting-IP')?.trim();
+  if (cfConnectingIp) return `ip:${cfConnectingIp}`;
+
+  const forwardedFor = request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim();
+  if (forwardedFor) return `xff:${forwardedFor}`;
+
+  return 'ip:unknown';
 };
 
 export class SignalingHub extends DurableObject {
   private sessionsByPeer = new Map<string, WebSocket>();
   private peerBySocket = new Map<WebSocket, string>();
+  private clientBySocket = new Map<WebSocket, string>();
+  private rateLimiter = createSignalingRateLimiter();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -568,6 +610,7 @@ export class SignalingHub extends DurableObject {
       if (!attachment?.peerId) continue;
       this.sessionsByPeer.set(attachment.peerId, ws);
       this.peerBySocket.set(ws, attachment.peerId);
+      this.clientBySocket.set(ws, attachment.clientKey || 'ip:unknown');
     }
   }
 
@@ -582,12 +625,13 @@ export class SignalingHub extends DurableObject {
     if (!peerId) {
       return new Response('Missing peerId', { status: 400 });
     }
+    const clientKey = getSignalingClientKey(request);
 
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
 
-    server.serializeAttachment({ peerId } satisfies SessionAttachment);
+    server.serializeAttachment({ clientKey, peerId } satisfies SessionAttachment);
     this.ctx.acceptWebSocket(server);
 
     const existing = this.sessionsByPeer.get(peerId);
@@ -605,6 +649,7 @@ export class SignalingHub extends DurableObject {
 
     this.sessionsByPeer.set(peerId, server);
     this.peerBySocket.set(server, peerId);
+    this.clientBySocket.set(server, clientKey);
     server.send(JSON.stringify({ type: 'registered', peerId } satisfies SignalingEnvelope));
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -649,6 +694,25 @@ export class SignalingHub extends DurableObject {
       return;
     }
 
+    if (payload.type === 'offer') {
+      const rateLimitDecision = this.rateLimiter.recordOfferAttempt({
+        clientKey: this.clientBySocket.get(ws) || 'ip:unknown',
+        now: Date.now(),
+        targetPeerId: payload.targetPeerId,
+      });
+      if (!rateLimitDecision.allowed) {
+        this.sendError(
+          ws,
+          'rate-limited',
+          'Too many connection requests',
+          payload.connectionId,
+          payload.targetPeerId,
+          payload.kind
+        );
+        return;
+      }
+    }
+
     const target = this.sessionsByPeer.get(payload.targetPeerId);
     if (!target) {
       this.sendError(ws, 'peer-unavailable', 'Target peer is unavailable', payload.connectionId, payload.targetPeerId, payload.kind);
@@ -675,6 +739,7 @@ export class SignalingHub extends DurableObject {
     const peerId = this.peerBySocket.get(ws);
     if (!peerId) return;
     this.peerBySocket.delete(ws);
+    this.clientBySocket.delete(ws);
     if (this.sessionsByPeer.get(peerId) === ws) {
       this.sessionsByPeer.delete(peerId);
     }

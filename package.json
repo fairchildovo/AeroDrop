@@ -5,8 +5,8 @@
   "packageManager": "npm@10.8.2",
   "type": "module",
   "engines": {
-    "node": "22.12.0",
-    "npm": "10.8.2"
+    "node": ">=22",
+    "npm": ">=10"
   },
   "scripts": {
     "dev": "vite",
@@ -19,6 +19,10 @@
     "test:services": "node ./scripts/run-node-tests.mjs services",
     "test:e2e": "start-server-and-test preview:e2e http://127.0.0.1:3401 test:e2e:raw",
     "test:e2e:raw": "playwright test --project=chromium",
+    "test:e2e:rtc": "start-server-and-test preview:e2e http://127.0.0.1:3401 test:e2e:rtc:raw",
+    "test:e2e:rtc:raw": "playwright test --config=playwright.rtc.config.ts",
+    "test:e2e:product-transfer": "start-server-and-test preview http://127.0.0.1:8787 test:e2e:product-transfer:raw",
+    "test:e2e:product-transfer:raw": "playwright test --config=playwright.product.config.ts",
     "typecheck": "tsc --noEmit",
     "deploy": "npm run build && wrangler deploy --config wrangler.jsonc",
     "deploy:worker": "npm run deploy"
@@ -32,20 +36,23 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.31.0",
-    "@cloudflare/workers-types": "^4.20260131.0",
+    "@cloudflare/vite-plugin": "^1.40.2",
+    "@cloudflare/workers-types": "^4.20260615.1",
     "@playwright/test": "^1.59.1",
-    "@tailwindcss/vite": "^4.1.18",
+    "@tailwindcss/vite": "^4.3.1",
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@types/streamsaver": "^2.0.5",
-    "@vitejs/plugin-react": "^5.0.0",
-    "start-server-and-test": "^2.1.5",
-    "tailwindcss": "^4.1.18",
-    "tsx": "^4.20.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "start-server-and-test": "^3.0.11",
+    "tailwindcss": "^4.3.1",
+    "tsx": "^4.22.4",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0",
-    "wrangler": "^4.80.0"
+    "vite": "^8.0.16",
+    "wrangler": "^4.100.0"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   }
 }

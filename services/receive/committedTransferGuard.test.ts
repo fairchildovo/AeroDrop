@@ -11,6 +11,7 @@ test('committed transfer guard accepts normalized resume requests as file reques
       fileIndex: 2,
       byteOffset: 1024,
       silent: true,
+      receiveWindowBytes: 2 * 1024 * 1024,
     })
   );
 

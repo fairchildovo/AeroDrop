@@ -1,4 +1,5 @@
 import { logDebug } from './diagnostics';
+import { classifyCandidatePair } from './networkAddress';
 
 type TelemetryRole = 'sender' | 'receiver' | 'screen-share' | 'screen-viewer';
 
@@ -26,7 +27,7 @@ export type IceRoute = {
   localUrl?: string;
   remoteUrl?: string;
   relayProtocol?: string;
-  pathType?: 'LAN' | 'WAN' | 'UNKNOWN';
+  pathType?: 'LAN' | 'WAN' | 'TURN' | 'UNKNOWN';
   rttMs?: number;
 };
 
@@ -224,22 +225,6 @@ export const markConnectionClosed = (
   log('info', session, 'closed', data);
 };
 
-const isPrivateIP = (ip: string) => {
-  if (!ip) return false;
-  const cleanIp = ip.replace(/^\[|\](:[0-9]+)?$/g, '').split(':')[0];
-  if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.toLowerCase() === 'localhost') return true;
-  if (cleanIp.toLowerCase().startsWith('fe80:')) return true;
-  const parts = cleanIp.split('.');
-  if (parts.length === 4) {
-    const p0 = parseInt(parts[0], 10);
-    const p1 = parseInt(parts[1], 10);
-    if (p0 === 10) return true;
-    if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
-    if (p0 === 192 && p1 === 168) return true;
-  }
-  return false;
-};
-
 const pickSelectedPair = (stats: StatsLike) => {
   let selectedPair: any = null;
   stats.forEach((report) => {
@@ -269,8 +254,12 @@ export const getIceRoute = async (pc: RTCPeerConnection): Promise<IceRoute | nul
   const remote = stats.get(pair.remoteCandidateId) as CandidateLike | undefined;
   const localIp = local?.address || local?.ip || '';
   const remoteIp = remote?.address || remote?.ip || '';
-  const localPrivate = isPrivateIP(localIp);
-  const remotePrivate = isPrivateIP(remoteIp);
+  const pathType = classifyCandidatePair({
+    localAddress: localIp,
+    remoteAddress: remoteIp,
+    localCandidateType: local?.candidateType,
+    remoteCandidateType: remote?.candidateType,
+  });
 
   return {
     protocol: local?.protocol || remote?.protocol,
@@ -281,7 +270,7 @@ export const getIceRoute = async (pc: RTCPeerConnection): Promise<IceRoute | nul
     localUrl: local?.url,
     remoteUrl: remote?.url,
     relayProtocol: local?.relayProtocol || remote?.relayProtocol,
-    pathType: localPrivate && remotePrivate ? 'LAN' : 'WAN',
+    pathType,
     rttMs: typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : undefined,
   };
 };

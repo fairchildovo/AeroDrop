@@ -32,12 +32,15 @@ import { getBrowserNetworkProfile } from '../services/networkProfile';
 import { normalizeTransferMessage } from '../services/protocol';
 import {
   deriveAdaptiveFlow,
-  isPrivateIP,
   type AdaptiveFlowProfile,
   type ConnectionMetrics,
   type ConnectionRoute,
 } from '../services/transfer/adaptiveFlow';
-import { waitForDataChannelDrain } from '../services/transfer/DataChannelTransmitter';
+import {
+  isDataChannelMessageTooLargeError,
+  resolveDataChannelChunkSize,
+  waitForDataChannelDrain,
+} from '../services/transfer/DataChannelTransmitter';
 import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChunkReader';
 import { useTransferStore } from '../stores/transferStore';
 import { createRouteProbeLogPayload } from '../services/routeProbeLog';
@@ -56,6 +59,12 @@ import {
   restoreLogicalReceiverState,
 } from '../services/send/sessionTransferState';
 import { createSenderRouteHandshakeHandler } from '../services/send/routeHandshake';
+import {
+  isSendSequenceCurrent,
+  ReceiveCreditGate,
+  shouldReleasePeerState,
+} from '../services/send/receiveCredit';
+import { classifyCandidatePair } from '../services/networkAddress';
 import { logDebug, shouldSuppressNoisyPeerError } from '../services/diagnostics';
 import { SenderUI } from './sender/SenderUI';
 
@@ -126,6 +135,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerSyncBaseBytesRef = useRef<Map<string, number>>(new Map());
   const peerTransferEpochRef = useRef<Map<string, number>>(new Map());
   const pendingSendPeersRef = useRef<Set<string>>(new Set());
+  const peerReceiveCreditRef = useRef<Map<string, ReceiveCreditGate>>(new Map());
+  const peerReceiveCreditOwnerRef = useRef<Map<string, string>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
   const peerRealtimeSpeed = useRef<Map<string, number>>(new Map());
@@ -206,6 +217,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     moveMapValue(peerTransferEpochRef.current);
     moveMapValue(peerConnectionTypeRef.current);
     moveMapValue(peerIsLAN.current);
+
+    const previousCredit = peerReceiveCreditRef.current.get(fromPeerId);
+    if (previousCredit) {
+      previousCredit.cancel('Connection replaced');
+      peerReceiveCreditRef.current.delete(fromPeerId);
+      peerReceiveCreditOwnerRef.current.delete(fromPeerId);
+    }
 
     if (peerHasProgressSyncRef.current.delete(fromPeerId)) {
       peerHasProgressSyncRef.current.add(toPeerId);
@@ -401,8 +419,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerRouteLogSignatureRef = useRef<Map<string, string>>(new Map());
   const committedRouteLogSignatureRef = useRef<Map<string, string>>(new Map());
 
-  const updateAdaptiveFlow = (peerId: string, route: ConnectionRoute, metrics: ConnectionMetrics) => {
-    const next = deriveAdaptiveFlow(route, metrics);
+  const updateAdaptiveFlow = (
+    peerId: string,
+    route: ConnectionRoute,
+    metrics: ConnectionMetrics,
+    maxMessageSize?: number | null,
+  ) => {
+    const next = deriveAdaptiveFlow(route, metrics, maxMessageSize);
     const prev = peerAdaptiveFlowRef.current.get(peerId);
     if (
       prev &&
@@ -459,22 +482,23 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               const availableOutgoingBitrate = typeof selectedPair.availableOutgoingBitrate === 'number'
                 ? selectedPair.availableOutgoingBitrate
                 : null;
-              const packetsSent = typeof selectedPair.packetsSent === 'number' ? selectedPair.packetsSent : null;
-              const packetsLost = typeof selectedPair.packetsLost === 'number'
-                ? selectedPair.packetsLost
-                : typeof selectedPair.packetsDiscardedOnSend === 'number'
-                  ? selectedPair.packetsDiscardedOnSend
-                  : null;
-              const lossPct = packetsSent && packetsSent > 0 && packetsLost !== null
-                ? Math.max(0, Math.min(100, (packetsLost / packetsSent) * 100))
-                : null;
-
               const localIP = localCandidate?.address || localCandidate?.ip || '';
               const remoteIP = remoteCandidate?.address || remoteCandidate?.ip || '';
-              const isRelayConnection = localCandidateType === 'relay' || remoteCandidateType === 'relay';
-              const isLanConnection = !isRelayConnection && isPrivateIP(localIP) && isPrivateIP(remoteIP);
+              const pathType = classifyCandidatePair({
+                localAddress: localIP,
+                remoteAddress: remoteIP,
+                localCandidateType,
+                remoteCandidateType,
+              });
+              const isRelayConnection = pathType === 'TURN';
+              const isLanConnection = pathType === 'LAN';
               route = { isLan: isLanConnection, isRelay: isRelayConnection, protocol };
-              updateAdaptiveFlow(conn.peer, route, { rttMs, lossPct, availableOutgoingBitrate });
+              updateAdaptiveFlow(
+                conn.peer,
+                route,
+                { rttMs, lossPct: null, availableOutgoingBitrate },
+                conn.peerConnection.sctp?.maxMessageSize,
+              );
 
               const turnUrl = typeof localCandidate?.url === 'string' && localCandidate.url.startsWith('turn')
                 ? localCandidate.url
@@ -825,9 +849,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     peerTotalBytesRef.current.clear();
     peerSyncStartAtRef.current.clear();
     peerSyncBaseBytesRef.current.clear();
-    peerTransferEpochRef.current.clear();
-    pendingSendPeersRef.current.clear();
-    resetCommittedRouteState();
+      peerTransferEpochRef.current.clear();
+      pendingSendPeersRef.current.clear();
+      peerReceiveCreditRef.current.forEach((credit) => credit.cancel('Share restarted'));
+      peerReceiveCreditRef.current.clear();
+      peerReceiveCreditOwnerRef.current.clear();
+      resetCommittedRouteState();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
@@ -942,6 +969,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const cleanupConnectionState = (conn: DataConnection) => {
+      const closingConnectionId = connectionIdsRef.current.get(conn);
+      const hasReplacementConnection = Array.from(activeConnections.current).some(
+        (candidate) => candidate !== conn && candidate.peer === conn.peer,
+      );
+      const creditOwnerId = peerReceiveCreditOwnerRef.current.get(conn.peer);
+      if (!creditOwnerId || creditOwnerId === closingConnectionId) {
+        peerReceiveCreditRef.current.get(conn.peer)?.cancel('Connection closed');
+        peerReceiveCreditRef.current.delete(conn.peer);
+        peerReceiveCreditOwnerRef.current.delete(conn.peer);
+      }
+      if (closingConnectionId) {
+          receiverSessionRegistryRef.current.releaseConnection(closingConnectionId);
+          routeCommitGateRef.current.releaseConnection(closingConnectionId);
+          connectionIdsRef.current.delete(conn);
+      }
+      activeConnections.current.delete(conn);
+      if (!shouldReleasePeerState(closingConnectionId, creditOwnerId, hasReplacementConnection)) {
+          updateConnectionStatusUI();
+          return;
+      }
       const removedSessionId = peerSessionIdsRef.current.get(conn.peer);
       const stillBoundToClosingPeer =
         !!removedSessionId && sessionToPeerRef.current.get(removedSessionId) === conn.peer;
@@ -968,16 +1015,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           }
       }
 
-      const connectionId = connectionIdsRef.current.get(conn);
-      if (connectionId) {
-          receiverSessionRegistryRef.current.releaseConnection(connectionId);
-          routeCommitGateRef.current.releaseConnection(connectionId);
-          connectionIdsRef.current.delete(conn);
-      }
       if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
           activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
       }
-      activeConnections.current.delete(conn);
       peerProgress.current.delete(conn.peer);
       peerRealtimeSpeed.current.delete(conn.peer);
       peerAverageSpeed.current.delete(conn.peer);
@@ -1108,6 +1148,70 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       setTimeout(() => {
           sendFileSequence(conn, startFileIndex, startByteOffset, nextEpoch);
       }, 100);
+  };
+
+  const getTotalFileBytes = () => fileListRef.current.reduce((total, file) => total + file.size, 0);
+
+  const getResumeOffset = (fileIndex: number, byteOffset: number) => {
+      const files = fileListRef.current;
+      if (!Number.isSafeInteger(fileIndex) || fileIndex < 0 || fileIndex > files.length) {
+        throw new Error('Invalid resume fileIndex');
+      }
+      if (fileIndex === files.length) {
+        if (byteOffset !== 0) {
+          throw new Error('Completed transfer resume byteOffset must be zero');
+        }
+        return getTotalFileBytes();
+      }
+      if (!Number.isSafeInteger(byteOffset) || byteOffset < 0 || byteOffset > files[fileIndex].size) {
+        throw new Error('Invalid resume byteOffset');
+      }
+      return files.slice(0, fileIndex).reduce((total, file) => total + file.size, 0) + byteOffset;
+  };
+
+  const getPositionForOverallOffset = (overallOffset: number) => {
+      const files = fileListRef.current;
+      const totalBytes = getTotalFileBytes();
+      if (!Number.isSafeInteger(overallOffset) || overallOffset < 0 || overallOffset > totalBytes) {
+        throw new Error('Invalid persistedOverallBytes');
+      }
+      if (overallOffset === 0) {
+        return { fileIndex: 0, byteOffset: 0 };
+      }
+
+      let remaining = overallOffset;
+      for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+        if (remaining < files[fileIndex].size) {
+          return { fileIndex, byteOffset: remaining };
+        }
+        remaining -= files[fileIndex].size;
+      }
+      return { fileIndex: files.length, byteOffset: 0 };
+  };
+
+  const initializeReceiveCredit = (
+    conn: DataConnection,
+    persistedOverallBytes: number,
+    receiveWindowBytes: number,
+  ) => {
+      const peerId = conn.peer;
+      const previous = peerReceiveCreditRef.current.get(peerId);
+      previous?.cancel('New transfer sequence started');
+      const credit = new ReceiveCreditGate(
+        getTotalFileBytes(),
+        persistedOverallBytes,
+        receiveWindowBytes,
+      );
+      peerReceiveCreditRef.current.set(peerId, credit);
+      peerReceiveCreditOwnerRef.current.set(peerId, getOrCreateConnectionId(conn));
+      return credit;
+  };
+
+  const rejectInvalidFlowControl = (conn: DataConnection, error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      peerReceiveCreditRef.current.get(conn.peer)?.cancel(error instanceof Error ? error : message);
+      logDebug('warn', '[flow-control-invalid]', { peerId: conn.peer, reason: message });
+      try { if (conn.open) conn.close(); } catch {}
   };
 
   const setupPeerListeners = (
@@ -1287,10 +1391,27 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                       bindReceiverSessionToPeer(remoteSessionId, conn.peer, existingPeerId ?? null);
                   }
               } else if (msg.type === 'ACCEPT_TRANSFER') {
-                  setState(TransferState.TRANSFERRING);
-                  scheduleSendFileSequence(conn, 0, 0);
+                  try {
+                    initializeReceiveCredit(
+                      conn,
+                      msg.payload.persistedOverallBytes,
+                      msg.payload.receiveWindowBytes,
+                    );
+                    const position = getPositionForOverallOffset(msg.payload.persistedOverallBytes);
+                    setState(TransferState.TRANSFERRING);
+                    scheduleSendFileSequence(conn, position.fileIndex, position.byteOffset);
+                  } catch (error) {
+                    rejectInvalidFlowControl(conn, error);
+                  }
               } else if (msg.type === 'FILE_REQUEST') {
                   const payload = msg.payload;
+                  try {
+                    const persistedOverallBytes = getResumeOffset(payload.fileIndex, payload.byteOffset);
+                    initializeReceiveCredit(conn, persistedOverallBytes, payload.receiveWindowBytes);
+                  } catch (error) {
+                    rejectInvalidFlowControl(conn, error);
+                    return;
+                  }
                   if (peerAwaitingFinalizeAckRef.current.delete(conn.peer)) {
                     activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
                   }
@@ -1308,16 +1429,27 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   } catch {}
                   cleanupConnectionState(conn);
               } else if (msg.type === 'TRANSFER_PROGRESS') {
-                  const payload = (msg.payload || {}) as {
-                    overallTransferredBytes?: number;
-                    overallTotalBytes?: number;
-                    speedBytes?: number;
-                  };
-                  const totalBytes = typeof payload.overallTotalBytes === 'number' ? Math.max(0, payload.overallTotalBytes) : 0;
-                  const transferredBytes = typeof payload.overallTransferredBytes === 'number'
-                    ? Math.max(0, payload.overallTransferredBytes)
-                    : 0;
-                  const safeTransferredBytes = totalBytes > 0 ? Math.min(totalBytes, transferredBytes) : transferredBytes;
+                  const payload = msg.payload;
+                  const credit = peerReceiveCreditRef.current.get(conn.peer);
+                  if (
+                    !credit ||
+                    peerReceiveCreditOwnerRef.current.get(conn.peer) !== getOrCreateConnectionId(conn)
+                  ) {
+                    rejectInvalidFlowControl(conn, new Error('TRANSFER_PROGRESS received before transfer initialization'));
+                    return;
+                  }
+                  try {
+                    credit.update(
+                      payload.overallTransferredBytes,
+                      payload.receiveWindowBytes,
+                      payload.overallTotalBytes,
+                    );
+                  } catch (error) {
+                    rejectInvalidFlowControl(conn, error);
+                    return;
+                  }
+                  const totalBytes = payload.overallTotalBytes;
+                  const safeTransferredBytes = payload.overallTransferredBytes;
                   const rawProgress = totalBytes > 0
                     ? Math.floor((safeTransferredBytes / totalBytes) * 100)
                     : 0;
@@ -1325,7 +1457,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   const syncProgress = waitingFinalizeAck
                     ? Math.min(rawProgress, 99)
                     : Math.max(0, Math.min(100, rawProgress));
-                  const speedBytes = typeof payload.speedBytes === 'number' ? Math.max(0, payload.speedBytes) : 0;
+                  const speedBytes = Number.isFinite(payload.speedBytes) ? Math.max(0, payload.speedBytes) : 0;
                   const now = Date.now();
                   const hasSyncStarted = peerSyncStartAtRef.current.has(conn.peer);
                   if (!hasSyncStarted) {
@@ -1418,6 +1550,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       ...deriveAdaptiveFlow(
         { isLan: false, isRelay: false, protocol: 'udp' },
         { rttMs: null, lossPct: null, availableOutgoingBitrate: null },
+        conn.peerConnection.sctp?.maxMessageSize,
       ),
       lastUpdatedAt: Date.now(),
       metrics: { rttMs: null, lossPct: null, availableOutgoingBitrate: null },
@@ -1447,9 +1580,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         totalBytesSent += startByteOffset;
     }
 
-    const totalSize = metadata?.totalSize || 0;
+    const totalSize = getTotalFileBytes();
 
-    const dataChannel = (conn as any).dataChannel as RTCDataChannel | undefined;
+    const dataChannel = conn.dataChannel ?? undefined;
+    const receiveCredit = peerReceiveCreditRef.current.get(peerId);
     const fileHasher = createCrc32Hasher(`sender-${peerId}`);
     const adaptiveTimer = window.setInterval(() => {
       if (transferSessionId.current !== currentSessionId || !conn.open) {
@@ -1460,7 +1594,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     }, 2000);
 
     try {
+        if (!receiveCredit) {
+          throw new Error('Receive credit was not initialized');
+        }
+        if (receiveCredit.snapshot().sentOverallBytes !== totalBytesSent) {
+          throw new Error('Resume offset does not match initialized receive credit');
+        }
         let fileStartByteOffset = startByteOffset;
+        const isCurrentSequence = () => isSendSequenceCurrent(
+          transferSessionId.current,
+          currentSessionId,
+          peerTransferEpochRef.current.get(peerId),
+          peerEpoch,
+          conn.open,
+        );
 
         for (let i = startFileIndex; i < files.length; i++) {
             if (transferSessionId.current !== currentSessionId || peerTransferEpochRef.current.get(peerId) !== peerEpoch) return;
@@ -1487,6 +1634,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             fileStartByteOffset = 0;
             const hashStartOffset = fileOffset;
             await fileHasher.reset();
+            if (!isCurrentSequence()) return;
             let hashedBytes = 0;
             const chunkReader = new StreamingFileChunkReader(file, READ_BUFFER_SIZE, fileOffset);
 
@@ -1495,28 +1643,45 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                 if (!conn.open) throw new Error("Connection closed during transfer");
 
                 const flow = peerAdaptiveFlowRef.current.get(peerId) || defaultFlow;
+                const maxChunkSize = resolveDataChannelChunkSize(
+                  flow.chunkSize,
+                  conn.peerConnection.sctp?.maxMessageSize,
+                );
                 if (dataChannel) {
                     await waitForDataChannelDrain(conn, dataChannel, {
                         highWaterMark: flow.highWaterMark,
                         lowWaterMark: flow.lowWaterMark,
                     });
+                    if (!isCurrentSequence()) return;
                 }
 
-                const nextChunk = await chunkReader.readNextChunk(flow.chunkSize);
+                const availableCredit = await receiveCredit.waitForAvailable(
+                  Math.min(maxChunkSize, file.size - fileOffset),
+                );
+                if (!isCurrentSequence()) return;
+                const nextChunk = await chunkReader.readNextChunk(availableCredit);
+                if (!isCurrentSequence()) return;
                 const chunkView = nextChunk.chunk;
                 if (!chunkView) {
                     break;
                 }
 
                 try {
+                    if (!isCurrentSequence()) return;
                     conn.send(chunkView);
                 } catch (e) {
                     if (!conn.open) throw new Error("Connection closed during send");
-                    await new Promise(r => setTimeout(r, 20));
-                    conn.send(chunkView);
+                    if (isDataChannelMessageTooLargeError(e)) {
+                      throw new Error(
+                        `Negotiated data-channel message limit rejected ${chunkView.byteLength} bytes`,
+                        { cause: e },
+                      );
+                    }
+                    throw e;
                 }
 
                 const currentChunkSize = chunkView.byteLength;
+                receiveCredit.recordSent(currentChunkSize);
                 fileHasher.update(chunkView);
                 hashedBytes += currentChunkSize;
                 totalBytesSent += currentChunkSize;
@@ -1555,6 +1720,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             }
 
             const fileHash = await fileHasher.finalizeHex();
+            if (!isCurrentSequence()) return;
             const completePayload: FileCompletePayload = {
                 fileIndex: i,
                 hashAlgorithm: 'crc32',
@@ -1573,7 +1739,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         peerRealtimeSpeed.current.set(peerId, 0);
 
     } catch (err) {
-        if (transferSessionId.current === currentSessionId) {
+        if (
+          transferSessionId.current === currentSessionId &&
+          peerTransferEpochRef.current.get(peerId) === peerEpoch
+        ) {
             console.warn(`Transfer to ${peerId} interrupted/failed:`, err);
             const remoteName = peerNamesRef.current[conn.peer] || `设备 ...${conn.peer.slice(-4)}`;
             onNotification(`${remoteName} 传输中断，等待重连后可继续`, 'error');
@@ -1604,6 +1773,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       signalingOpenTimeoutRef.current = null;
     }
     transferSessionId.current += 1; 
+    peerReceiveCreditRef.current.forEach((credit) => credit.cancel('Transfer cancelled'));
+    peerReceiveCreditRef.current.clear();
+    peerReceiveCreditOwnerRef.current.clear();
     
     activeConnections.current.forEach(conn => {
         if (conn.open) {

@@ -50,6 +50,7 @@ test('resumeTransfer reopens the writer from the durably committed byte offset',
     fileIndex: 0,
     byteOffset: 8,
     silent: false,
+    receiveWindowBytes: 2 * 1024 * 1024,
   });
 });
 

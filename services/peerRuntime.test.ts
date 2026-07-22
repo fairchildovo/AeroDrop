@@ -2,12 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 class FakeDataChannel {
+  public static instances: FakeDataChannel[] = [];
   public readyState: 'open' | 'closed' = 'open';
   public binaryType = 'arraybuffer';
   public onopen: (() => void) | null = null;
   public onclose: (() => void) | null = null;
   public onerror: (() => void) | null = null;
   public onmessage: ((event: { data: unknown }) => void) | null = null;
+
+  constructor() {
+    FakeDataChannel.instances.push(this);
+  }
 
   send(): void {}
 
@@ -170,6 +175,54 @@ test('pre-registration signaling failures stay handled even without pending offe
     peer.destroy();
   } finally {
     process.off('unhandledRejection', onUnhandledRejection);
+    globalThis.window = originalWindow;
+    globalThis.WebSocket = originalWebSocket;
+    globalThis.RTCPeerConnection = originalRtcPeerConnection;
+  }
+});
+
+test('data channel errors close the connection so pending transfer waiters can be released', async () => {
+  FakeDataChannel.instances.length = 0;
+  FakeWebSocket.instances.length = 0;
+
+  const originalWindow = globalThis.window;
+  const originalWebSocket = globalThis.WebSocket;
+  const originalRtcPeerConnection = globalThis.RTCPeerConnection;
+
+  (globalThis as typeof globalThis & { window: Window & typeof globalThis }).window = {
+    location: {
+      origin: 'http://127.0.0.1:3000',
+      protocol: 'http:',
+    },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+  } as unknown as Window & typeof globalThis;
+  globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  globalThis.RTCPeerConnection = FakeRTCPeerConnection as unknown as typeof RTCPeerConnection;
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+    const connection = peer.connect('target-peer');
+    const errors: string[] = [];
+    let closeCount = 0;
+    connection.on('error', (error) => errors.push(error.type));
+    connection.on('close', () => {
+      closeCount += 1;
+    });
+
+    assert.equal(FakeDataChannel.instances.length, 1);
+    FakeDataChannel.instances[0].onerror?.();
+
+    assert.deepEqual(errors, ['webrtc-error']);
+    assert.equal(closeCount, 1);
+    assert.equal(FakeDataChannel.instances[0].readyState, 'closed');
+    assert.equal(connection.open, false);
+
+    peer.destroy();
+  } finally {
     globalThis.window = originalWindow;
     globalThis.WebSocket = originalWebSocket;
     globalThis.RTCPeerConnection = originalRtcPeerConnection;

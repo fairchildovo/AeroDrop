@@ -1,4 +1,5 @@
 import { TransferState, type NormalizedFileRequest } from '../../types/index.ts';
+import { TRANSFER_CONFIG } from '../../constants/transfer.ts';
 import { createResumeRequestMessage, normalizeFileRequest } from '../protocol.ts';
 import { logDebug } from '../diagnostics.ts';
 
@@ -111,6 +112,7 @@ export const createReceiveRecoveryCoordinator = (
         fileIndex,
         byteOffset: 0,
         silent: true,
+        receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
       });
       if (!sent) {
         options.failTransferPersistence('连接已断开，无法自动修复，请重试。');
@@ -142,6 +144,7 @@ export const createReceiveRecoveryCoordinator = (
       conn.send(buildResumeRequest({
         fileIndex: currentIdx + 1,
         byteOffset: 0,
+        receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
       }));
       options.setTransferState(TransferState.TRANSFERRING);
       return;
@@ -176,6 +179,7 @@ export const createReceiveRecoveryCoordinator = (
     conn.send(buildResumeRequest({
       fileIndex: currentIdx,
       byteOffset: canResumeCurrentFile ? byteOffset : 0,
+      receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
     }));
     options.setTransferState(TransferState.TRANSFERRING);
   };

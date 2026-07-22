@@ -92,6 +92,7 @@ export interface NormalizedFileRequest {
   fileIndex: number;
   byteOffset: number;
   silent?: boolean;
+  receiveWindowBytes: number;
 }
 
 export interface ChunkPayload {
@@ -121,16 +122,23 @@ export interface ResumePayload {
   fileIndex: number;
   byteOffset?: number;
   silent?: boolean;
+  receiveWindowBytes: number;
   // Backward compatibility for older clients.
   chunkIndex?: number;
 }
 
-export const P2P_PROTOCOL_VERSION = 2;
+export const P2P_PROTOCOL_VERSION = 3;
+
+export interface AcceptTransferPayload {
+  persistedOverallBytes: number;
+  receiveWindowBytes: number;
+}
 
 export interface TransferProgressPayload {
   overallTransferredBytes: number;
   overallTotalBytes: number;
   speedBytes: number;
+  receiveWindowBytes: number;
 }
 
 export interface RejectTransferPayload {
@@ -182,7 +190,7 @@ export type P2PMessageMap = {
   ALL_FILES_COMPLETE: undefined;
   ALL_FILES_RECEIVED: undefined;
   TRANSFER_PROGRESS: TransferProgressPayload;
-  ACCEPT_TRANSFER: undefined;
+  ACCEPT_TRANSFER: AcceptTransferPayload;
   REJECT_TRANSFER: RejectTransferPayload;
   RESUME_REQUEST: ResumePayload;
   TRANSFER_CANCELLED: TransferCancelledPayload;
