@@ -12,6 +12,8 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       };
       holdNextOpen: boolean;
       connectionCount: number;
+      connectionPolicies: RTCIceTransportPolicy[];
+      sentMessages: any[];
       latestConnection: FakeConnection | null;
       pendingConnections: FakeConnection[];
     };
@@ -38,6 +40,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       }
 
       send(message: any) {
+        this.scenario.sentMessages.push(message);
         if (message?.type === 'ROUTE_PROBE') {
           queueMicrotask(() => {
             this.emit('data', {
@@ -82,6 +85,11 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
         this.emit('close');
       }
 
+      remoteData(data: any) {
+        if (this.closed) return;
+        this.emit('data', data);
+      }
+
       private scheduleOpen() {
         if (this.scenario.holdNextOpen) {
           this.scenario.holdNextOpen = false;
@@ -106,9 +114,12 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       public connections: Record<string, FakeConnection[]> = {};
       private listeners = new Map<string, Array<(...args: any[]) => void>>();
       private id: string;
+      private iceTransportPolicy: RTCIceTransportPolicy;
 
-      constructor(idOrOptions?: string | Record<string, unknown>) {
+      constructor(idOrOptions?: string | Record<string, any>, maybeOptions?: Record<string, any>) {
         this.id = typeof idOrOptions === 'string' ? idOrOptions : `fake-peer-${Date.now()}`;
+        const options = typeof idOrOptions === 'string' ? maybeOptions : idOrOptions;
+        this.iceTransportPolicy = options?.config?.iceTransportPolicy ?? 'all';
         queueMicrotask(() => {
           if (this.destroyed) return;
           this.emit('open', this.id);
@@ -126,6 +137,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
         const code = targetPeerId.replace(/^aerodrop-/, '');
         const scenario = ensureScenario(code);
         scenario.connectionCount += 1;
+        scenario.connectionPolicies.push(this.iceTransportPolicy);
         const connection = new FakeConnection(this, scenario);
         scenario.latestConnection = connection;
         this.connections[targetPeerId] = [connection];
@@ -151,6 +163,10 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
     }
 
     const scenarios = new Map<string, Scenario>();
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15',
+    });
 
     const ensureScenario = (code: string): Scenario => {
       let scenario = scenarios.get(code);
@@ -162,16 +178,18 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
             files: [
               {
                 name: `file-${code}.txt`,
-                size: 1024,
+                size: 2 * 1024 * 1024,
                 type: 'text/plain',
                 lastModified: 0,
               },
             ],
-            totalSize: 1024,
+            totalSize: 2 * 1024 * 1024,
             protocolVersion: 3,
           },
           holdNextOpen: false,
           connectionCount: 0,
+          connectionPolicies: [],
+          sentMessages: [],
           latestConnection: null,
           pendingConnections: [],
         };
@@ -182,11 +200,15 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
 
     (window as Window & { __AERODROP_E2E__?: unknown }).__AERODROP_E2E__ = {
       getIceConfigOverride: () => ({
-        iceServers: [{ urls: 'stun:example.org:3478' }],
+        iceServers: [{
+          urls: 'turn:example.org:3478?transport=tcp',
+          username: 'e2e',
+          credential: 'e2e',
+        }],
         secure: true,
         iceCandidatePoolSize: 1,
         iceTransportPolicy: 'all',
-        hasTurn: false,
+        hasTurn: true,
         relayRecommended: false,
         relayReason: null,
         fetchLatencyMs: 0,
@@ -214,6 +236,31 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       },
       getConnectionCount(code: string) {
         return ensureScenario(code).connectionCount;
+      },
+      getConnectionPolicies(code: string) {
+        return ensureScenario(code).connectionPolicies;
+      },
+      getResumeRequests(code: string) {
+        return ensureScenario(code).sentMessages.filter((message) => message?.type === 'RESUME_REQUEST');
+      },
+      sendCommittedChunk(code: string, byteLength: number) {
+        const scenario = ensureScenario(code);
+        const connection = scenario.latestConnection;
+        connection?.remoteData({
+          type: 'FILE_START',
+          payload: {
+            fileIndex: 0,
+            fileName: scenario.metadata.files[0].name,
+            fileSize: scenario.metadata.files[0].size,
+            fileType: scenario.metadata.files[0].type,
+          },
+        });
+        connection?.remoteData(new Uint8Array(byteLength).buffer);
+      },
+      getPersistedProgress(code: string) {
+        return ensureScenario(code).sentMessages
+          .filter((message) => message?.type === 'TRANSFER_PROGRESS')
+          .map((message) => message.payload.overallTransferredBytes);
       },
     };
   });
@@ -246,6 +293,34 @@ const openLatest = async (page: import('@playwright/test').Page, code: string) =
 const getConnectionCount = async (page: import('@playwright/test').Page, code: string) => {
   return page.evaluate(([scenarioCode]) => {
     return (window as any).__AERODROP_E2E_DRIVER__.getConnectionCount(scenarioCode);
+  }, [code]);
+};
+
+const getConnectionPolicies = async (page: import('@playwright/test').Page, code: string) => {
+  return page.evaluate(([scenarioCode]) => {
+    return (window as any).__AERODROP_E2E_DRIVER__.getConnectionPolicies(scenarioCode);
+  }, [code]);
+};
+
+const getResumeRequests = async (page: import('@playwright/test').Page, code: string) => {
+  return page.evaluate(([scenarioCode]) => {
+    return (window as any).__AERODROP_E2E_DRIVER__.getResumeRequests(scenarioCode);
+  }, [code]);
+};
+
+const sendCommittedChunk = async (
+  page: import('@playwright/test').Page,
+  code: string,
+  byteLength: number,
+) => {
+  await page.evaluate(([scenarioCode, size]) => {
+    (window as any).__AERODROP_E2E_DRIVER__.sendCommittedChunk(scenarioCode, size);
+  }, [code, byteLength] as const);
+};
+
+const getPersistedProgress = async (page: import('@playwright/test').Page, code: string) => {
+  return page.evaluate(([scenarioCode]) => {
+    return (window as any).__AERODROP_E2E_DRIVER__.getPersistedProgress(scenarioCode);
   }, [code]);
 };
 
@@ -309,6 +384,38 @@ test('receiver auto-recovers after a disconnect and returns to resumable state',
 
   await expect(page.getByRole('button', { name: '继续下载' })).toBeVisible();
   await expect.poll(async () => getConnectionCount(page, '1111')).toBe(2);
+});
+
+test('stalled persisted progress reconnects through relay and resumes from the committed offset', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/');
+  await setScenario(page, '4444');
+  await page.getByRole('button', { name: '接收' }).click();
+  await page.locator('input[type="text"]').fill('4444');
+
+  await expect(page.getByRole('button', { name: '确认并下载' })).toBeVisible();
+  await page.getByRole('button', { name: '确认并下载' }).click();
+  await expect(page.getByText('当前文件进度')).toBeVisible();
+
+  const committedBytes = 1024 * 1024;
+  await sendCommittedChunk(page, '4444', committedBytes);
+  await expect.poll(async () => getPersistedProgress(page, '4444')).toContain(committedBytes);
+
+  await page.clock.fastForward(14_000);
+
+  await expect.poll(async () => getConnectionCount(page, '4444')).toBe(2);
+  await expect.poll(async () => getConnectionPolicies(page, '4444')).toEqual(['all', 'relay']);
+  await expect.poll(async () => getResumeRequests(page, '4444')).toEqual([
+    {
+      type: 'RESUME_REQUEST',
+      payload: {
+        fileIndex: 0,
+        byteOffset: committedBytes,
+        silent: false,
+        receiveWindowBytes: 2 * 1024 * 1024,
+      },
+    },
+  ]);
 });
 
 test('cancel during reconnect clears stale timers and allows a clean reconnect', async ({ page }) => {

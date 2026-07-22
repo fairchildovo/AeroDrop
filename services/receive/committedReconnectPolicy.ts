@@ -12,3 +12,17 @@ export const shouldAutoReconnectCommittedSession = (options: {
 
 export const getCommittedSessionReconnectDelayMs = (attempt: number) =>
   Math.min(600 * Math.max(1, attempt), 3000);
+
+export const shouldReconnectStalledCommittedTransfer = (options: {
+  currentState: TransferState;
+  transferActive: boolean;
+  connectionOpen: boolean;
+  lastProgressAtMs: number;
+  nowMs: number;
+  timeoutMs: number;
+}) =>
+  options.currentState === TransferState.TRANSFERRING &&
+  options.transferActive &&
+  options.connectionOpen &&
+  options.lastProgressAtMs > 0 &&
+  options.nowMs - options.lastProgressAtMs >= options.timeoutMs;
