@@ -5,6 +5,7 @@ import { TransferState } from '../../types/index.ts';
 import {
   getCommittedSessionReconnectDelayMs,
   shouldAutoReconnectCommittedSession,
+  shouldReconnectStalledCommittedTransfer,
 } from './committedReconnectPolicy.ts';
 
 test('auto reconnect is allowed for committed peer-connected sessions', () => {
@@ -60,4 +61,24 @@ test('reconnect delay uses bounded backoff', () => {
   assert.equal(getCommittedSessionReconnectDelayMs(1), 600);
   assert.equal(getCommittedSessionReconnectDelayMs(2), 1200);
   assert.equal(getCommittedSessionReconnectDelayMs(10), 3000);
+});
+
+test('stalled committed transfer reconnects only after persisted progress stops', () => {
+  const base = {
+    currentState: TransferState.TRANSFERRING,
+    transferActive: true,
+    connectionOpen: true,
+    lastProgressAtMs: 1_000,
+    timeoutMs: 12_000,
+  };
+
+  assert.equal(shouldReconnectStalledCommittedTransfer({ ...base, nowMs: 12_999 }), false);
+  assert.equal(shouldReconnectStalledCommittedTransfer({ ...base, nowMs: 13_000 }), true);
+  assert.equal(shouldReconnectStalledCommittedTransfer({ ...base, nowMs: 20_000, transferActive: false }), false);
+  assert.equal(shouldReconnectStalledCommittedTransfer({ ...base, nowMs: 20_000, connectionOpen: false }), false);
+  assert.equal(shouldReconnectStalledCommittedTransfer({
+    ...base,
+    nowMs: 20_000,
+    currentState: TransferState.PEER_CONNECTED,
+  }), false);
 });

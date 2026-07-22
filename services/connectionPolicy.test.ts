@@ -90,3 +90,26 @@ test('constrained mobile network keeps all first and relay as fast background fa
   assert.equal(plan.backgroundPolicy, 'relay');
   assert.equal(plan.reason, 'mobile_network');
 });
+
+test('a stalled committed transfer retries through relay without changing the default P2P policy', () => {
+  const forced = createHappyEyeballsPlan(baseIceConfig(), baseProfile(), {
+    ...options,
+    forceRelay: true,
+  });
+  const withoutTurn = createHappyEyeballsPlan(
+    baseIceConfig({ hasTurn: false, iceServers: [] }),
+    baseProfile(),
+    { ...options, forceRelay: true },
+  );
+
+  assert.deepEqual(forced, {
+    initialPolicy: 'relay',
+    backgroundPolicy: null,
+    initialTimeoutMs: 25000,
+    backgroundDelayMs: null,
+    backgroundTimeoutMs: null,
+    reason: 'stalled_transfer',
+  });
+  assert.equal(withoutTurn.initialPolicy, 'all');
+  assert.equal(withoutTurn.reason, 'default');
+});

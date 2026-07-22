@@ -8,12 +8,13 @@ export type HappyEyeballsPlan = {
   initialTimeoutMs: number;
   backgroundDelayMs: number | null;
   backgroundTimeoutMs: number | null;
-  reason: 'default' | 'relay_recommended' | 'mobile_network' | 'constrained_network';
+  reason: 'default' | 'relay_recommended' | 'mobile_network' | 'constrained_network' | 'stalled_transfer';
 };
 
 type ConnectionPolicyOptions = {
   defaultInitialTimeoutMs: number;
   relayInitialTimeoutMs: number;
+  forceRelay?: boolean;
 };
 
 const getRelayPrewarmReason = (
@@ -47,6 +48,17 @@ export const createHappyEyeballsPlan = (
   profile: BrowserNetworkProfile,
   options: ConnectionPolicyOptions
 ): HappyEyeballsPlan => {
+  if (iceConfig.hasTurn && options.forceRelay) {
+    return {
+      initialPolicy: 'relay',
+      backgroundPolicy: null,
+      initialTimeoutMs: options.relayInitialTimeoutMs,
+      backgroundDelayMs: null,
+      backgroundTimeoutMs: null,
+      reason: 'stalled_transfer',
+    };
+  }
+
   const relayPrewarmReason = getRelayPrewarmReason(iceConfig, profile);
   const routeTimings = getRouteSelectionTimings({
     isMobileDevice: profile.isMobileDevice,
