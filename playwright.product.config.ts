@@ -9,7 +9,7 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:8787',
+    baseURL: process.env.AERODROP_BASE_URL ?? 'http://127.0.0.1:8787',
     // Ephemeral TURN credentials are injected into the page for this test.
     trace: 'off',
   },

@@ -171,8 +171,9 @@ test('production Sender and Receiver transfer and persist a 2 MiB file', async (
     });
 
     expect(route).not.toBeNull();
-    expect(['host', 'srflx']).toContain(route?.localCandidateType);
-    expect(['host', 'srflx']).toContain(route?.remoteCandidateType);
+    const directCandidateTypes = ['host', 'srflx', 'prflx'];
+    expect(directCandidateTypes).toContain(route?.localCandidateType);
+    expect(directCandidateTypes).toContain(route?.remoteCandidateType);
     expect(route?.localCandidateType).not.toBe('relay');
     expect(route?.remoteCandidateType).not.toBe('relay');
     expect(route?.pathType).not.toBe('TURN');
